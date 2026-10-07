@@ -117,8 +117,12 @@ fn copy_up_writes_its_destination_without_re_entering_the_hooks() {
     );
 
     let build_engine = || {
-        Engine::with_overlay(root.to_str().unwrap(), overlay.to_str().unwrap(), snapshot.clone())
-            .unwrap()
+        Engine::with_overlay(
+            root.to_str().unwrap(),
+            overlay.to_str().unwrap(),
+            snapshot.clone(),
+        )
+        .unwrap()
     };
     // The engine the hooks consult…
     let hooks = install(build_engine()).expect("install");

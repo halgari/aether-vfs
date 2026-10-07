@@ -186,7 +186,10 @@ struct PathCacheState {
 
 impl PathCache {
     fn new(capacity: usize) -> Self {
-        PathCache { capacity: capacity.max(1), state: RwLock::new(PathCacheState::default()) }
+        PathCache {
+            capacity: capacity.max(1),
+            state: RwLock::new(PathCacheState::default()),
+        }
     }
 
     /// A lock-poisoning thread (one that panicked while holding the lock) must
@@ -217,7 +220,11 @@ impl PathCache {
 
     #[cfg(test)]
     fn len(&self) -> usize {
-        self.state.read().unwrap_or_else(|e| e.into_inner()).map.len()
+        self.state
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .map
+            .len()
     }
 }
 
@@ -374,7 +381,10 @@ impl RootMap {
     /// The normalized components of the deepest declared root (original case).
     /// For tests/diagnostics.
     pub fn root_components(&self) -> &[String] {
-        self.roots.first().map(|r| r.comps.as_slice()).unwrap_or(&[])
+        self.roots
+            .first()
+            .map(|r| r.comps.as_slice())
+            .unwrap_or(&[])
     }
 
     /// Which declared root `nt_path` falls under, and its folded remainder
@@ -463,9 +473,9 @@ impl RootMap {
                     // STATUS_OBJECT_NAME_NOT_FOUND whenever the FUSE client was
                     // installed, which bootstrap guarantees.
                     vfs_core::Source::ZipWindow { .. } => Decision::Deny,
-                    vfs_core::Source::Disk(bytes) => {
-                        Decision::Redirect { target_nt: render_nt(bytes) }
-                    }
+                    vfs_core::Source::Disk(bytes) => Decision::Redirect {
+                        target_nt: render_nt(bytes),
+                    },
                 }
             }
             Located::Resolved(SnapResolution::Tombstone)
@@ -603,8 +613,11 @@ impl RootMap {
     /// which is the only ordering that does not let a shallow root swallow a
     /// deep one.
     fn match_canonical(&self, canon: &str) -> Option<RootHit> {
-        let comps: Vec<&str> =
-            if canon.is_empty() { Vec::new() } else { canon.split('/').collect() };
+        let comps: Vec<&str> = if canon.is_empty() {
+            Vec::new()
+        } else {
+            canon.split('/').collect()
+        };
         'roots: for root in &self.roots {
             if comps.len() < root.comps.len() {
                 continue;
@@ -880,7 +893,11 @@ pub fn write_dir_info(
     } else {
         DirStatus::Success
     };
-    DirWriteResult { bytes: last_end, count, status }
+    DirWriteResult {
+        bytes: last_end,
+        count,
+        status,
+    }
 }
 
 /// NtCreateFile create dispositions.
@@ -965,15 +982,24 @@ pub fn write_file_name_info(name: &str, buf: &mut [u8]) -> NameWriteResult {
     let name16: Vec<u16> = name.encode_utf16().collect();
     let namelen = name16.len() * 2;
     if buf.len() < 4 {
-        return NameWriteResult { bytes: 0, status: DirStatus::BufferOverflow };
+        return NameWriteResult {
+            bytes: 0,
+            status: DirStatus::BufferOverflow,
+        };
     }
     buf[0..4].copy_from_slice(&(namelen as u32).to_le_bytes());
     if buf.len() < 4 + namelen {
-        return NameWriteResult { bytes: 4, status: DirStatus::BufferOverflow };
+        return NameWriteResult {
+            bytes: 4,
+            status: DirStatus::BufferOverflow,
+        };
     }
     let nb: Vec<u8> = name16.iter().flat_map(|u| u.to_le_bytes()).collect();
     buf[4..4 + namelen].copy_from_slice(&nb);
-    NameWriteResult { bytes: 4 + namelen, status: DirStatus::Success }
+    NameWriteResult {
+        bytes: 4 + namelen,
+        status: DirStatus::Success,
+    }
 }
 
 #[cfg(test)]
@@ -989,7 +1015,10 @@ mod tests {
     #[test]
     fn os_consult_guard_refuses_reentry_and_releases_on_drop() {
         let outer = OsConsultGuard::enter().expect("first enter must succeed");
-        assert!(OsConsultGuard::enter().is_none(), "a nested enter while held must refuse");
+        assert!(
+            OsConsultGuard::enter().is_none(),
+            "a nested enter while held must refuse"
+        );
         drop(outer);
         assert!(
             OsConsultGuard::enter().is_some(),
@@ -1058,7 +1087,10 @@ mod tests {
         );
         assert_eq!(
             map.resolve(r"\??\C:\Users\me\Documents\My Games\Skyrim\Saves\Save1.ess"),
-            Some((RootId(1), vec!["saves".to_string(), "save1.ess".to_string()]))
+            Some((
+                RootId(1),
+                vec!["saves".to_string(), "save1.ess".to_string()]
+            ))
         );
         assert_eq!(map.resolve(r"\??\C:\Windows\System32\kernel32.dll"), None);
         // The same *relative* path under each root is a different answer —
@@ -1068,7 +1100,9 @@ mod tests {
             RootId(0)
         );
         assert_eq!(
-            map.resolve(r"C:\Users\me\Documents\My Games\Skyrim\same.txt").unwrap().0,
+            map.resolve(r"C:\Users\me\Documents\My Games\Skyrim\same.txt")
+                .unwrap()
+                .0,
             RootId(1)
         );
     }
@@ -1132,21 +1166,28 @@ mod tests {
         let mut volumes = VolumeMap::empty();
         volumes.insert(r"\Device\HarddiskVolume3", 'C');
         let map = RootMap::with_roots(
-            &[(RootId(0), r"C:\Games\Skyrim"), (RootId(1), r"C:\Docs\Skyrim")],
+            &[
+                (RootId(0), r"C:\Games\Skyrim"),
+                (RootId(1), r"C:\Docs\Skyrim"),
+            ],
             volumes,
         )
         .unwrap();
         assert_eq!(
-            map.resolve(r"\Device\HarddiskVolume3\Games\Skyrim\Data\a.esp").map(|(r, _)| r),
+            map.resolve(r"\Device\HarddiskVolume3\Games\Skyrim\Data\a.esp")
+                .map(|(r, _)| r),
             Some(RootId(0))
         );
         assert_eq!(
-            map.resolve(r"\Device\HarddiskVolume3\Docs\Skyrim\Saves\a.ess").map(|(r, _)| r),
+            map.resolve(r"\Device\HarddiskVolume3\Docs\Skyrim\Saves\a.ess")
+                .map(|(r, _)| r),
             Some(RootId(1)),
             "the second root must canonicalise exactly like the first"
         );
         // And the over-eager direction still fails closed for both.
-        assert!(map.resolve(r"\Device\HarddiskVolume3\Windows\System32\x.dll").is_none());
+        assert!(map
+            .resolve(r"\Device\HarddiskVolume3\Windows\System32\x.dll")
+            .is_none());
     }
 
     #[test]
@@ -1204,7 +1245,9 @@ mod tests {
         let d = root().decide(r"\??\C:\Games\Skyrim\Data\foo.esp", &snap);
         assert_eq!(
             d,
-            Decision::Redirect { target_nt: r"\??\D:\Mods\Cool\foo.esp".to_string() }
+            Decision::Redirect {
+                target_nt: r"\??\D:\Mods\Cool\foo.esp".to_string()
+            }
         );
     }
 
@@ -1215,7 +1258,9 @@ mod tests {
         let d = root().decide(r"\??\c:\games\SKYRIM\DATA\Foo.ESP", &snap);
         assert_eq!(
             d,
-            Decision::Redirect { target_nt: r"\??\D:\Mods\Cool\foo.esp".to_string() }
+            Decision::Redirect {
+                target_nt: r"\??\D:\Mods\Cool\foo.esp".to_string()
+            }
         );
     }
 
@@ -1273,11 +1318,14 @@ mod tests {
     /// string.
     #[test]
     fn real_on_disk_file_under_root_with_no_snapshot_entry_is_denied() {
-        let base = std::env::temp_dir()
-            .join(format!("vfs-redirect-negcanary-{}", std::process::id()));
+        let base =
+            std::env::temp_dir().join(format!("vfs-redirect-negcanary-{}", std::process::id()));
         std::fs::create_dir_all(base.join("Data")).unwrap();
-        std::fs::write(base.join("Data").join("negative-canary.bin"), b"real bytes on disk")
-            .unwrap();
+        std::fs::write(
+            base.join("Data").join("negative-canary.bin"),
+            b"real bytes on disk",
+        )
+        .unwrap();
 
         let map = RootMap::new(&base.to_string_lossy(), VolumeMap::empty()).unwrap();
         // A snapshot that knows about a completely unrelated file, so `Data`
@@ -1314,7 +1362,9 @@ mod tests {
         let d = win32_root.decide(r"\??\C:\Games\Skyrim\Data\foo.esp", &snap);
         assert_eq!(
             d,
-            Decision::Redirect { target_nt: r"\??\D:\Mods\Cool\foo.esp".to_string() }
+            Decision::Redirect {
+                target_nt: r"\??\D:\Mods\Cool\foo.esp".to_string()
+            }
         );
     }
 
@@ -1337,7 +1387,9 @@ mod tests {
         let d = root().decide(r"\??\C:\Games\Skyrim\Data\foo.esp", &snap);
         assert_eq!(
             d,
-            Decision::Redirect { target_nt: r"\??\D:\Mods\Cool\foo.esp".to_string() }
+            Decision::Redirect {
+                target_nt: r"\??\D:\Mods\Cool\foo.esp".to_string()
+            }
         );
     }
 
@@ -1361,7 +1413,12 @@ mod tests {
     }
 
     fn ditem(name: &str, is_dir: bool, size: u64) -> DirItem {
-        DirItem { name: name.into(), is_dir, size, mtime: 0 }
+        DirItem {
+            name: name.into(),
+            is_dir,
+            size,
+            mtime: 0,
+        }
     }
 
     fn ru32(buf: &[u8], rec: usize, off: usize) -> u32 {
@@ -1410,7 +1467,12 @@ mod tests {
         // 2026-10-03T21:13:45Z.
         let mtime = 1_791_062_025;
         let want = (mtime + 11_644_473_600) * 10_000_000;
-        let save = DirItem { name: "Save1.ess".into(), is_dir: false, size: 9, mtime };
+        let save = DirItem {
+            name: "Save1.ess".into(),
+            is_dir: false,
+            size: 9,
+            mtime,
+        };
         for class in [
             DirInfoClass::Directory,
             DirInfoClass::FullDirectory,
@@ -1514,7 +1576,10 @@ mod tests {
             r"\Games\Skyrim\Data\foo.esp"
         );
         assert_eq!(nt_to_volume_relative(r"\\?\D:\Mods\x.esp"), r"\Mods\x.esp");
-        assert_eq!(nt_to_volume_relative(r"\Games\already.esp"), r"\Games\already.esp");
+        assert_eq!(
+            nt_to_volume_relative(r"\Games\already.esp"),
+            r"\Games\already.esp"
+        );
     }
 
     #[test]
@@ -1523,10 +1588,20 @@ mod tests {
         let r = write_file_name_info(r"\Games\Skyrim\Data\foo.esp", &mut buf);
         assert_eq!(r.status, DirStatus::Success);
         let namelen = u32::from_le_bytes(buf[0..4].try_into().unwrap()) as usize;
-        assert_eq!(namelen, r"\Games\Skyrim\Data\foo.esp".encode_utf16().count() * 2);
-        let units: Vec<u16> =
-            buf[4..4 + namelen].as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes(*c)).collect();
-        assert_eq!(String::from_utf16_lossy(&units), r"\Games\Skyrim\Data\foo.esp");
+        assert_eq!(
+            namelen,
+            r"\Games\Skyrim\Data\foo.esp".encode_utf16().count() * 2
+        );
+        let units: Vec<u16> = buf[4..4 + namelen]
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| u16::from_le_bytes(*c))
+            .collect();
+        assert_eq!(
+            String::from_utf16_lossy(&units),
+            r"\Games\Skyrim\Data\foo.esp"
+        );
         assert_eq!(r.bytes, 4 + namelen);
     }
 
@@ -1558,22 +1633,34 @@ mod tests {
         // Read: SYNCHRONIZE|READ_DATA, disp OPEN -> not a write.
         assert_eq!(
             classify_open(0x0010_0001, FILE_OPEN),
-            WriteIntent { write: false, preserves: true }
+            WriteIntent {
+                write: false,
+                preserves: true
+            }
         );
         // GENERIC_WRITE + OPEN_IF -> write, preserves (COW-materialize).
         assert_eq!(
             classify_open(0x4010_0080, FILE_OPEN_IF),
-            WriteIntent { write: true, preserves: true }
+            WriteIntent {
+                write: true,
+                preserves: true
+            }
         );
         // GENERIC_WRITE + OVERWRITE_IF -> write, does not preserve (truncate).
         assert_eq!(
             classify_open(0x4000_0000, FILE_OVERWRITE_IF),
-            WriteIntent { write: true, preserves: false }
+            WriteIntent {
+                write: true,
+                preserves: false
+            }
         );
         // APPEND_DATA + CREATE -> write, create (no preserve).
         assert_eq!(
             classify_open(0x4, FILE_CREATE),
-            WriteIntent { write: true, preserves: false }
+            WriteIntent {
+                write: true,
+                preserves: false
+            }
         );
     }
 
@@ -1657,8 +1744,10 @@ mod tests {
     #[test]
     #[cfg(windows)]
     fn under_root_recognises_an_8dot3_style_spelling_of_the_root() {
-        let base = std::env::temp_dir()
-            .join(format!("vfs-redirect-830-under-root-{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!(
+            "vfs-redirect-830-under-root-{}",
+            std::process::id()
+        ));
         let long_name = "ThisIsALongRootDirectoryNameForShortNameTesting";
         let root_dir = base.join(long_name);
         std::fs::create_dir_all(root_dir.join("Data")).unwrap();
@@ -1689,7 +1778,10 @@ mod tests {
 
         let map = RootMap::new(&root_str, VolumeMap::empty()).unwrap();
         let raw = format!(r"{short_root}\Data\a.esp");
-        assert!(map.contains(&raw), "8.3-spelled root was not recognised as inside: {raw}");
+        assert!(
+            map.contains(&raw),
+            "8.3-spelled root was not recognised as inside: {raw}"
+        );
 
         std::fs::remove_dir_all(&base).ok();
     }
@@ -1743,8 +1835,8 @@ mod tests {
     #[ignore = "known gap: expanding the declared root here desynchronises vfs-shim's \
                 own view of it — see this test's doc comment for the measurement"]
     fn a_root_declared_in_8dot3_form_recognises_its_long_form_paths() {
-        let base = std::env::temp_dir()
-            .join(format!("vfs-redirect-830-declared-{}", std::process::id()));
+        let base =
+            std::env::temp_dir().join(format!("vfs-redirect-830-declared-{}", std::process::id()));
         let long_name = "ThisIsALongRootDirectoryNameDeclaredShort";
         let root_dir = base.join(long_name);
         std::fs::create_dir_all(root_dir.join("Data")).unwrap();
@@ -1790,11 +1882,15 @@ mod tests {
     /// be served from the cache rather than recomputed.
     #[test]
     fn deterministic_resolution_is_cached() {
-        let map = RootMap::new_with_cache_capacity(r"C:\Games\Skyrim", VolumeMap::empty(), 8)
-            .unwrap();
+        let map =
+            RootMap::new_with_cache_capacity(r"C:\Games\Skyrim", VolumeMap::empty(), 8).unwrap();
         let raw = r"C:\Games\Skyrim\Data\a.esp"; // no `~`: never reaches the OS branch.
         assert!(map.contains(raw));
-        assert_eq!(map.cache_len(), 1, "a deterministic resolution was not cached");
+        assert_eq!(
+            map.cache_len(),
+            1,
+            "a deterministic resolution was not cached"
+        );
         assert!(map.contains(raw));
         assert_eq!(map.cache_len(), 1, "the second lookup added a second entry");
     }
@@ -1817,8 +1913,8 @@ mod tests {
     #[test]
     #[cfg(windows)]
     fn os_consulted_resolution_is_never_cached() {
-        let base = std::env::temp_dir()
-            .join(format!("vfs-redirect-830-no-cache-{}", std::process::id()));
+        let base =
+            std::env::temp_dir().join(format!("vfs-redirect-830-no-cache-{}", std::process::id()));
         let long_name = "ThisIsALongRootDirectoryNameForNoCacheTesting";
         let root_dir = base.join(long_name);
         std::fs::create_dir_all(root_dir.join("Data")).unwrap();
@@ -1843,7 +1939,11 @@ mod tests {
         assert_eq!(map.os_consult_count(), 1);
 
         assert!(map.contains(&raw));
-        assert_eq!(map.cache_len(), 0, "an OS-consulted resolution was cached on a second lookup");
+        assert_eq!(
+            map.cache_len(),
+            0,
+            "an OS-consulted resolution was cached on a second lookup"
+        );
         assert_eq!(
             map.os_consult_count(),
             2,
@@ -1878,7 +1978,11 @@ mod tests {
         {
             let _guard = UncachedScope::enter();
             assert!(map.contains(raw));
-            assert_eq!(map.compute_count(), 1, "the first guarded lookup did not compute at all");
+            assert_eq!(
+                map.compute_count(),
+                1,
+                "the first guarded lookup did not compute at all"
+            );
             assert_eq!(map.cache_len(), 0, "a guarded lookup was cached");
 
             assert!(map.contains(raw));
@@ -1888,15 +1992,27 @@ mod tests {
                 "a second lookup of the identical raw string, still under the guard, was served \
                  from the cache instead of being recomputed -- it must recompute every time"
             );
-            assert_eq!(map.cache_len(), 0, "a guarded lookup was cached on a second pass");
+            assert_eq!(
+                map.cache_len(),
+                0,
+                "a guarded lookup was cached on a second pass"
+            );
         }
 
         // The guard is dropped: this is a genuine first-ever cache miss for
         // `raw` (nothing above ever inserted), so it recomputes once more and
         // this time gets cached.
         assert!(map.contains(raw));
-        assert_eq!(map.compute_count(), 3, "the first unguarded lookup did not recompute");
-        assert_eq!(map.cache_len(), 1, "caching did not resume once the guard was dropped");
+        assert_eq!(
+            map.compute_count(),
+            3,
+            "the first unguarded lookup did not recompute"
+        );
+        assert_eq!(
+            map.cache_len(),
+            1,
+            "caching did not resume once the guard was dropped"
+        );
 
         // A second unguarded lookup is a genuine cache hit: proves the
         // suppression above came specifically from the guard, not from some
@@ -1931,22 +2047,27 @@ mod tests {
     #[test]
     #[cfg(windows)]
     fn os_resolved_dos_prefixed_path_still_canonicalises_correctly() {
-        let dir =
-            std::env::temp_dir().join(format!("vfs-redirect-dosform-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vfs-redirect-dosform-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("plain.txt");
         std::fs::write(&file, b"x").unwrap();
 
         let resolved = vfs_win::final_path_for_open(file.to_str().unwrap())
             .expect("should resolve an existing file");
-        assert!(resolved.starts_with(r"\\?\"), "expected VOLUME_NAME_DOS form: {resolved}");
+        assert!(
+            resolved.starts_with(r"\\?\"),
+            "expected VOLUME_NAME_DOS form: {resolved}"
+        );
 
         let canon = canonicalise(&resolved, &VolumeMap::empty()).unwrap();
         assert!(
             canon.to_ascii_lowercase().ends_with("plain.txt"),
             "lost the file name: {canon}"
         );
-        assert!(!canon.contains('?'), "leftover NT/DOS prefix marker in canonical form: {canon}");
+        assert!(
+            !canon.contains('?'),
+            "leftover NT/DOS prefix marker in canonical form: {canon}"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1958,20 +2079,24 @@ mod tests {
     /// process.
     #[test]
     fn cache_evicts_rather_than_growing_without_bound() {
-        let map = RootMap::new_with_cache_capacity(r"C:\Games\Skyrim", VolumeMap::empty(), 2)
-            .unwrap();
+        let map =
+            RootMap::new_with_cache_capacity(r"C:\Games\Skyrim", VolumeMap::empty(), 2).unwrap();
         map.contains(r"C:\Games\Skyrim\Data\a.esp");
         map.contains(r"C:\Games\Skyrim\Data\b.esp");
         map.contains(r"C:\Games\Skyrim\Data\c.esp");
-        assert!(map.cache_len() <= 2, "cache grew past its capacity: {}", map.cache_len());
+        assert!(
+            map.cache_len() <= 2,
+            "cache grew past its capacity: {}",
+            map.cache_len()
+        );
     }
 
     /// The same raw spelling queried twice is a single cache entry, not two —
     /// the whole point of keying on the raw input string.
     #[test]
     fn repeated_raw_spelling_is_one_cache_entry() {
-        let map = RootMap::new_with_cache_capacity(r"C:\Games\Skyrim", VolumeMap::empty(), 8)
-            .unwrap();
+        let map =
+            RootMap::new_with_cache_capacity(r"C:\Games\Skyrim", VolumeMap::empty(), 8).unwrap();
         let raw = r"C:\Games\Skyrim\Data\a.esp";
         map.contains(raw);
         map.contains(raw);
@@ -1990,8 +2115,10 @@ mod tests {
     #[test]
     #[cfg(windows)]
     fn under_root_fallback_branch_does_not_pull_in_a_path_outside_the_root() {
-        let base = std::env::temp_dir()
-            .join(format!("vfs-redirect-830-over-eager-{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!(
+            "vfs-redirect-830-over-eager-{}",
+            std::process::id()
+        ));
         let root_dir = base.join("TheManagedRootDirectory");
         let outside_dir = base.join("ANeighbouringDirectoryNotUnderTheRootAtAll");
         std::fs::create_dir_all(&root_dir).unwrap();
@@ -2049,32 +2176,59 @@ mod tests {
         ("win32-plain", r"C:{REST}"),
         ("dosdevices", r"\??\C:{REST}"),
         // The three that were broken.
-        ("globalroot-global-dosdevices", r"\??\GLOBALROOT\GLOBAL??\C:{REST}"),
+        (
+            "globalroot-global-dosdevices",
+            r"\??\GLOBALROOT\GLOBAL??\C:{REST}",
+        ),
         ("globalroot-dosdevices", r"\??\GLOBALROOT\??\C:{REST}"),
         ("global-dosdevices-bare", r"\GLOBAL??\C:{REST}"),
         // The `Global` symlink to `\GLOBAL??`, and nested combinations. Found
         // while enumerating siblings, not reported to this task.
         ("global-symlink", r"\??\Global\C:{REST}"),
-        ("global-dosdevices-global-symlink", r"\GLOBAL??\Global\C:{REST}"),
-        ("global-symlink-globalroot-global", r"\??\Global\GLOBALROOT\GLOBAL??\C:{REST}"),
-        ("global-dosdevices-globalroot-global", r"\GLOBAL??\GLOBALROOT\GLOBAL??\C:{REST}"),
+        (
+            "global-dosdevices-global-symlink",
+            r"\GLOBAL??\Global\C:{REST}",
+        ),
+        (
+            "global-symlink-globalroot-global",
+            r"\??\Global\GLOBALROOT\GLOBAL??\C:{REST}",
+        ),
+        (
+            "global-dosdevices-globalroot-global",
+            r"\GLOBAL??\GLOBALROOT\GLOBAL??\C:{REST}",
+        ),
         // Case: NT object-manager names are case-insensitive.
-        ("globalroot-global-lowercase", r"\??\globalroot\global??\c:{REST}"),
+        (
+            "globalroot-global-lowercase",
+            r"\??\globalroot\global??\c:{REST}",
+        ),
         // Device spellings: vector 3's own colon-free form, its bare
         // equivalent, and the same behind the other DosDevices spelling.
         ("device-bare", r"\Device\HarddiskVolume3{REST}"),
-        ("globalroot-device", r"\??\GLOBALROOT\Device\HarddiskVolume3{REST}"),
-        ("global-dosdevices-globalroot-device", r"\GLOBAL??\GLOBALROOT\Device\HarddiskVolume3{REST}"),
+        (
+            "globalroot-device",
+            r"\??\GLOBALROOT\Device\HarddiskVolume3{REST}",
+        ),
+        (
+            "global-dosdevices-globalroot-device",
+            r"\GLOBAL??\GLOBALROOT\Device\HarddiskVolume3{REST}",
+        ),
         // Volume GUID, in the `\??\`-keyed spelling a real open presents, and
         // behind the wrapper that used to hide it from `VolumeMap::resolve`.
-        ("volume-guid", r"\??\Volume{12345678-1234-1234-1234-123456789abc}{REST}"),
+        (
+            "volume-guid",
+            r"\??\Volume{12345678-1234-1234-1234-123456789abc}{REST}",
+        ),
         (
             "globalroot-global-volume-guid",
             r"\??\GLOBALROOT\GLOBAL??\Volume{12345678-1234-1234-1234-123456789abc}{REST}",
         ),
         // The administrative UNC share, likewise.
         ("unc-admin-share", r"\??\UNC\localhost\C${REST}"),
-        ("global-dosdevices-unc-admin-share", r"\GLOBAL??\UNC\localhost\C${REST}"),
+        (
+            "global-dosdevices-unc-admin-share",
+            r"\GLOBAL??\UNC\localhost\C${REST}",
+        ),
     ];
 
     /// The session-frozen alias table these vectors resolve against, keyed

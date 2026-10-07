@@ -16,8 +16,8 @@
 use std::ffi::c_void;
 use vfs_shim::{install, Engine};
 use windows_sys::Win32::Storage::FileSystem::{
-    GetFileAttributesExW, GetFileAttributesW, GetFileExInfoStandard,
-    INVALID_FILE_ATTRIBUTES, WIN32_FILE_ATTRIBUTE_DATA,
+    GetFileAttributesExW, GetFileAttributesW, GetFileExInfoStandard, INVALID_FILE_ATTRIBUTES,
+    WIN32_FILE_ATTRIBUTE_DATA,
 };
 
 fn wide(s: &str) -> Vec<u16> {

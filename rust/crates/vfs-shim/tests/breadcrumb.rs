@@ -66,7 +66,10 @@ fn an_outside_reader_can_see_which_hook_the_process_is_in() {
     );
 
     let (magic, _, entries_before, _, _) = read_file_breadcrumb(&crumb);
-    assert_eq!(magic, MAGIC, "magic must be stamped so a zeroed page is not misread");
+    assert_eq!(
+        magic, MAGIC,
+        "magic must be stamped so a zeroed page is not misread"
+    );
 
     // Drive some hooked file activity.
     let content = std::fs::read(root.join("mod.esp")).expect("read the virtual file");

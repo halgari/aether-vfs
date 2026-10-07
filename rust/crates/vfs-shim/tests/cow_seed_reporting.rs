@@ -105,8 +105,12 @@ fn a_failed_copy_up_names_the_file_and_the_reason_in_the_stats_report() {
     );
 
     let build_engine = || {
-        Engine::with_overlay(root.to_str().unwrap(), overlay.to_str().unwrap(), snapshot.clone())
-            .unwrap()
+        Engine::with_overlay(
+            root.to_str().unwrap(),
+            overlay.to_str().unwrap(),
+            snapshot.clone(),
+        )
+        .unwrap()
     };
     let hooks = install(build_engine()).expect("install");
     // An identically-configured second instance to drive the seeded half from,

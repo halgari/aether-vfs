@@ -68,7 +68,11 @@ const WRITTEN: &[u8] = b"written through the director";
 /// case-insensitively, so the fixture spells the names the way the game does.
 const NAMES: &[(&str, &str, &[u8])] = &[
     ("steam_appid.txt", "steam_appid.txt", HOST_APPID),
-    ("SkyrimSELauncher.exe", "skyrimselauncher.exe", HOST_LAUNCHER),
+    (
+        "SkyrimSELauncher.exe",
+        "skyrimselauncher.exe",
+        HOST_LAUNCHER,
+    ),
     ("steam_api64.dll", "steam_api64.dll", HOST_API64),
     ("steam_api.dll", "steam_api.dll", HOST_API32),
     ("SkyrimSE.exe", "skyrimse.exe", HOST_EXE),
@@ -107,7 +111,11 @@ fn the_drm_names_are_answered_by_the_director_and_never_by_the_real_file() {
                 mtime: 0,
             })
             .collect();
-        let tree = build(vec![Layer { id: LayerId(0), entries }]).unwrap();
+        let tree = build(vec![Layer {
+            id: LayerId(0),
+            entries,
+        }])
+        .unwrap();
         vfs_shared::bridge::flatten(&tree)
     };
 
@@ -119,7 +127,11 @@ fn the_drm_names_are_answered_by_the_director_and_never_by_the_real_file() {
         &root,
         Fake::new()
             .with("steam_appid.txt", DIR_APPID.to_vec(), ReadStyle::Whole)
-            .with("skyrimselauncher.exe", DIR_LAUNCHER.to_vec(), ReadStyle::Whole)
+            .with(
+                "skyrimselauncher.exe",
+                DIR_LAUNCHER.to_vec(),
+                ReadStyle::Whole,
+            )
             .with("steam_api64.dll", DIR_API64.to_vec(), ReadStyle::Whole)
             .with("skyrimse.exe", DIR_EXE.to_vec(), ReadStyle::Whole)
             .writable_under("steam_appid.txt"),

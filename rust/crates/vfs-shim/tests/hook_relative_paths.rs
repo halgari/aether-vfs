@@ -95,7 +95,11 @@ fn relative_names_resolve_on_every_decoding_hook() {
     // collide. `Engine` only ever resolves under `RootId::DEFAULT` (root 0)
     // today, so `data` must physically live under `overlay/root-0`.
     std::fs::create_dir_all(overlay.join("root-0").join("data")).unwrap();
-    std::fs::write(overlay.join("root-0").join("data").join("real_marker.txt"), b"m").unwrap();
+    std::fs::write(
+        overlay.join("root-0").join("data").join("real_marker.txt"),
+        b"m",
+    )
+    .unwrap();
     std::fs::create_dir_all(&backing).unwrap();
     let backing_file = backing.join("added.esm");
     std::fs::write(&backing_file, PAYLOAD).unwrap();
@@ -160,7 +164,9 @@ fn relative_names_resolve_on_every_decoding_hook() {
     // `std::fs::metadata` opens a handle (`Decision`-backed), so this is
     // unaffected by Task 4 — unchanged from before.
     assert_eq!(
-        std::fs::metadata("added.esm").expect("cwd-relative metadata").len(),
+        std::fs::metadata("added.esm")
+            .expect("cwd-relative metadata")
+            .len(),
         PAYLOAD.len() as u64,
         "a CWD-relative stat must report the virtual size"
     );
@@ -204,13 +210,25 @@ fn relative_names_resolve_on_every_decoding_hook() {
 
     // NtCreateFile
     let h = nt_create_relative(dir, "added.esm");
-    assert!(h.0 >= 0, "NtCreateFile relative to a handle: status {:#x}", h.0);
-    assert_eq!(read_all(h.1), PAYLOAD, "NtCreateFile served the wrong bytes");
+    assert!(
+        h.0 >= 0,
+        "NtCreateFile relative to a handle: status {:#x}",
+        h.0
+    );
+    assert_eq!(
+        read_all(h.1),
+        PAYLOAD,
+        "NtCreateFile served the wrong bytes"
+    );
     close(h.1);
 
     // NtOpenFile
     let h = nt_open_relative(dir, "added.esm");
-    assert!(h.0 >= 0, "NtOpenFile relative to a handle: status {:#x}", h.0);
+    assert!(
+        h.0 >= 0,
+        "NtOpenFile relative to a handle: status {:#x}",
+        h.0
+    );
     assert_eq!(read_all(h.1), PAYLOAD, "NtOpenFile served the wrong bytes");
     close(h.1);
 
@@ -249,7 +267,10 @@ fn relative_names_resolve_on_every_decoding_hook() {
     // virtual-only file must now fail, flipped from "status {st:#x}" >= 0 —
     // see the module doc comment.
     let (st, _attrs) = nt_query_attributes_relative(dir, "added.esm");
-    assert!(st < 0, "NtQueryAttributesFile relative saw a virtual-only file with no director");
+    assert!(
+        st < 0,
+        "NtQueryAttributesFile relative saw a virtual-only file with no director"
+    );
 
     // NtQueryFullAttributesFile — same flip.
     let (st, _size) = nt_query_full_attributes_relative(dir, "added.esm");

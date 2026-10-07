@@ -100,7 +100,11 @@ fn fixture() -> &'static Fixture {
         let fake = fakedirector::install(
             &root,
             Fake::new()
-                .with("data/only-in-graph.esp", PROVIDER.to_vec(), ReadStyle::Whole)
+                .with(
+                    "data/only-in-graph.esp",
+                    PROVIDER.to_vec(),
+                    ReadStyle::Whole,
+                )
                 .with("data/to-rename.esp", PROVIDER.to_vec(), ReadStyle::Whole)
                 .with("data/big.bin", pattern(700 * 1024), ReadStyle::Whole)
                 .with("data/dribble.bin", pattern(5_000), ReadStyle::Short(7))
@@ -116,10 +120,18 @@ fn fixture() -> &'static Fixture {
                     ReadStyle::ShorterThanClaimed(9_000),
                 )
                 .with("data/closecheck.esp", PROVIDER.to_vec(), ReadStyle::Whole)
-                .with("data/closecheck-broken.bin", pattern(9_000), ReadStyle::Error)
+                .with(
+                    "data/closecheck-broken.bin",
+                    pattern(9_000),
+                    ReadStyle::Error,
+                )
                 // Just under `BULK_THRESHOLD`, so it stays inline whatever the
                 // arena is: the inline transport's own fragmentation case.
-                .with("data/inline-roundtrips.bin", pattern(63 * 1024), ReadStyle::Whole)
+                .with(
+                    "data/inline-roundtrips.bin",
+                    pattern(63 * 1024),
+                    ReadStyle::Whole,
+                )
                 .with("data/streamed.esp", PROVIDER.to_vec(), ReadStyle::Whole),
             // A real bulk arena. Copy-up's 256 KiB `SEED_CHUNK` is four times
             // `BULK_THRESHOLD`, so live, every large-file copy-up rides the
@@ -128,13 +140,15 @@ fn fixture() -> &'static Fixture {
             fakedirector::ARENA_LEN,
         );
 
-        let engine = Engine::with_overlay(
-            root.to_str().unwrap(),
-            overlay.to_str().unwrap(),
-            snapshot,
-        )
-        .unwrap();
-        Fixture { root, overlay, engine, fake }
+        let engine =
+            Engine::with_overlay(root.to_str().unwrap(), overlay.to_str().unwrap(), snapshot)
+                .unwrap();
+        Fixture {
+            root,
+            overlay,
+            engine,
+            fake,
+        }
     })
 }
 
@@ -238,7 +252,10 @@ fn copy_up_of_a_large_file_spans_round_trips_and_is_byte_exact() {
         got.len(),
         want.len()
     );
-    assert!(got == want, "copy-up produced the right length but the wrong bytes");
+    assert!(
+        got == want,
+        "copy-up produced the right length but the wrong bytes"
+    );
     let bulk = f.fake.tally.bulk_reads("data/big.bin");
     assert!(
         bulk >= 3,
@@ -262,11 +279,19 @@ fn a_short_bulk_read_is_resumed_too() {
     let want = pattern(500 * 1024);
     let dest = f.dest(&["data", "bulk-dribble.bin"]);
 
-    f.engine.decide_open(&f.nt(&["Data", "bulk-dribble.bin"]), WRITE, FILE_OPEN_IF);
+    f.engine
+        .decide_open(&f.nt(&["Data", "bulk-dribble.bin"]), WRITE, FILE_OPEN_IF);
 
     let got = std::fs::read(&dest).unwrap_or_default();
-    assert_eq!(got.len(), want.len(), "a short bulk read was treated as EOF");
-    assert!(got == want, "resumed at the wrong offset, or read a stale arena bank");
+    assert_eq!(
+        got.len(),
+        want.len(),
+        "a short bulk read was treated as EOF"
+    );
+    assert!(
+        got == want,
+        "resumed at the wrong offset, or read a stale arena bank"
+    );
     assert!(
         f.fake.tally.bulk_reads("data/bulk-dribble.bin") >= 5,
         "this fixture did not take the bulk path at all"
@@ -303,7 +328,8 @@ fn a_director_error_fails_the_copy_up_and_leaves_nothing_behind() {
     let f = fixture();
     for name in ["broken.bin", "liar.bin"] {
         let dest = f.dest(&["data", name]);
-        f.engine.decide_open(&f.nt(&["Data", name]), WRITE, FILE_OPEN_IF);
+        f.engine
+            .decide_open(&f.nt(&["Data", name]), WRITE, FILE_OPEN_IF);
         assert!(
             !dest.exists(),
             "{name}: a failed copy-up must leave no partial file at {dest:?} — a truncated \
@@ -347,7 +373,8 @@ fn copy_up_closes_the_handles_it_opens_including_failed_reads() {
     // A clean copy-up and a copy-up whose reads all fail.
     for name in ["closecheck.esp", "closecheck-broken.bin"] {
         let vpath = format!("data/{}", name.to_ascii_lowercase());
-        f.engine.decide_open(&f.nt(&["Data", name]), WRITE, FILE_OPEN_IF);
+        f.engine
+            .decide_open(&f.nt(&["Data", name]), WRITE, FILE_OPEN_IF);
         assert_eq!(
             f.fake.tally.opens(&vpath),
             1,
@@ -369,7 +396,11 @@ fn copy_up_closes_the_handles_it_opens_including_failed_reads() {
 fn a_sub_threshold_copy_up_fragments_over_the_inline_transport() {
     let f = fixture();
     let want = pattern(63 * 1024);
-    f.engine.decide_open(&f.nt(&["Data", "inline-roundtrips.bin"]), WRITE, FILE_OPEN_IF);
+    f.engine.decide_open(
+        &f.nt(&["Data", "inline-roundtrips.bin"]),
+        WRITE,
+        FILE_OPEN_IF,
+    );
     let vpath = "data/inline-roundtrips.bin";
     let reads = f.fake.tally.reads(vpath);
     let minimum = (want.len() / (PAYLOAD_CAP as usize - 8)) as u64;
@@ -433,7 +464,8 @@ fn a_write_to_an_alternate_data_stream_seeds_nothing() {
 
     // Control: the same file, named without the suffix, does copy up. Without
     // this the assertions above would also pass if copy-up were simply broken.
-    f.engine.decide_open(&f.nt(&["Data", "streamed.esp"]), WRITE, FILE_OPEN_IF);
+    f.engine
+        .decide_open(&f.nt(&["Data", "streamed.esp"]), WRITE, FILE_OPEN_IF);
     assert_eq!(
         std::fs::read(&base).unwrap_or_default(),
         PROVIDER,

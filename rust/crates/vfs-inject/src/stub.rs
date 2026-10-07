@@ -43,7 +43,7 @@ pub fn build_stub(
         // spin_loop:
         let spin = s.len();
         s.extend_from_slice(&[0x83, 0x38, 0x00]); // cmp dword ptr [rax], 0
-        // je spin_loop (rel8)
+                                                  // je spin_loop (rel8)
         let je = s.len();
         s.extend_from_slice(&[0x74, 0x00]);
         s[je + 1] = (spin as i8 - (je as i8 + 2)) as u8;

@@ -246,7 +246,9 @@ fn a_write_under_a_managed_root_is_answered_only_by_the_director() {
 /// Every file (not directory) beneath `dir`, recursively. A missing directory
 /// yields nothing, which is fine: the caller already created it.
 fn collect_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
-    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
     for e in rd.flatten() {
         let p = e.path();
         if p.is_dir() {

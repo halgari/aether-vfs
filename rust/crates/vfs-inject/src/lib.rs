@@ -10,10 +10,10 @@ use std::time::Duration;
 
 mod artifacts;
 mod cli;
-mod pe;
 mod inject;
 mod map;
 mod payload_cfg;
+mod pe;
 mod static_imports;
 mod steam_helper;
 mod stub;

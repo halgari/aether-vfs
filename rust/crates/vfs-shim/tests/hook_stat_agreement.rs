@@ -79,7 +79,12 @@ fn every_stat_api_agrees_about_existence_and_size() {
         let tree = build(vec![Layer {
             id: LayerId(0),
             entries: vec![
-                e("added.esm", EntryKind::File, add_backing.to_str().unwrap(), PAYLOAD_LEN),
+                e(
+                    "added.esm",
+                    EntryKind::File,
+                    add_backing.to_str().unwrap(),
+                    PAYLOAD_LEN,
+                ),
                 e("hidden.esp", EntryKind::Tombstone, "", 0),
             ],
         }])
@@ -121,7 +126,10 @@ fn every_stat_api_agrees_about_existence_and_size() {
     // The name-based attribute APIs no longer answer locally without a
     // director (flipped from "must find it" — see the module doc comment).
     let (st, _) = nt_query_attributes_abs(&nt);
-    assert!(st < 0, "NtQueryAttributesFile saw a virtual-only file with no director attached");
+    assert!(
+        st < 0,
+        "NtQueryAttributesFile saw a virtual-only file with no director attached"
+    );
     let (st, _) = nt_query_full_attributes_abs(&nt);
     assert!(
         st < 0,
@@ -176,7 +184,10 @@ fn every_stat_api_agrees_about_existence_and_size() {
     // ── a name that never existed ───────────────────────────────────────────
     let absent_nt = format!(r"\??\{}", root.join("absent.esm").display());
     let (st, _) = nt_query_full_attributes_abs(&absent_nt);
-    assert!(st < 0, "a name in neither the VFS nor on disk reported success");
+    assert!(
+        st < 0,
+        "a name in neither the VFS nor on disk reported success"
+    );
     for class in SIZED_CLASSES {
         if let Some((st, _)) = nt_query_by_name_abs(&absent_nt, class) {
             assert!(st < 0, "NtQueryInformationByName({class}) invented a file");

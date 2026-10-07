@@ -49,7 +49,10 @@ fn session() -> &'static std::path::Path {
 
 fn list(dir: &std::path::Path, wildcard: Option<&str>) -> Vec<String> {
     let (st, h) = ntapi::nt_open_dir_abs(&dir.to_string_lossy(), ntapi::FILE_LIST_DIRECTORY);
-    assert_eq!(st, 0, "opening the director-served directory failed: {st:#x}");
+    assert_eq!(
+        st, 0,
+        "opening the director-served directory failed: {st:#x}"
+    );
     let names = ntapi::nt_enum_classic_filtered(h, wildcard);
     ntapi::close(h);
     names
@@ -70,16 +73,29 @@ fn setup() -> std::path::PathBuf {
     // `Overlay::whiteout` writes it. The director's write layer is a
     // `DiskProvider` over exactly this directory, so it reads it back as a
     // file — which is what the fake below reproduces.
-    std::fs::write(layer.join("data").join(vfs_redirect::whiteout_marker("gone.esp")), b"")
-        .unwrap();
+    std::fs::write(
+        layer
+            .join("data")
+            .join(vfs_redirect::whiteout_marker("gone.esp")),
+        b"",
+    )
+    .unwrap();
 
     let marker = format!("data/{}", vfs_redirect::whiteout_marker("gone.esp"));
     fakedirector::install(
         &root,
         fakedirector::Fake::new()
             .with_dir("data")
-            .with("data/keep.esp", KEPT.to_vec(), fakedirector::ReadStyle::Whole)
-            .with("data/gone.esp", GONE.to_vec(), fakedirector::ReadStyle::Whole)
+            .with(
+                "data/keep.esp",
+                KEPT.to_vec(),
+                fakedirector::ReadStyle::Whole,
+            )
+            .with(
+                "data/gone.esp",
+                GONE.to_vec(),
+                fakedirector::ReadStyle::Whole,
+            )
             .with(&marker, Vec::new(), fakedirector::ReadStyle::Whole)
             .writable_under("data/"),
         0,

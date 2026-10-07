@@ -61,7 +61,11 @@ fn expect_eq(got: &[u8], want: &[u8]) -> Result<(), String> {
     if got == want {
         Ok(())
     } else {
-        Err(format!("got {:?} want {:?}", String::from_utf8_lossy(got), String::from_utf8_lossy(want)))
+        Err(format!(
+            "got {:?} want {:?}",
+            String::from_utf8_lossy(got),
+            String::from_utf8_lossy(want)
+        ))
     }
 }
 
@@ -108,12 +112,15 @@ fn main() {
     });
 
     // 4. Open a tombstoned (mod-deleted) real file -> must fail.
-    check("tombstone_read", &mut out, &mut all_ok, || {
-        match std::fs::read(root.join("deleted.txt")) {
+    check(
+        "tombstone_read",
+        &mut out,
+        &mut all_ok,
+        || match std::fs::read(root.join("deleted.txt")) {
             Err(_) => Ok(()),
             Ok(b) => Err(format!("tombstoned file was readable: {} bytes", b.len())),
-        }
-    });
+        },
+    );
 
     // 5. Attributes of a virtual file -> valid, not a directory.
     check("attr_added", &mut out, &mut all_ok, || {
@@ -157,8 +164,13 @@ fn main() {
             .collect::<Result<_, _>>()
             .map_err(|e| e.to_string())?;
         names.sort();
-        let want_present =
-            ["mod_added.txt", "override.txt", "real_only.txt", "virtual_dir", "real_dir"];
+        let want_present = [
+            "mod_added.txt",
+            "override.txt",
+            "real_only.txt",
+            "virtual_dir",
+            "real_dir",
+        ];
         for w in want_present {
             if !names.iter().any(|n| n == w) {
                 return Err(format!("missing {w} in {names:?}"));
@@ -185,8 +197,12 @@ fn main() {
     // attr hooks; the loader builds the section from the redirected handle).
     check("dll_load", &mut out, &mut all_ok, || {
         let dll = root.join("plugin.dll");
-        let wide: Vec<u16> =
-            dll.to_str().unwrap().encode_utf16().chain(std::iter::once(0)).collect();
+        let wide: Vec<u16> = dll
+            .to_str()
+            .unwrap()
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
         let module = unsafe { LoadLibraryW(wide.as_ptr()) };
         if module.is_null() {
             return Err("LoadLibraryW(virtual plugin.dll) returned null".into());

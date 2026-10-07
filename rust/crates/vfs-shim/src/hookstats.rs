@@ -181,7 +181,11 @@ impl Timed {
         crate::breadcrumb::enter(hook as u32);
         Timed {
             hook,
-            start: if enabled() { Some(Instant::now()) } else { None },
+            start: if enabled() {
+                Some(Instant::now())
+            } else {
+                None
+            },
             rooted: false,
         }
     }
@@ -279,7 +283,10 @@ struct Snapshot {
 /// treating "poisoned" and "never initialised" alike as empty. Every field of
 /// [`Snapshot`] that is not a plain atomic is read through this.
 fn accumulated<T: Clone + Default>(m: &Mutex<Option<T>>) -> T {
-    m.lock().ok().and_then(|g| g.as_ref().cloned()).unwrap_or_default()
+    m.lock()
+        .ok()
+        .and_then(|g| g.as_ref().cloned())
+        .unwrap_or_default()
 }
 
 fn snapshot() -> Snapshot {
@@ -296,7 +303,8 @@ fn snapshot() -> Snapshot {
         slow[i] = SLOW[i].load(Ordering::Relaxed);
     }
     let mut outcome_counts = [0u64; OUTCOME_N];
-    let mut outcome_paths: [HashMap<String, u64>; OUTCOME_N] = std::array::from_fn(|_| HashMap::new());
+    let mut outcome_paths: [HashMap<String, u64>; OUTCOME_N] =
+        std::array::from_fn(|_| HashMap::new());
     for (i, outcome) in ALL_OUTCOMES.into_iter().enumerate() {
         outcome_counts[i] = outcome_count(outcome);
         outcome_paths[i] = accumulated(&OUTCOME_PATHS[i]);
@@ -381,7 +389,9 @@ static HOOK_PANICS: Mutex<Option<HashMap<&'static str, u64>>> = Mutex::new(None)
 /// hooked export, e.g. `"NtCreateFile"`.
 pub fn note_hook_panic(name: &'static str) {
     HOOK_PANICS_TOTAL.fetch_add(1, Ordering::Relaxed);
-    let Ok(mut g) = HOOK_PANICS.lock() else { return };
+    let Ok(mut g) = HOOK_PANICS.lock() else {
+        return;
+    };
     *g.get_or_insert_with(HashMap::new).entry(name).or_insert(0) += 1;
 }
 
@@ -944,7 +954,9 @@ pub fn note_setinfo_noop(class: u32) {
     if !enabled() {
         return;
     }
-    let Ok(mut g) = SETINFO_NOOP.lock() else { return };
+    let Ok(mut g) = SETINFO_NOOP.lock() else {
+        return;
+    };
     let map = g.get_or_insert_with(HashMap::new);
     *map.entry(class).or_insert(0) += 1;
 }
@@ -984,7 +996,9 @@ pub fn note_synthetic_lock(op: &str, path: Option<&str>) {
     if !enabled() {
         return;
     }
-    let Ok(mut g) = SYNTH_LOCKS.lock() else { return };
+    let Ok(mut g) = SYNTH_LOCKS.lock() else {
+        return;
+    };
     let map = g.get_or_insert_with(HashMap::new);
     let key = format!(
         "{:<16} {}",
@@ -1091,9 +1105,8 @@ fn format_paths(mut pairs: Vec<(String, u64)>) -> String {
     // snapshots — a diff of two reports is how a loop's rate gets measured.
     pairs.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     let shown = pairs.len().min(PATHS_SHOWN);
-    let mut s = format!(
-        "\nopen paths by frequency (top {shown} of {distinct} distinct, {total} opens):\n"
-    );
+    let mut s =
+        format!("\nopen paths by frequency (top {shown} of {distinct} distinct, {total} opens):\n");
     for (p, c) in pairs.into_iter().take(shown) {
         s.push_str(&format!("  {c:>8}x  {p}\n"));
     }
@@ -1111,7 +1124,9 @@ pub fn note_undecodable(name: Option<&str>) {
     if !enabled() {
         return;
     }
-    let Ok(mut g) = UNDECODABLE.lock() else { return };
+    let Ok(mut g) = UNDECODABLE.lock() else {
+        return;
+    };
     let map = g.get_or_insert_with(HashMap::new);
     let key = name.unwrap_or("<no name>").to_ascii_lowercase();
     *map.entry(key).or_insert(0) += 1;
@@ -1125,12 +1140,17 @@ fn render_undecodable(snap: &Snapshot) -> String {
     let mut rows: Vec<(&String, &u64)> = map.iter().collect();
     rows.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
     let total: u64 = rows.iter().map(|(_, c)| **c).sum();
-    let mut s = format!("
+    let mut s = format!(
+        "
 undecodable opens ({} distinct, {total} calls):
-", rows.len());
+",
+        rows.len()
+    );
     for (k, c) in rows.iter().take(60) {
-        s.push_str(&format!("  {c:>6}x  {k}
-"));
+        s.push_str(&format!(
+            "  {c:>6}x  {k}
+"
+        ));
     }
     s
 }
@@ -1153,7 +1173,12 @@ pub fn note_trace(op: &str, path: &str, result: &str) {
     if v.len() >= TRACE_MAX {
         return;
     }
-    v.push(format!("{:<10} {:<12} {}", op, result, path.to_ascii_lowercase()));
+    v.push(format!(
+        "{:<10} {:<12} {}",
+        op,
+        result,
+        path.to_ascii_lowercase()
+    ));
 }
 
 fn render_trace(snap: &Snapshot) -> String {
@@ -1161,12 +1186,17 @@ fn render_trace(snap: &Snapshot) -> String {
     if v.is_empty() {
         return String::new();
     }
-    let mut s = format!("
+    let mut s = format!(
+        "
 ordered trace of under-root operations ({}):
-", v.len());
+",
+        v.len()
+    );
     for (i, line) in v.iter().enumerate() {
-        s.push_str(&format!("  {i:>5}  {line}
-"));
+        s.push_str(&format!(
+            "  {i:>5}  {line}
+"
+        ));
     }
     s
 }
@@ -1521,7 +1551,9 @@ pub fn note_open_outcome(outcome: OpenOutcome, path: &str) {
     }
     let idx = outcome as usize;
     OUTCOME_COUNTS[idx].fetch_add(1, Ordering::Relaxed);
-    let Ok(mut g) = OUTCOME_PATHS[idx].lock() else { return };
+    let Ok(mut g) = OUTCOME_PATHS[idx].lock() else {
+        return;
+    };
     let map = g.get_or_insert_with(HashMap::new);
     let lower = path.to_ascii_lowercase();
     if let Some(c) = map.get_mut(&lower) {
@@ -1595,7 +1627,12 @@ fn render_outcomes(snap: &Snapshot) -> String {
 }
 
 fn render_passthrough(snap: &Snapshot) -> String {
-    format_paths(snap.passthrough.iter().map(|(p, c)| (p.clone(), *c)).collect())
+    format_paths(
+        snap.passthrough
+            .iter()
+            .map(|(p, c)| (p.clone(), *c))
+            .collect(),
+    )
 }
 
 /// How a copy-on-write copy-up ended.
@@ -1856,7 +1893,9 @@ pub fn note_overlay_fail(fail: OverlayFail, root: u32, vpath: &str) {
     // Also in the ordered trace: what the game did *next* after the overlay
     // refused to move is the other half of explaining the open that failed.
     note_trace("overlay", &path, fail.label());
-    let Ok(mut g) = OVERLAY_FAILS.lock() else { return };
+    let Ok(mut g) = OVERLAY_FAILS.lock() else {
+        return;
+    };
     let map = g.get_or_insert_with(HashMap::new);
     let key = format!("{:<26} {path}", fail.label());
     if let Some(c) = map.get_mut(&key) {
@@ -1960,7 +1999,10 @@ static START: OnceLock<Instant> = OnceLock::new();
 /// `vfs-fixture-prefs`/`vfs-fixture-escape`'s end-of-run waits), and this line
 /// says how much of the run the numbers below actually cover.
 fn banner() -> String {
-    let elapsed = START.get().map(|s| s.elapsed().as_secs_f64()).unwrap_or(0.0);
+    let elapsed = START
+        .get()
+        .map(|s| s.elapsed().as_secs_f64())
+        .unwrap_or(0.0);
     format!(
         "SNAPSHOT at t+{elapsed:.3}s — process still running, no exit report exists. An absent \
          row means \"not by t+{elapsed:.3}s\", which is weaker than \"never\".\n"
@@ -2111,7 +2153,10 @@ mod tests {
         // through it would render an empty section and assert nothing.
         let mut snap = empty_snapshot();
         snap.synth_locks.insert(
-            format!("{:<16} {}", "lock-exclusive", r"\??\c:\root\skyrimprefs.ini"),
+            format!(
+                "{:<16} {}",
+                "lock-exclusive", r"\??\c:\root\skyrimprefs.ini"
+            ),
             3,
         );
         let s = render_synth_locks(&snap);
@@ -2154,7 +2199,11 @@ mod tests {
         let n = labels.len();
         labels.sort_unstable();
         labels.dedup();
-        assert_eq!(labels.len(), n, "outcome labels must be distinct: {labels:?}");
+        assert_eq!(
+            labels.len(),
+            n,
+            "outcome labels must be distinct: {labels:?}"
+        );
     }
 
     #[test]
@@ -2186,9 +2235,14 @@ mod tests {
         snap.unrouted_director_opens = 3;
         let s = render_outcomes(&snap);
         assert!(s.starts_with("\nunder-root open outcomes:\n"), "{s}");
-        assert!(s.contains(&format!("  {UNROUTED_OPEN_LABEL:<32} {:>8}\n", 3)), "{s}");
         assert!(
-            !ALL_OUTCOMES.iter().any(|o| o.label() == UNROUTED_OPEN_LABEL),
+            s.contains(&format!("  {UNROUTED_OPEN_LABEL:<32} {:>8}\n", 3)),
+            "{s}"
+        );
+        assert!(
+            !ALL_OUTCOMES
+                .iter()
+                .any(|o| o.label() == UNROUTED_OPEN_LABEL),
             "the unrouted-open label collides with an outcome label"
         );
     }
@@ -2212,7 +2266,11 @@ mod tests {
         let n = labels.len();
         labels.sort_unstable();
         labels.dedup();
-        assert_eq!(labels.len(), n, "copy-up labels must be distinct: {labels:?}");
+        assert_eq!(
+            labels.len(),
+            n,
+            "copy-up labels must be distinct: {labels:?}"
+        );
         assert_eq!(ALL_COPY_UPS.len(), COPYUP_N);
         // `snapshot` indexes the counter array by position in `ALL_COPY_UPS`,
         // so a variant listed out of order would report under a neighbour's
@@ -2255,8 +2313,14 @@ mod tests {
         counts[CopyUp::Seeded as usize] = 2;
         counts[CopyUp::ReadFailed as usize] = 1;
         let mut copy_ups = HashMap::new();
-        copy_ups.insert(format!("{:<26} root0/data/a.esp", CopyUp::Seeded.label()), 2);
-        copy_ups.insert(format!("{:<26} root1/saves/s.ess", CopyUp::ReadFailed.label()), 1);
+        copy_ups.insert(
+            format!("{:<26} root0/data/a.esp", CopyUp::Seeded.label()),
+            2,
+        );
+        copy_ups.insert(
+            format!("{:<26} root1/saves/s.ess", CopyUp::ReadFailed.label()),
+            1,
+        );
         let snap = Snapshot {
             copy_up_counts: counts,
             copy_up_bytes: 3 * 1024 * 1024,
@@ -2264,7 +2328,10 @@ mod tests {
             ..empty_snapshot()
         };
         let s = render_copy_ups(&snap);
-        assert!(s.contains("copy-on-write copy-ups (3, 3.0 MiB seeded)"), "{s}");
+        assert!(
+            s.contains("copy-on-write copy-ups (3, 3.0 MiB seeded)"),
+            "{s}"
+        );
         assert!(s.contains("FAILED: read"), "{s}");
         // The file that failed has to be nameable from the report alone —
         // "something failed" is what the silent version already told you.
@@ -2288,7 +2355,11 @@ mod tests {
         let n = labels.len();
         labels.sort_unstable();
         labels.dedup();
-        assert_eq!(labels.len(), n, "overlay-failure labels must be distinct: {labels:?}");
+        assert_eq!(
+            labels.len(),
+            n,
+            "overlay-failure labels must be distinct: {labels:?}"
+        );
         assert_eq!(ALL_OVERLAY_FAILS.len(), OVERLAY_FAIL_N);
         // `snapshot` indexes the counter array by position in
         // `ALL_OVERLAY_FAILS`, so a variant listed out of order would report
@@ -2305,7 +2376,10 @@ mod tests {
     fn overlay_successes_render_so_an_absent_section_means_nothing_happened() {
         let mut counts = [0u64; OVERLAY_FAIL_N];
         counts[OverlayFail::Succeeded as usize] = 4;
-        let snap = Snapshot { overlay_fail_counts: counts, ..empty_snapshot() };
+        let snap = Snapshot {
+            overlay_fail_counts: counts,
+            ..empty_snapshot()
+        };
         let s = render_overlay_fails(&snap);
         assert!(s.contains("succeeded"), "{s}");
         // The header counts failures, not operations — that is the number a
@@ -2353,7 +2427,10 @@ mod tests {
     /// `Timed` — so this test is what keeps the two apart.
     #[test]
     fn hook_panics_are_counted_even_though_instrumentation_is_disabled() {
-        assert!(!enabled(), "test process must have stats off for this to mean anything");
+        assert!(
+            !enabled(),
+            "test process must have stats off for this to mean anything"
+        );
         // A name no other test uses, because the counters are process-wide and
         // the unit tests share one process.
         let name = "NtCountedWhileDisabled";
@@ -2385,7 +2462,10 @@ mod tests {
         let rows: Vec<&str> = s.lines().skip(1).collect();
         // Busiest first, so the hook that is faulting every call outranks the
         // one that faulted once.
-        assert!(rows[0].contains("NtReadFile") && rows[0].contains('3'), "{s}");
+        assert!(
+            rows[0].contains("NtReadFile") && rows[0].contains('3'),
+            "{s}"
+        );
         assert!(rows[1].contains("NtCreateFile"), "{s}");
     }
 
@@ -2407,9 +2487,16 @@ mod tests {
     fn a_caught_panic_leads_the_rendered_report() {
         note_hook_panic("NtOrderingProbe");
         let r = render_report();
-        let panics = r.find("CAUGHT PANICS").unwrap_or_else(|| panic!("no panic section:\n{r}"));
-        let table = r.find("vfs-shim hook stats").unwrap_or_else(|| panic!("no table:\n{r}"));
-        assert!(panics < table, "the panic section rendered below the hook table:\n{r}");
+        let panics = r
+            .find("CAUGHT PANICS")
+            .unwrap_or_else(|| panic!("no panic section:\n{r}"));
+        let table = r
+            .find("vfs-shim hook stats")
+            .unwrap_or_else(|| panic!("no table:\n{r}"));
+        assert!(
+            panics < table,
+            "the panic section rendered below the hook table:\n{r}"
+        );
         // Below the banner, though: a reader has to know the report is a
         // snapshot before reading any number in it.
         assert!(r.starts_with("SNAPSHOT at"), "{r}");

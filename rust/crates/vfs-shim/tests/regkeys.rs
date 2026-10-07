@@ -719,8 +719,7 @@ fn the_object_name_of_a_synthetic_key_is_its_nt_name() {
     let (_, r) = f.open("Untouched", NT_KEY_READ);
     let real_name = object_string(r, OBJECT_NAME_INFORMATION).unwrap();
     assert!(
-        real_name.eq_ignore_ascii_case(&f.nt("Untouched"))
-            && real_name.starts_with(r"\REGISTRY\"),
+        real_name.eq_ignore_ascii_case(&f.nt("Untouched")) && real_name.starts_with(r"\REGISTRY\"),
         "{real_name}"
     );
     // A short buffer: the required length, and no data.

@@ -104,7 +104,12 @@ fn classic_and_ex_enumeration_agree() {
         let tree = build(vec![Layer {
             id: LayerId(0),
             entries: vec![
-                e("Data/added.esm", EntryKind::File, add_backing.to_str().unwrap(), 7),
+                e(
+                    "Data/added.esm",
+                    EntryKind::File,
+                    add_backing.to_str().unwrap(),
+                    7,
+                ),
                 e("Data/hidden.esp", EntryKind::Tombstone, "", 0),
             ],
         }])

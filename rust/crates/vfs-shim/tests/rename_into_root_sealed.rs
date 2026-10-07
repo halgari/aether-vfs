@@ -76,7 +76,12 @@ fn a_rename_into_a_managed_root_from_outside_it_never_lands() {
             entries: vec![InputEntry {
                 vpath: "data/existing.esp".into(),
                 kind: EntryKind::File,
-                source: root.join("data").join("existing.esp").to_string_lossy().as_ref().into(),
+                source: root
+                    .join("data")
+                    .join("existing.esp")
+                    .to_string_lossy()
+                    .as_ref()
+                    .into(),
                 size: DIR_EXISTING.len() as u64,
                 mtime: 0,
             }],
@@ -108,8 +113,7 @@ fn a_rename_into_a_managed_root_from_outside_it_never_lands() {
     // 2 and 3. Both NT rename classes, driven directly so the test does not
     //    depend on which one `MoveFileExW` happens to pick on this build.
     let nt_status = {
-        let (st, h) =
-            ntapi::nt_open_abs(&outside.join("import-nt.esp").to_string_lossy(), DELETE);
+        let (st, h) = ntapi::nt_open_abs(&outside.join("import-nt.esp").to_string_lossy(), DELETE);
         assert!(st >= 0, "opening the outside source failed: {st:#x}");
         let r = ntapi::nt_rename(
             h,

@@ -30,7 +30,6 @@ use crate::static_imports::{load_preinit_from_config_file, StaticImport};
 use crate::stub::build_stub;
 use crate::{InjectError, PreinitConfig, PreinitRedirect, RunConfig};
 
-
 /// The exit code of `process` if it has already exited.
 ///
 /// # Safety
@@ -46,10 +45,16 @@ unsafe fn exited(process: HANDLE) -> Option<u32> {
 
 /// Build the early redirect table: config-file static imports first, then any
 /// explicit `extra` rows (caller overrides). Caps at [`MAX_REDIRECTS`].
-pub fn merge_preinit_redirects(config_path: &str, extra: &[PreinitRedirect]) -> Vec<PreinitRedirect> {
+pub fn merge_preinit_redirects(
+    config_path: &str,
+    extra: &[PreinitRedirect],
+) -> Vec<PreinitRedirect> {
     let mut out = load_preinit_from_config_file(config_path, MAX_REDIRECTS);
     for e in extra {
-        if let Some(i) = out.iter().position(|x| x.suffix.eq_ignore_ascii_case(&e.suffix)) {
+        if let Some(i) = out
+            .iter()
+            .position(|x| x.suffix.eq_ignore_ascii_case(&e.suffix))
+        {
             out[i] = PreinitRedirect {
                 suffix: e.suffix.clone(),
                 backing_nt: e.backing_nt.clone(),
@@ -72,7 +77,10 @@ pub fn load_static_imports_from_config(path: &str) -> Vec<StaticImport> {
 }
 
 fn wide(s: &str) -> Vec<u16> {
-    std::ffi::OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
+    std::ffi::OsStr::new(s)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect()
 }
 
 fn ntdll_proc(name: &core::ffi::CStr) -> Result<usize, InjectError> {
@@ -139,13 +147,8 @@ unsafe fn expand_primary_stack(
     primary: HANDLE,
     stack_reserve: usize,
 ) -> Result<(), InjectError> {
-    type NtQueryInformationThreadFn = unsafe extern "system" fn(
-        HANDLE,
-        u32,
-        *mut c_void,
-        u32,
-        *mut u32,
-    ) -> i32;
+    type NtQueryInformationThreadFn =
+        unsafe extern "system" fn(HANDLE, u32, *mut c_void, u32, *mut u32) -> i32;
 
     let ntdll = GetModuleHandleW(wide("ntdll.dll").as_ptr());
     if ntdll.is_null() {
@@ -242,7 +245,7 @@ unsafe fn expand_primary_stack(
         return Err(InjectError::Alloc);
     }
     let new_base = stack as u64 + stack_reserve as u64; // high address (grows down)
-    // Guard-ish low page as StackLimit (committed but not used for frames).
+                                                        // Guard-ish low page as StackLimit (committed but not used for frames).
     let new_limit = stack as u64 + 0x1000;
     let new_rsp = new_base - used as u64;
 
@@ -350,8 +353,15 @@ pub unsafe fn inject_dll(process: HANDLE, dll_path: &str) -> Result<(), InjectEr
             unsafe extern "system" fn() -> isize,
             unsafe extern "system" fn(*mut c_void) -> u32,
         >(load_library));
-        let hthread =
-            CreateRemoteThread(process, core::ptr::null(), 0, start, remote, 0, core::ptr::null_mut());
+        let hthread = CreateRemoteThread(
+            process,
+            core::ptr::null(),
+            0,
+            start,
+            remote,
+            0,
+            core::ptr::null_mut(),
+        );
         if hthread.is_null() || hthread == INVALID_HANDLE_VALUE {
             let err = windows_sys::Win32::Foundation::GetLastError();
             eprintln!("vfs-inject: CreateRemoteThread(LoadLibrary) failed last_error={err}");
@@ -425,7 +435,8 @@ pub unsafe fn arm_preinit_payload_ex(
         wpm(process, remote_base, &img)?;
         FlushInstructionCache(process, remote_base as *const c_void, img.len());
 
-        let install_rva = export_rva(&img, e_lfanew, b"shim_install").map_err(|_| InjectError::PeParse)?;
+        let install_rva =
+            export_rva(&img, e_lfanew, b"shim_install").map_err(|_| InjectError::PeParse)?;
         let remote_install = remote_base + install_rva as u64;
 
         let tramp_base = vae(process, 0x1000, true)?;
@@ -751,10 +762,7 @@ pub fn run_target_with_preinit(cfg: PreinitConfig) -> Result<i32, InjectError> {
     }
     let app_w = wide(&cfg.target_exe);
     let mut cmd_w = wide(&cmdline);
-    let cwd_w = cfg
-        .current_dir
-        .as_ref()
-        .map(|s| wide(s));
+    let cwd_w = cfg.current_dir.as_ref().map(|s| wide(s));
 
     // SAFETY: CreateProcessW + preinit arm + resume; handles closed on every path.
     unsafe {
@@ -780,12 +788,9 @@ pub fn run_target_with_preinit(cfg: PreinitConfig) -> Result<i32, InjectError> {
             return Err(InjectError::CreateProcess);
         }
 
-        if let Err(e) = arm_preinit_payload(
-            pi.hProcess,
-            pi.hThread,
-            &cfg.payload_path,
-            &cfg.redirects,
-        ) {
+        if let Err(e) =
+            arm_preinit_payload(pi.hProcess, pi.hThread, &cfg.payload_path, &cfg.redirects)
+        {
             let _ = ResumeThread(pi.hThread);
             CloseHandle(pi.hThread);
             CloseHandle(pi.hProcess);

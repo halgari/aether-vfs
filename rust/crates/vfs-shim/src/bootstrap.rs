@@ -214,7 +214,10 @@ pub fn sync_bootstrap(payload_cfg: *mut c_void) -> u32 {
         // process instead of letting it run un-virtualised.
         Err(BootstrapError::Fuse(msg)) => {
             if let Some(ready) = vfs_env::text(vfs_env::SHIM_READY) {
-                let _ = std::fs::write(&ready, format!("{}{msg}", vfs_env::READY_FUSE_FAILED_PREFIX));
+                let _ = std::fs::write(
+                    &ready,
+                    format!("{}{msg}", vfs_env::READY_FUSE_FAILED_PREFIX),
+                );
             }
             3
         }
@@ -455,7 +458,9 @@ mod tests {
     fn payload_cfg_usable_rejects_unmapped_garbage_address() {
         // A dangling (never-committed) pointer: VirtualQuery must report it as
         // such (MEM_FREE), so this must be rejected before ever dereferencing it.
-        assert!(!payload_cfg_usable(std::ptr::dangling_mut::<PayloadConfig>()));
+        assert!(!payload_cfg_usable(
+            std::ptr::dangling_mut::<PayloadConfig>()
+        ));
     }
 
     #[test]

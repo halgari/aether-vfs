@@ -34,8 +34,7 @@ fn read_dir_without_a_director_is_denied_outright() {
     let pid = std::process::id();
     let root = std::env::temp_dir().join(format!("vfs-shim-direnum-{pid}"));
     // Backing files live OUTSIDE the root so they do not appear in any listing.
-    let backing_dir =
-        std::env::temp_dir().join(format!("vfs-shim-direnum-backing-{pid}"));
+    let backing_dir = std::env::temp_dir().join(format!("vfs-shim-direnum-backing-{pid}"));
     std::fs::create_dir_all(&root).unwrap();
     std::fs::create_dir_all(&backing_dir).unwrap();
 

@@ -84,14 +84,19 @@ fn an_untracked_handle_is_untouched() {
         let f = std::fs::File::open(&plain).unwrap();
         object_name(f.as_raw_handle() as HANDLE)
     };
-    assert_eq!(before, after, "an untracked handle must be answered unchanged");
+    assert_eq!(
+        before, after,
+        "an untracked handle must be answered unchanged"
+    );
 
     // A file handle is the easy case: the hook's own table lookup misses and it
     // trampolines. The case that actually breaks unrelated Windows APIs is a
     // handle that is not a file at all, where inventing a name would be
     // undiagnosable -- so ask a named event, which lives in the object manager
     // namespace and has nothing to do with any filesystem.
-    let evt_name: Vec<u16> = format!("vfs-objname-probe-{pid}\0").encode_utf16().collect();
+    let evt_name: Vec<u16> = format!("vfs-objname-probe-{pid}\0")
+        .encode_utf16()
+        .collect();
     let evt = unsafe {
         windows_sys::Win32::System::Threading::CreateEventW(
             std::ptr::null(),

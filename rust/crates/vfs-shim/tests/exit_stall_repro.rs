@@ -170,7 +170,10 @@ fn child() {
     extern "system" {
         fn LoadLibraryW(p: *const u16) -> *mut core::ffi::c_void;
     }
-    assert!(!unsafe { LoadLibraryW(dll.as_ptr()) }.is_null(), "LoadLibraryW failed");
+    assert!(
+        !unsafe { LoadLibraryW(dll.as_ptr()) }.is_null(),
+        "LoadLibraryW failed"
+    );
 
     // `DllMain` spawns bootstrap on its own thread and signals through the
     // ready file. Waiting for it is what makes "the hooks were live" a fact
@@ -179,7 +182,10 @@ fn child() {
     let ready = std::path::PathBuf::from(std::env::var_os("VFS_SHIM_READY").expect("ready"));
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     while !ready.exists() {
-        assert!(std::time::Instant::now() < deadline, "shim never signalled ready");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "shim never signalled ready"
+        );
         std::thread::sleep(Duration::from_millis(5));
     }
     assert_eq!(
@@ -225,7 +231,11 @@ fn dll_path() -> std::path::PathBuf {
         d.pop();
     }
     let p = d.join("vfs_shim_dll.dll");
-    assert!(p.exists(), "{} is missing — run `cargo build -p vfs-shim-dll`", p.display());
+    assert!(
+        p.exists(),
+        "{} is missing — run `cargo build -p vfs-shim-dll`",
+        p.display()
+    );
     p
 }
 

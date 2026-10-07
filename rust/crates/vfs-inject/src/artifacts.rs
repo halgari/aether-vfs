@@ -25,7 +25,10 @@ pub fn find_near(reference: &Path, name: &str) -> Option<PathBuf> {
 
 /// Ensure `vfs_payload.dll` sits beside `shim_dll` (copy if found elsewhere).
 /// Returns the path to use for dual-layer inject.
-pub fn ensure_payload_beside_shim(shim_dll: &str, preferred_payload: Option<&str>) -> Option<String> {
+pub fn ensure_payload_beside_shim(
+    shim_dll: &str,
+    preferred_payload: Option<&str>,
+) -> Option<String> {
     let shim = Path::new(shim_dll);
     let dir = shim.parent()?;
     let beside = dir.join("vfs_payload.dll");

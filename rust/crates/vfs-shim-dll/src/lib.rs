@@ -50,7 +50,9 @@ pub extern "system" fn DllMain(_dll: HINSTANCE, reason: u32, _reserved: *mut c_v
             TRUE
         },
         || {
-            log_boot("DllMain panicked — bootstrap was not spawned, so this process is NOT virtualized");
+            log_boot(
+                "DllMain panicked — bootstrap was not spawned, so this process is NOT virtualized",
+            );
             TRUE
         },
     )
@@ -107,11 +109,16 @@ fn bootstrap() {
         Err(vfs_shim::BootstrapError::Fuse(msg)) => {
             log_boot(&format!("FUSE init failed: {msg}"));
             if let Some(ready) = vfs_env::text(vfs_env::SHIM_READY) {
-                let _ = std::fs::write(&ready, format!("{}{msg}", vfs_env::READY_FUSE_FAILED_PREFIX));
+                let _ = std::fs::write(
+                    &ready,
+                    format!("{}{msg}", vfs_env::READY_FUSE_FAILED_PREFIX),
+                );
             }
         }
         Err(e) => {
-            log_boot(&format!("bootstrap_from_config_path({config}) failed: {e:?}"));
+            log_boot(&format!(
+                "bootstrap_from_config_path({config}) failed: {e:?}"
+            ));
         }
     }
 }

@@ -12,12 +12,10 @@ use windows_sys::Win32::System::LibraryLoader::{
     GetModuleFileNameW, GetModuleHandleExW, GetModuleHandleW, GetProcAddress,
     GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
 };
-use windows_sys::Win32::System::Memory::{
-    VirtualAllocEx, MEM_COMMIT, MEM_RESERVE, PAGE_READWRITE,
-};
+use windows_sys::Win32::System::Memory::{VirtualAllocEx, MEM_COMMIT, MEM_RESERVE, PAGE_READWRITE};
 use windows_sys::Win32::System::Threading::{
-    CreateEventW, CreateRemoteThread, GetCurrentProcessId, ResumeThread, SetEvent,
-    SuspendThread, WaitForSingleObject, LPTHREAD_START_ROUTINE,
+    CreateEventW, CreateRemoteThread, GetCurrentProcessId, ResumeThread, SetEvent, SuspendThread,
+    WaitForSingleObject, LPTHREAD_START_ROUTINE,
 };
 
 use vfs_inject::{arm_preinit_payload_ex, PreinitRedirect};
@@ -67,13 +65,24 @@ pub fn inject_dll(process: HANDLE, dll_path: &str) -> bool {
     unsafe {
         let dll_w = wide(dll_path);
         let bytes = dll_w.len() * 2;
-        let remote =
-            VirtualAllocEx(process, core::ptr::null(), bytes, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        let remote = VirtualAllocEx(
+            process,
+            core::ptr::null(),
+            bytes,
+            MEM_COMMIT | MEM_RESERVE,
+            PAGE_READWRITE,
+        );
         if remote.is_null() {
             return false;
         }
         let mut written = 0usize;
-        let ok = WriteProcessMemory(process, remote, dll_w.as_ptr() as *const c_void, bytes, &mut written);
+        let ok = WriteProcessMemory(
+            process,
+            remote,
+            dll_w.as_ptr() as *const c_void,
+            bytes,
+            &mut written,
+        );
         if ok == 0 || written != bytes {
             return false;
         }
@@ -89,8 +98,15 @@ pub fn inject_dll(process: HANDLE, dll_path: &str) -> bool {
             unsafe extern "system" fn() -> isize,
             unsafe extern "system" fn(*mut c_void) -> u32,
         >(load));
-        let th =
-            CreateRemoteThread(process, core::ptr::null(), 0, start, remote, 0, core::ptr::null_mut());
+        let th = CreateRemoteThread(
+            process,
+            core::ptr::null(),
+            0,
+            start,
+            remote,
+            0,
+            core::ptr::null_mut(),
+        );
         if th.is_null() || th == INVALID_HANDLE_VALUE {
             return false;
         }

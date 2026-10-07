@@ -5,12 +5,12 @@
 //! install_late (early payload owns the four path/attr stubs).
 
 mod bootstrap;
+/// Lock-free record of the hook currently executing, in a shared file.
+pub mod breadcrumb;
 mod engine;
 pub mod fuse_client;
 mod fuse_synth;
 mod hook;
-/// Lock-free record of the hook currently executing, in a shared file.
-pub mod breadcrumb;
 mod hookstats;
 mod inject;
 mod lazy_section;
@@ -36,13 +36,7 @@ pub use bootstrap::{
 // build a shim config too. Re-exported here so every existing caller
 // (`vfs-embed`, `vfs-inject`'s tests, `vfs-shim/tests/exit_stall_repro.rs`)
 // keeps compiling unchanged against `vfs_shim::`.
-pub use vfs_protocol::shimcfg::{
-    encode_config, encode_config_full, encode_config_with_overlay, StaticImport,
-};
 pub use engine::{Engine, EngineError, RenameOutcome};
-pub use hook::{
-    install, install_late, registry_detours_installed, skipped_detours, HookGuard, InstallError,
-};
 #[doc(hidden)]
 pub use hook::as_shim_io_for_tests;
 /// Run one `extern "system"` entry point's body with its panic contained.
@@ -55,6 +49,9 @@ pub use hook::as_shim_io_for_tests;
 /// crates' sources, by
 /// `no_extern_hook_bypasses_the_panic_containment_macro`.
 pub use hook::contain_panic;
+pub use hook::{
+    install, install_late, registry_detours_installed, skipped_detours, HookGuard, InstallError,
+};
 /// The under-root open classifier's counters. Exported so a gate's own tests
 /// can assert that a bypass class it closed reads **zero** — see
 /// [`hookstats::outcome_count`]. A class nobody asserts on is a class that can
@@ -63,6 +60,9 @@ pub use hookstats::{
     hook_panic_count, hook_panics_total, outcome_count, overlay_fail_count, reg_notify_count,
     reg_overlay_disabled_by, reg_read_fallback_count, reg_unresolved_count,
     reg_write_refused_count, unrouted_director_opens, OpenOutcome, OverlayFail, RegNotify,
+};
+pub use vfs_protocol::shimcfg::{
+    encode_config, encode_config_full, encode_config_with_overlay, StaticImport,
 };
 
 /// The canonical path the registry hooks recorded for a key handle (synthetic or

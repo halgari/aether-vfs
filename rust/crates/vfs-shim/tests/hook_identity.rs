@@ -48,6 +48,12 @@ fn redirected_file_reports_virtual_path() {
     assert!(n > 0, "GetFinalPathNameByHandleW failed");
     let final_path = String::from_utf16_lossy(&buf[..n as usize]).to_lowercase();
 
-    assert!(final_path.contains("mod.esp"), "should report virtual name: {final_path}");
-    assert!(!final_path.contains("backing_blob"), "must NOT leak backing name: {final_path}");
+    assert!(
+        final_path.contains("mod.esp"),
+        "should report virtual name: {final_path}"
+    );
+    assert!(
+        !final_path.contains("backing_blob"),
+        "must NOT leak backing name: {final_path}"
+    );
 }

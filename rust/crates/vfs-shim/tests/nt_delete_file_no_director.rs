@@ -57,7 +57,12 @@ fn a_path_based_delete_is_contained_by_the_overlay_when_no_director_answers() {
             entries: vec![InputEntry {
                 vpath: "data/mod.esp".into(),
                 kind: EntryKind::File,
-                source: root.join("data").join("mod.esp").to_string_lossy().as_ref().into(),
+                source: root
+                    .join("data")
+                    .join("mod.esp")
+                    .to_string_lossy()
+                    .as_ref()
+                    .into(),
                 size: HOST_MOD.len() as u64,
                 mtime: 0,
             }],
@@ -66,12 +71,8 @@ fn a_path_based_delete_is_contained_by_the_overlay_when_no_director_answers() {
         vfs_shared::bridge::flatten(&tree)
     };
 
-    let engine = Engine::with_overlay(
-        root.to_str().unwrap(),
-        overlay.to_str().unwrap(),
-        snapshot,
-    )
-    .unwrap();
+    let engine =
+        Engine::with_overlay(root.to_str().unwrap(), overlay.to_str().unwrap(), snapshot).unwrap();
     let hooks = install(engine).expect("install");
 
     let under = ntapi::nt_delete_file(&root.join("data").join("mod.esp").to_string_lossy());
@@ -81,12 +82,17 @@ fn a_path_based_delete_is_contained_by_the_overlay_when_no_director_answers() {
     drop(hooks);
 
     assert_eq!(
-        std::fs::read(root.join("data").join("mod.esp")).ok().as_deref(),
+        std::fs::read(root.join("data").join("mod.esp"))
+            .ok()
+            .as_deref(),
         Some(HOST_MOD),
         "the real data/mod.esp was deleted — with no director the overlay whiteout is what \
          has to absorb the delete, exactly as it already does for a handle-based one"
     );
-    assert_eq!(under, STATUS_SUCCESS, "the whiteout handled it; got {under:#x}");
+    assert_eq!(
+        under, STATUS_SUCCESS,
+        "the whiteout handled it; got {under:#x}"
+    );
     let marker = overlay_layer_dir(&overlay, RootId::DEFAULT)
         .join("data")
         .join(vfs_redirect::whiteout_marker("mod.esp"));
@@ -103,7 +109,10 @@ fn a_path_based_delete_is_contained_by_the_overlay_when_no_director_answers() {
          declines — and a decline under a managed root must fail closed rather than hand \
          the path to the kernel; got {root_itself:#x}"
     );
-    assert!(root.is_dir(), "the managed root directory itself was deleted");
+    assert!(
+        root.is_dir(),
+        "the managed root directory itself was deleted"
+    );
 
     assert_eq!(
         outside, STATUS_SUCCESS,

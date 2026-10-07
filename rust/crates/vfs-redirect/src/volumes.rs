@@ -133,7 +133,9 @@ fn admin_share_nt_key(drive: char) -> String {
 /// need, since `\??\...` is kernel-namespace notation `CreateFileW` itself
 /// cannot parse.
 fn strip_nt_prefix(p: &str) -> &str {
-    p.strip_prefix(r"\??\").or_else(|| p.strip_prefix(r"\\?\")).unwrap_or(p)
+    p.strip_prefix(r"\??\")
+        .or_else(|| p.strip_prefix(r"\\?\"))
+        .unwrap_or(p)
 }
 
 /// Resolve `path` (a real, existing directory) to the NT-ready alias key a
@@ -276,9 +278,14 @@ fn junction_aliases(root: &str) -> Vec<(String, String)> {
                 if !looks_like_a_reparse_dir {
                     continue;
                 }
-                let Some(target_norm) = reparse_target_norm(&candidate) else { continue };
+                let Some(target_norm) = reparse_target_norm(&candidate) else {
+                    continue;
+                };
                 if is_component_prefix(&root_norm, &target_norm) {
-                    out.push((nt_key_for_win32_path(&candidate.to_string_lossy()), target_norm));
+                    out.push((
+                        nt_key_for_win32_path(&candidate.to_string_lossy()),
+                        target_norm,
+                    ));
                 }
             }
         }
@@ -320,13 +327,23 @@ fn reparse_target_norm(path: &std::path::Path) -> Option<String> {
 /// uses for the same reason: a byte-for-byte or substring compare would
 /// wrongly match `C:/Games2` against a root of `C:/Games`.
 fn is_component_prefix(root: &str, candidate: &str) -> bool {
-    let root_comps: Vec<&str> = if root.is_empty() { Vec::new() } else { root.split('/').collect() };
-    let cand_comps: Vec<&str> =
-        if candidate.is_empty() { Vec::new() } else { candidate.split('/').collect() };
+    let root_comps: Vec<&str> = if root.is_empty() {
+        Vec::new()
+    } else {
+        root.split('/').collect()
+    };
+    let cand_comps: Vec<&str> = if candidate.is_empty() {
+        Vec::new()
+    } else {
+        candidate.split('/').collect()
+    };
     if cand_comps.len() < root_comps.len() {
         return false;
     }
-    root_comps.iter().zip(cand_comps.iter()).all(|(r, c)| vfs_core::fold(r) == vfs_core::fold(c))
+    root_comps
+        .iter()
+        .zip(cand_comps.iter())
+        .all(|(r, c)| vfs_core::fold(r) == vfs_core::fold(c))
 }
 
 /// Convert `GetVolumeNameForVolumeMountPointW`'s Win32 spelling of a
@@ -406,7 +423,8 @@ mod tests {
         let raw = format!(r"{device_name}\some\path.txt");
         let got = crate::canon::canonicalise(&raw, &map).unwrap();
         assert!(
-            got.to_ascii_lowercase().starts_with(&format!("{}:", drive.to_ascii_lowercase())),
+            got.to_ascii_lowercase()
+                .starts_with(&format!("{}:", drive.to_ascii_lowercase())),
             "device path did not resolve to drive {drive}: {got}"
         );
     }
@@ -444,7 +462,10 @@ mod tests {
         let plain = format!(r"{drive}:\some\path.txt");
         let via_guid = crate::canon::canonicalise(&raw, &map).unwrap();
         let via_drive = crate::canon::canonicalise(&plain, &VolumeMap::empty()).unwrap();
-        assert_eq!(via_guid.to_ascii_lowercase(), via_drive.to_ascii_lowercase());
+        assert_eq!(
+            via_guid.to_ascii_lowercase(),
+            via_drive.to_ascii_lowercase()
+        );
 
         // The convenience (Win32-spelled) key from Task 1's test fixture must
         // NOT match the real (NT-spelled) path a live open actually presents
@@ -454,7 +475,9 @@ mod tests {
         wrong.insert(win32_guid.trim_end_matches('\\'), drive);
         let via_wrong_key = crate::canon::canonicalise(&raw, &wrong).unwrap();
         assert!(
-            !via_wrong_key.to_ascii_lowercase().starts_with(&format!("{}:", drive.to_ascii_lowercase())),
+            !via_wrong_key
+                .to_ascii_lowercase()
+                .starts_with(&format!("{}:", drive.to_ascii_lowercase())),
             "a \\\\?\\-keyed map must not resolve a \\??\\-spelled real path"
         );
     }
@@ -468,14 +491,16 @@ mod tests {
     #[test]
     #[cfg(windows)]
     fn expand_short_name_round_trips_a_real_8dot3_name() {
-        let dir = std::env::temp_dir().join(format!("vfs-redirect-8dot3-test-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("vfs-redirect-8dot3-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let long_name = "ThisIsALongFileNameForRoundTripTesting.txt";
         let long_path = dir.join(long_name);
         std::fs::write(&long_path, b"x").unwrap();
         let long_str = long_path.to_string_lossy().into_owned();
 
-        let short = vfs_win::short_path_name(&long_str).expect("GetShortPathNameW should succeed on an existing file");
+        let short = vfs_win::short_path_name(&long_str)
+            .expect("GetShortPathNameW should succeed on an existing file");
         if short.eq_ignore_ascii_case(&long_str) {
             // 8.3 name generation is disabled on this volume: no distinct
             // short spelling exists to expand. Not this gate's failure.
@@ -484,9 +509,12 @@ mod tests {
             return;
         }
 
-        let expanded = expand_short_name(&short).expect("expansion should succeed for a path that exists");
+        let expanded =
+            expand_short_name(&short).expect("expansion should succeed for a path that exists");
         assert!(
-            expanded.to_ascii_lowercase().contains(&long_name.to_ascii_lowercase()),
+            expanded
+                .to_ascii_lowercase()
+                .contains(&long_name.to_ascii_lowercase()),
             "expansion lost the long name: {expanded}"
         );
         assert!(
@@ -549,8 +577,8 @@ mod tests {
         let root = base.join("root");
         let target_dir = root.join("Games").join("Skyrim").join("Data");
         std::fs::create_dir_all(&target_dir).unwrap();
-        let link_dir = std::env::temp_dir()
-            .join(format!("vfs-redirect-junction-link-{}", std::process::id()));
+        let link_dir =
+            std::env::temp_dir().join(format!("vfs-redirect-junction-link-{}", std::process::id()));
         let _ = std::fs::remove_dir(&link_dir);
         if !make_junction(&link_dir, &target_dir) {
             // No `mklink /J` support/privilege on this box — inconclusive,
@@ -583,14 +611,18 @@ mod tests {
     #[test]
     #[cfg(windows)]
     fn junction_pointing_outside_root_is_not_aliased() {
-        let base = std::env::temp_dir()
-            .join(format!("vfs-redirect-junction-outside-test-{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!(
+            "vfs-redirect-junction-outside-test-{}",
+            std::process::id()
+        ));
         let root = base.join("root");
         let unrelated = base.join("unrelated");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::create_dir_all(&unrelated).unwrap();
-        let link_dir = std::env::temp_dir()
-            .join(format!("vfs-redirect-junction-outside-link-{}", std::process::id()));
+        let link_dir = std::env::temp_dir().join(format!(
+            "vfs-redirect-junction-outside-link-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir(&link_dir);
         if !make_junction(&link_dir, &unrelated) {
             std::fs::remove_dir_all(&base).ok();
@@ -621,8 +653,10 @@ mod tests {
     #[test]
     #[cfg(windows)]
     fn root_itself_being_a_reparse_point_is_never_aliased() {
-        let base = std::env::temp_dir()
-            .join(format!("vfs-redirect-root-is-junction-test-{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!(
+            "vfs-redirect-root-is-junction-test-{}",
+            std::process::id()
+        ));
         let real_target = base.join("real-target");
         std::fs::create_dir_all(&real_target).unwrap();
         let root_link = base.join("root-link");
@@ -636,7 +670,9 @@ mod tests {
         let aliases = junction_aliases(&root_str);
         let root_key = nt_key_for_win32_path(&root_str);
         assert!(
-            !aliases.iter().any(|(k, _)| k.eq_ignore_ascii_case(&root_key)),
+            !aliases
+                .iter()
+                .any(|(k, _)| k.eq_ignore_ascii_case(&root_key)),
             "root's own literal path was wrongly registered as an alias key: {aliases:?}"
         );
 
@@ -658,7 +694,10 @@ mod tests {
         let plain = format!(r"{drive}:\some\path.txt");
         let via_share = crate::canon::canonicalise(&raw, &map).unwrap();
         let via_drive = crate::canon::canonicalise(&plain, &VolumeMap::empty()).unwrap();
-        assert_eq!(via_share.to_ascii_lowercase(), via_drive.to_ascii_lowercase());
+        assert_eq!(
+            via_share.to_ascii_lowercase(),
+            via_drive.to_ascii_lowercase()
+        );
     }
 
     /// `mklink /J` needs no elevation, same convention `vfs-fixture-escape`
@@ -669,7 +708,13 @@ mod tests {
     #[cfg(windows)]
     fn make_junction(link: &std::path::Path, target: &std::path::Path) -> bool {
         std::process::Command::new("cmd")
-            .args(["/C", "mklink", "/J", &link.to_string_lossy(), &target.to_string_lossy()])
+            .args([
+                "/C",
+                "mklink",
+                "/J",
+                &link.to_string_lossy(),
+                &target.to_string_lossy(),
+            ])
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false)

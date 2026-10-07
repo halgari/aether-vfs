@@ -68,12 +68,20 @@ fn handle_based_deletes_and_out_of_root_renames_never_touch_the_real_file() {
     // fixture's stand-in for an inherited or pre-injection handle: no detour
     // was in place when they were created, so nothing recorded them, which is
     // precisely the state a `CreateProcess`-inherited handle arrives in.
-    let (st, unseen_handle) =
-        ntapi::nt_open_abs(&root.join("data").join("unseen.esp").to_string_lossy(), DELETE);
-    assert!(st >= 0, "pre-install open of the under-root file failed: {st:#x}");
+    let (st, unseen_handle) = ntapi::nt_open_abs(
+        &root.join("data").join("unseen.esp").to_string_lossy(),
+        DELETE,
+    );
+    assert!(
+        st >= 0,
+        "pre-install open of the under-root file failed: {st:#x}"
+    );
     let (st, root_dir_handle) =
         ntapi::nt_open_dir_abs(&root.to_string_lossy(), DELETE | ntapi::FILE_LIST_DIRECTORY);
-    assert!(st >= 0, "pre-install open of the root directory failed: {st:#x}");
+    assert!(
+        st >= 0,
+        "pre-install open of the root directory failed: {st:#x}"
+    );
 
     // Both real files are mapped at their own on-disk paths, so a read/DELETE
     // open of them resolves rather than being denied — see `hook_write.rs` on
@@ -85,12 +93,21 @@ fn handle_based_deletes_and_out_of_root_renames_never_touch_the_real_file() {
             .map(|name| InputEntry {
                 vpath: format!("data/{name}"),
                 kind: EntryKind::File,
-                source: root.join("data").join(name).to_string_lossy().as_ref().into(),
+                source: root
+                    .join("data")
+                    .join(name)
+                    .to_string_lossy()
+                    .as_ref()
+                    .into(),
                 size: 0,
                 mtime: 0,
             })
             .collect();
-        let tree = build(vec![Layer { id: LayerId(0), entries }]).unwrap();
+        let tree = build(vec![Layer {
+            id: LayerId(0),
+            entries,
+        }])
+        .unwrap();
         vfs_shared::bridge::flatten(&tree)
     };
 
@@ -100,8 +117,10 @@ fn handle_based_deletes_and_out_of_root_renames_never_touch_the_real_file() {
 
     // 2. The rename out. `MoveFileExW` opens the source (which the shim *does*
     //    see) and issues a set-info whose target resolves nowhere.
-    let export_result =
-        std::fs::rename(root.join("data").join("export.esp"), outside.join("export.esp"));
+    let export_result = std::fs::rename(
+        root.join("data").join("export.esp"),
+        outside.join("export.esp"),
+    );
 
     // 1. The unseen under-root handle.
     let unseen_status = ntapi::nt_set_disposition_delete(unseen_handle);
@@ -118,7 +137,9 @@ fn handle_based_deletes_and_out_of_root_renames_never_touch_the_real_file() {
 
     // --- filesystem first ---------------------------------------------------
     assert_eq!(
-        std::fs::read(root.join("data").join("export.esp")).ok().as_deref(),
+        std::fs::read(root.join("data").join("export.esp"))
+            .ok()
+            .as_deref(),
         Some(HOST_EXPORT),
         "the real data/export.esp is gone: the kernel performed the rename out of the root, \
          which unlinks a real file under a managed root — the destination being outside does \
@@ -129,13 +150,18 @@ fn handle_based_deletes_and_out_of_root_renames_never_touch_the_real_file() {
         "the export landed outside the root, so the move really happened"
     );
     assert_eq!(
-        std::fs::read(root.join("data").join("unseen.esp")).ok().as_deref(),
+        std::fs::read(root.join("data").join("unseen.esp"))
+            .ok()
+            .as_deref(),
         Some(HOST_UNSEEN),
         "the real data/unseen.esp was unlinked — a handle the shim never saw opened is still \
          a handle on a path under a managed root, and a `PATH_TABLE` miss must not be read as \
          `not ours`"
     );
-    assert!(root.is_dir(), "the managed root directory itself was deleted");
+    assert!(
+        root.is_dir(),
+        "the managed root directory itself was deleted"
+    );
 
     // --- then the statuses --------------------------------------------------
     assert!(

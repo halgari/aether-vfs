@@ -1064,7 +1064,10 @@ fn the_out_of_scope_calls_are_refused_on_keys_the_overlay_serves() {
     });
     assert_eq!(restored, STATUS_UNSUCCESSFUL, "bypassed NtRestoreKey");
     assert_eq!(secured, STATUS_UNSUCCESSFUL, "bypassed NtSetSecurityObject");
-    assert_eq!(saved_bypassed, saved, "a bypassed NtSaveKey is the real call");
+    assert_eq!(
+        saved_bypassed, saved,
+        "a bypassed NtSaveKey is the real call"
+    );
     unsafe {
         windows_sys::Win32::Foundation::LocalFree(sd);
         CloseHandle(restore_file as HANDLE);

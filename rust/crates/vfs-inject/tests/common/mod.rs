@@ -99,10 +99,7 @@ pub fn locate_artifact(name: &str) -> String {
         return p.to_string_lossy().into_owned();
     }
     if let Ok(manifest) = std::env::var("CARGO_MANIFEST_DIR") {
-        let root = PathBuf::from(manifest)
-            .join("..")
-            .join("..")
-            .join("target");
+        let root = PathBuf::from(manifest).join("..").join("..").join("target");
         for profile in ["debug", "release"] {
             let base = root.join(profile);
             for cand in [base.join(name), base.join("deps").join(name)] {
@@ -143,7 +140,6 @@ pub fn locate_shim_and_payload() -> (String, String) {
     ensure_fixtures();
     let dll = locate_artifact("vfs_shim_dll.dll");
     let payload = locate_artifact("vfs_payload.dll");
-    let resolved =
-        vfs_inject::ensure_payload_beside_shim(&dll, Some(&payload)).unwrap_or(payload);
+    let resolved = vfs_inject::ensure_payload_beside_shim(&dll, Some(&payload)).unwrap_or(payload);
     (dll, resolved)
 }

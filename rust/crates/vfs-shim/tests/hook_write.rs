@@ -72,7 +72,11 @@ fn writes_land_in_overlay_with_cow() {
         f.write_all(b"NEW").unwrap();
     }
     // Readable through the virtual path...
-    assert_eq!(std::fs::read(&newfile).unwrap(), b"NEW", "new file readable via VFS");
+    assert_eq!(
+        std::fs::read(&newfile).unwrap(),
+        b"NEW",
+        "new file readable via VFS"
+    );
     // ...and physically it lives in the overlay, not the real root (the overlay
     // path is outside the managed root, so this read is un-virtualized).
     assert_eq!(
@@ -106,15 +110,30 @@ fn writes_land_in_overlay_with_cow() {
         "copy-up materialised something with no director to read it from"
     );
     // The virtual read still resolves through the snapshot, unmodified...
-    assert_eq!(std::fs::read(root.join("mod.esp")).unwrap(), b"ORIG", "mod still readable");
+    assert_eq!(
+        std::fs::read(root.join("mod.esp")).unwrap(),
+        b"ORIG",
+        "mod still readable"
+    );
     // ...and the shared mod backing is untouched.
-    assert_eq!(std::fs::read(&backing).unwrap(), b"ORIG", "backing must not be mutated");
+    assert_eq!(
+        std::fs::read(&backing).unwrap(),
+        b"ORIG",
+        "backing must not be mutated"
+    );
 
     // --- Delete -> whiteout ---
-    assert_eq!(std::fs::read(root.join("to_delete.txt")).unwrap(), b"DELETE-ME", "visible pre-delete");
+    assert_eq!(
+        std::fs::read(root.join("to_delete.txt")).unwrap(),
+        b"DELETE-ME",
+        "visible pre-delete"
+    );
     std::fs::remove_file(root.join("to_delete.txt")).expect("delete");
     // The path now reads as gone through the VFS...
-    assert!(std::fs::read(root.join("to_delete.txt")).is_err(), "deleted file hidden");
+    assert!(
+        std::fs::read(root.join("to_delete.txt")).is_err(),
+        "deleted file hidden"
+    );
     // ...via a whiteout marker in the overlay...
     assert!(
         overlay_root0.join("to_delete.txt.__vfs_wh__").exists(),
@@ -122,12 +141,26 @@ fn writes_land_in_overlay_with_cow() {
     );
     // ...and deleting a mod file leaves the backing intact.
     std::fs::remove_file(root.join("mod.esp")).expect("delete mod");
-    assert!(std::fs::read(root.join("mod.esp")).is_err(), "deleted mod hidden");
-    assert_eq!(std::fs::read(&backing).unwrap(), b"ORIG", "backing survives mod delete");
+    assert!(
+        std::fs::read(root.join("mod.esp")).is_err(),
+        "deleted mod hidden"
+    );
+    assert_eq!(
+        std::fs::read(&backing).unwrap(),
+        b"ORIG",
+        "backing survives mod delete"
+    );
 
     // --- Rename within the root ---
     std::fs::write(root.join("rename_src.txt"), b"RENAMEME").unwrap();
     std::fs::rename(root.join("rename_src.txt"), root.join("rename_dst.txt")).expect("rename");
-    assert_eq!(std::fs::read(root.join("rename_dst.txt")).unwrap(), b"RENAMEME", "renamed to dst");
-    assert!(std::fs::read(root.join("rename_src.txt")).is_err(), "source hidden after rename");
+    assert_eq!(
+        std::fs::read(root.join("rename_dst.txt")).unwrap(),
+        b"RENAMEME",
+        "renamed to dst"
+    );
+    assert!(
+        std::fs::read(root.join("rename_src.txt")).is_err(),
+        "source hidden after rename"
+    );
 }

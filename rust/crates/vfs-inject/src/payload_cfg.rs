@@ -4,8 +4,7 @@
 pub const MAX_REDIRECTS: usize = 4;
 
 #[repr(C)]
-#[derive(Clone, Copy)]
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
 pub struct RedirectEntry {
     pub suffix_ptr: usize,
     pub suffix_wlen: u32,
@@ -13,7 +12,6 @@ pub struct RedirectEntry {
     pub backing_wlen: u32,
     pub backing_size: u64,
 }
-
 
 #[repr(C)]
 pub struct PayloadConfig {

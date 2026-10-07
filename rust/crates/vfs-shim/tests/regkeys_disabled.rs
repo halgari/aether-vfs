@@ -79,7 +79,11 @@ fn every_registry_call_is_the_real_one() {
         Some(Err(vfs_shim::regclient::OFF)),
         "the off outcome is recorded"
     );
-    assert_eq!(vfs_shim::reg_overlay_disabled_by(), None, "off is not a disabled overlay");
+    assert_eq!(
+        vfs_shim::reg_overlay_disabled_by(),
+        None,
+        "off is not a disabled overlay"
+    );
 
     let name = r"\Registry\Machine\Software";
     let mut h = 0isize;
@@ -102,7 +106,9 @@ fn every_registry_call_is_the_real_one() {
     let real_name =
         String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(name_ptr, name_len) });
     assert!(
-        real_name.to_ascii_uppercase().starts_with(r"\REGISTRY\MACHINE\SOFTWARE"),
+        real_name
+            .to_ascii_uppercase()
+            .starts_with(r"\REGISTRY\MACHINE\SOFTWARE"),
         "{real_name}"
     );
 

@@ -47,8 +47,7 @@ use crate::ntdef::{
     STATUS_INFO_LENGTH_MISMATCH, STATUS_INVALID_BUFFER_SIZE, STATUS_INVALID_HANDLE,
     STATUS_INVALID_PARAMETER, STATUS_INVALID_SECURITY_DESCR, STATUS_KEY_DELETED,
     STATUS_NOT_SUPPORTED, STATUS_OBJECT_NAME_INVALID, STATUS_OBJECT_NAME_NOT_FOUND,
-    STATUS_OBJECT_PATH_NOT_FOUND, STATUS_OBJECT_TYPE_MISMATCH, STATUS_SUCCESS,
-    STATUS_UNSUCCESSFUL,
+    STATUS_OBJECT_PATH_NOT_FOUND, STATUS_OBJECT_TYPE_MISMATCH, STATUS_SUCCESS, STATUS_UNSUCCESSFUL,
 };
 
 /// Tag bits of a synthetic key handle: bits 29 and 30, nothing above them.
@@ -1658,7 +1657,11 @@ pub(crate) mod tests {
         _: u32,
         _: *mut u32,
     ) -> NTSTATUS {
-        crate::hook::contain_panic("name_query_not_a_key", || STATUS_OBJECT_TYPE_MISMATCH, || -1)
+        crate::hook::contain_panic(
+            "name_query_not_a_key",
+            || STATUS_OBJECT_TYPE_MISMATCH,
+            || -1,
+        )
     }
 
     /// Entry points whose `NtQueryKey` fails every name query: with `not_a_key`, as for a
@@ -1687,9 +1690,15 @@ pub(crate) mod tests {
         let real = real_whose_name_query_fails(false);
         unsafe {
             assert!(matches!(resolve(&real, h), Resolution::Unresolvable));
-            assert!(!is_not_ours(h), "an unresolvable handle is not cached as not ours");
+            assert!(
+                !is_not_ours(h),
+                "an unresolvable handle is not cached as not ours"
+            );
             assert_eq!(serves_handle(&real, h), Serves::Unresolvable);
-            assert!(resolve_for_read(&real, h).is_none(), "a read passes through");
+            assert!(
+                resolve_for_read(&real, h).is_none(),
+                "a read passes through"
+            );
             assert_eq!(
                 set_security(&real, h, 0, core::ptr::null()),
                 Some(STATUS_UNSUCCESSFUL),

@@ -275,7 +275,11 @@ impl Fake {
     /// crossed the ring actually left behind, readable by a test without
     /// going back through the shim.
     pub fn contents(&self, vpath: &str) -> Option<Vec<u8>> {
-        self.files.lock().unwrap().get(vpath).map(|e| e.bytes.clone())
+        self.files
+            .lock()
+            .unwrap()
+            .get(vpath)
+            .map(|e| e.bytes.clone())
     }
 
     /// `arena` is `(arena, slot)` for this request, mirroring
@@ -346,7 +350,12 @@ impl Fake {
                         return None;
                     }
                     seen.push(name.to_string());
-                    Some(P::DirEntryWire { name: name.to_string(), is_dir, size, mtime: 0 })
+                    Some(P::DirEntryWire {
+                        name: name.to_string(),
+                        is_dir,
+                        size,
+                        mtime: 0,
+                    })
                 };
                 for d in &self.dirs {
                     if let Some(rest) = d.strip_prefix(&prefix) {
@@ -400,7 +409,12 @@ impl Fake {
                     self.handles.lock().unwrap().insert(fh, vpath);
                     return (
                         P::ST_OK,
-                        P::encode_open_resp(&P::OpenResp { fh, size: 0, is_dir: true, ..Default::default() }),
+                        P::encode_open_resp(&P::OpenResp {
+                            fh,
+                            size: 0,
+                            is_dir: true,
+                            ..Default::default()
+                        }),
                     );
                 }
                 let mut files = self.files.lock().unwrap();
@@ -412,7 +426,11 @@ impl Fake {
                     // bits.
                     if !self.is_writable(&vpath) {
                         return (
-                            if exists { P::ST_READ_ONLY } else { P::ST_NOT_FOUND },
+                            if exists {
+                                P::ST_READ_ONLY
+                            } else {
+                                P::ST_NOT_FOUND
+                            },
                             Vec::new(),
                         );
                     }
@@ -425,7 +443,10 @@ impl Fake {
                         }
                         files.insert(
                             vpath.clone(),
-                            Entry { bytes: Vec::new(), style: ReadStyle::Whole },
+                            Entry {
+                                bytes: Vec::new(),
+                                style: ReadStyle::Whole,
+                            },
                         );
                     } else if flags & P::OPEN_TRUNC != 0 {
                         files.get_mut(&vpath).expect("just checked").bytes.clear();
@@ -441,7 +462,12 @@ impl Fake {
                 self.handles.lock().unwrap().insert(fh, vpath);
                 (
                     P::ST_OK,
-                    P::encode_open_resp(&P::OpenResp { fh, size, is_dir: false, ..Default::default() }),
+                    P::encode_open_resp(&P::OpenResp {
+                        fh,
+                        size,
+                        is_dir: false,
+                        ..Default::default()
+                    }),
                 )
             }
             P::OP_WRITE => {

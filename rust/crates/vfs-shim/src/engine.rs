@@ -146,7 +146,11 @@ impl Engine {
         overlay_root: &str,
         snapshot: Vec<u8>,
     ) -> Result<Self, EngineError> {
-        Self::build(&[(RootId::DEFAULT, root.to_string())], Some(overlay_root), snapshot)
+        Self::build(
+            &[(RootId::DEFAULT, root.to_string())],
+            Some(overlay_root),
+            snapshot,
+        )
     }
 
     /// Every root the session declared, `(id, path)`. Two entries may share an
@@ -194,7 +198,12 @@ impl Engine {
         RootMap::with_roots(&Self::refs(roots), VolumeMap::empty()).map_err(EngineError::Root)?;
         SnapshotReader::open(&snapshot).map_err(EngineError::Snapshot)?;
         let overlay = overlay_root.map(Overlay::new);
-        Ok(Engine { roots: roots.to_vec(), map: OnceLock::new(), snapshot, overlay })
+        Ok(Engine {
+            roots: roots.to_vec(),
+            map: OnceLock::new(),
+            snapshot,
+            overlay,
+        })
     }
 
     /// Borrowed view of `roots` in the shape `RootMap::with_roots` takes.
@@ -313,12 +322,16 @@ impl Engine {
     pub fn decide(&self, nt_path: &str) -> Decision {
         match self.overlay_state(nt_path) {
             Some(OverlayState::Present { path, .. }) => {
-                return Decision::Redirect { target_nt: to_nt(&path.to_string_lossy()) }
+                return Decision::Redirect {
+                    target_nt: to_nt(&path.to_string_lossy()),
+                }
             }
             Some(OverlayState::Whiteout) => return Decision::Deny,
             Some(OverlayState::Absent) | None => {}
         }
-        let Some(map) = self.map() else { return Decision::PassThrough };
+        let Some(map) = self.map() else {
+            return Decision::PassThrough;
+        };
         match map.resolve(nt_path) {
             // Outside every declared root: never ours to touch.
             None => Decision::PassThrough,
@@ -832,13 +845,21 @@ mod tests {
     fn decide_redirects_a_virtual_file() {
         let engine = Engine::new(r"\??\C:\Games\Skyrim", snapshot_bytes()).unwrap();
         let d = engine.decide(r"\??\C:\Games\Skyrim\Data\foo.esp");
-        assert_eq!(d, Decision::Redirect { target_nt: r"\??\D:\Mods\Cool\foo.esp".to_string() });
+        assert_eq!(
+            d,
+            Decision::Redirect {
+                target_nt: r"\??\D:\Mods\Cool\foo.esp".to_string()
+            }
+        );
     }
 
     #[test]
     fn decide_passes_through_outside_root() {
         let engine = Engine::new(r"\??\C:\Games\Skyrim", snapshot_bytes()).unwrap();
-        assert_eq!(engine.decide(r"\??\C:\Windows\notepad.exe"), Decision::PassThrough);
+        assert_eq!(
+            engine.decide(r"\??\C:\Windows\notepad.exe"),
+            Decision::PassThrough
+        );
     }
 
     #[test]
@@ -855,8 +876,7 @@ mod tests {
     /// moves the file across the root boundary.
     #[test]
     fn a_cross_root_rename_is_refused_rather_than_declined() {
-        let base = std::env::temp_dir()
-            .join(format!("vfs-engine-xroot-{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!("vfs-engine-xroot-{}", std::process::id()));
         let root0 = base.join("root0");
         let root1 = base.join("root1");
         let overlay = base.join("overlay");
@@ -870,12 +890,9 @@ mod tests {
         let from = format!(r"\??\{}", root1.join("a.txt").display());
         let to = format!(r"\??\{}", root0.join("b.txt").display());
 
-        let with_overlay = Engine::with_roots_and_overlay(
-            &roots,
-            &overlay.to_string_lossy(),
-            snapshot_bytes(),
-        )
-        .unwrap();
+        let with_overlay =
+            Engine::with_roots_and_overlay(&roots, &overlay.to_string_lossy(), snapshot_bytes())
+                .unwrap();
         assert_eq!(with_overlay.rename(&from, &to), RenameOutcome::CrossRoot);
 
         // And with no overlay at all: an engine with nothing to capture the
@@ -892,7 +909,10 @@ mod tests {
         // The control: within one root it is still handled, so the assertions
         // above are not just \"rename never works\".
         let same_root = format!(r"\??\{}", root1.join("c.txt").display());
-        assert_eq!(with_overlay.rename(&from, &same_root), RenameOutcome::Handled);
+        assert_eq!(
+            with_overlay.rename(&from, &same_root),
+            RenameOutcome::Handled
+        );
 
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -906,12 +926,14 @@ mod tests {
     /// on exactly that verdict, opening the real bytes below.
     #[test]
     fn real_on_disk_file_under_root_not_in_snapshot_is_denied() {
-        let dir = std::env::temp_dir()
-            .join(format!("vfs-engine-negcanary-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vfs-engine-negcanary-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("Data")).unwrap();
         let real_file = dir.join("Data").join("negative-canary.bin");
         std::fs::write(&real_file, b"the real bytes physically on disk").unwrap();
-        assert!(real_file.is_file(), "setup: the real file must actually exist");
+        assert!(
+            real_file.is_file(),
+            "setup: the real file must actually exist"
+        );
 
         let engine = Engine::new(&dir.to_string_lossy(), snapshot_bytes()).unwrap();
         let path = format!(r"\??\{}", real_file.to_string_lossy());
@@ -943,8 +965,8 @@ mod tests {
     #[test]
     #[cfg(windows)]
     fn mo2_style_junction_inside_root_pointing_to_external_staging_is_sealed() {
-        let base = std::env::temp_dir()
-            .join(format!("vfs-engine-mo2-junction-{}", std::process::id()));
+        let base =
+            std::env::temp_dir().join(format!("vfs-engine-mo2-junction-{}", std::process::id()));
         let root_dir = base.join("root");
         // Deliberately NOT under root, and NOT mounted as a provider anywhere
         // -- the external mod-staging directory an MO2-style setup points at.
@@ -1019,14 +1041,25 @@ mod tests {
         std::fs::create_dir_all(dir.join("root-0").join("data")).unwrap();
         std::fs::write(dir.join("root-0").join("data").join("overlaid.txt"), b"x").unwrap();
         let engine = overlay_engine(&dir);
-        let real = vec![DirItem { name: "real.txt".into(), is_dir: false, size: 1, mtime: 0 }];
+        let real = vec![DirItem {
+            name: "real.txt".into(),
+            is_dir: false,
+            size: 1,
+            mtime: 0,
+        }];
         let listed = engine.overlay_listing(r"\??\C:\Games\Skyrim\Data", &real, None);
         let names: Vec<&str> = listed.iter().map(|e| e.name.as_str()).collect();
         assert!(names.contains(&"real.txt"), "real entry dropped: {names:?}");
-        assert!(names.contains(&"overlaid.txt"), "overlay entry missing: {names:?}");
+        assert!(
+            names.contains(&"overlaid.txt"),
+            "overlay entry missing: {names:?}"
+        );
         // The snapshot's "foo.esp" must NOT appear: no director, no overlay
         // entry for it -- nothing answers for it anymore.
-        assert!(!names.contains(&"foo.esp"), "snapshot leaked into the listing: {names:?}");
+        assert!(
+            !names.contains(&"foo.esp"),
+            "snapshot leaked into the listing: {names:?}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1052,7 +1085,10 @@ mod tests {
         let d = engine.decide(r"\??\C:\Games\Skyrim\Data\foo.esp");
         match d {
             Decision::Redirect { target_nt } => {
-                assert!(target_nt.to_lowercase().contains("vfs-ovl-win"), "{target_nt}");
+                assert!(
+                    target_nt.to_lowercase().contains("vfs-ovl-win"),
+                    "{target_nt}"
+                );
                 assert!(target_nt.starts_with(r"\??\"));
             }
             other => panic!("expected overlay redirect, got {other:?}"),
@@ -1068,9 +1104,16 @@ mod tests {
         // declares one root, so root 0 is the only one it can resolve to.
         std::fs::create_dir_all(dir.join("root-0").join("data")).unwrap();
         // Whiteout marker for data/foo.esp.
-        std::fs::write(dir.join("root-0").join("data").join("foo.esp.__vfs_wh__"), b"").unwrap();
+        std::fs::write(
+            dir.join("root-0").join("data").join("foo.esp.__vfs_wh__"),
+            b"",
+        )
+        .unwrap();
         let engine = overlay_engine(&dir);
-        assert_eq!(engine.decide(r"\??\C:\Games\Skyrim\Data\foo.esp"), Decision::Deny);
+        assert_eq!(
+            engine.decide(r"\??\C:\Games\Skyrim\Data\foo.esp"),
+            Decision::Deny
+        );
         // `AttrDecision`/`Engine::query_attributes` are gone (Task 4); the
         // overlay's own whiteout state is what a caller now consults for an
         // attribute-query fallback (see `hook.rs`'s qattr/qfull/qibn hooks).
@@ -1145,17 +1188,27 @@ mod tests {
             )
         };
 
-        let under_root0 = format!(r"\??\{}", root0.join("Data").join("w.ini").to_string_lossy());
+        let under_root0 = format!(
+            r"\??\{}",
+            root0.join("Data").join("w.ini").to_string_lossy()
+        );
         assert_eq!(
             engine.decide_open(&under_root0, WRITE, FILE_OVERWRITE_IF),
-            Decision::Redirect { target_nt: expect_target(RootId::DEFAULT) },
+            Decision::Redirect {
+                target_nt: expect_target(RootId::DEFAULT)
+            },
             "a write under root 0 must land in root 0's overlay subtree"
         );
 
-        let under_root1 = format!(r"\??\{}", root1.join("Data").join("w.ini").to_string_lossy());
+        let under_root1 = format!(
+            r"\??\{}",
+            root1.join("Data").join("w.ini").to_string_lossy()
+        );
         assert_eq!(
             engine.decide_open(&under_root1, WRITE, FILE_OVERWRITE_IF),
-            Decision::Redirect { target_nt: expect_target(RootId(1)) },
+            Decision::Redirect {
+                target_nt: expect_target(RootId(1))
+            },
             "a write under root 1 must land in ROOT 1's overlay subtree — a \
              PassThrough here is the closed gap reopening (the write reaching \
              real disk); a root-0 target here is the same write colliding with \
@@ -1163,7 +1216,9 @@ mod tests {
         );
         assert_eq!(
             engine.decide_open(&under_root1, WRITE, FILE_OPEN_IF),
-            Decision::Redirect { target_nt: expect_target(RootId(1)) },
+            Decision::Redirect {
+                target_nt: expect_target(RootId(1))
+            },
             "same for the copy-on-write disposition"
         );
         assert_ne!(
@@ -1210,8 +1265,8 @@ mod tests {
     /// seals an under-root path the provider graph does not know.
     #[test]
     fn a_read_under_a_second_root_is_not_answered_from_root_zeros_snapshot() {
-        let base = std::env::temp_dir()
-            .join(format!("vfs-engine-2root-snap-{}", std::process::id()));
+        let base =
+            std::env::temp_dir().join(format!("vfs-engine-2root-snap-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let root0 = base.join("root0");
         let root1 = base.join("root1");
@@ -1228,15 +1283,23 @@ mod tests {
         .unwrap();
 
         // The snapshot has exactly one entry, `data/foo.esp` -> D:\Mods\Cool.
-        let via_root0 = format!(r"\??\{}", root0.join("Data").join("foo.esp").to_string_lossy());
+        let via_root0 = format!(
+            r"\??\{}",
+            root0.join("Data").join("foo.esp").to_string_lossy()
+        );
         assert_eq!(
             engine.decide(&via_root0),
-            Decision::Redirect { target_nt: r"\??\D:\Mods\Cool\foo.esp".to_string() },
+            Decision::Redirect {
+                target_nt: r"\??\D:\Mods\Cool\foo.esp".to_string()
+            },
             "root 0 still resolves against the snapshot"
         );
 
         // The *same relative path* under root 1 must not pick that up.
-        let via_root1 = format!(r"\??\{}", root1.join("Data").join("foo.esp").to_string_lossy());
+        let via_root1 = format!(
+            r"\??\{}",
+            root1.join("Data").join("foo.esp").to_string_lossy()
+        );
         assert_eq!(
             engine.decide(&via_root1),
             Decision::Deny,
@@ -1273,7 +1336,8 @@ mod tests {
         use vfs_redirect::FILE_OPEN_IF;
         const WRITE: u32 = 0x4000_0000;
 
-        let base = std::env::temp_dir().join(format!("vfs-engine-2root-cow-{}", std::process::id()));
+        let base =
+            std::env::temp_dir().join(format!("vfs-engine-2root-cow-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let root0 = base.join("root0");
         let root1 = base.join("root1");
@@ -1299,16 +1363,21 @@ mod tests {
         )
         .unwrap();
 
-        for (root, dir, disk) in
-            [(RootId::DEFAULT, &root0, R0), (RootId(1), &root1, R1)]
-        {
-            let nt = format!(r"\??\{}", dir.join("Data").join("foo.esp").to_string_lossy());
-            let dest = overlay_layer_dir(&overlay_dir, root).join("data").join("foo.esp");
+        for (root, dir, disk) in [(RootId::DEFAULT, &root0, R0), (RootId(1), &root1, R1)] {
+            let nt = format!(
+                r"\??\{}",
+                dir.join("Data").join("foo.esp").to_string_lossy()
+            );
+            let dest = overlay_layer_dir(&overlay_dir, root)
+                .join("data")
+                .join("foo.esp");
             // The write is still captured by the overlay — that half is
             // unchanged, and it is what keeps the write off real disk.
             assert_eq!(
                 engine.decide_open(&nt, WRITE, FILE_OPEN_IF),
-                Decision::Redirect { target_nt: to_nt(&dest.to_string_lossy()) },
+                Decision::Redirect {
+                    target_nt: to_nt(&dest.to_string_lossy())
+                },
                 "root {root:?}: the write itself must still be redirected into the overlay"
             );
             // ...but nothing was copied up. The real file under the root is
@@ -1363,22 +1432,33 @@ mod tests {
         )
         .unwrap();
 
-        let via_root1 = format!(r"\??\{}", root1.join("Data").join("foo.esp").to_string_lossy());
-        assert!(engine.whiteout(&via_root1), "a delete under root 1 must be handled");
+        let via_root1 = format!(
+            r"\??\{}",
+            root1.join("Data").join("foo.esp").to_string_lossy()
+        );
+        assert!(
+            engine.whiteout(&via_root1),
+            "a delete under root 1 must be handled"
+        );
         assert!(matches!(
             engine.overlay_state(&via_root1),
             Some(OverlayState::Whiteout)
         ));
 
         // Root 0's identical relative path is untouched: still the snapshot's.
-        let via_root0 = format!(r"\??\{}", root0.join("Data").join("foo.esp").to_string_lossy());
+        let via_root0 = format!(
+            r"\??\{}",
+            root0.join("Data").join("foo.esp").to_string_lossy()
+        );
         assert!(
             matches!(engine.overlay_state(&via_root0), Some(OverlayState::Absent)),
             "root 1's whiteout leaked into root 0"
         );
         assert_eq!(
             engine.decide(&via_root0),
-            Decision::Redirect { target_nt: r"\??\D:\Mods\Cool\foo.esp".to_string() }
+            Decision::Redirect {
+                target_nt: r"\??\D:\Mods\Cool\foo.esp".to_string()
+            }
         );
 
         let _ = std::fs::remove_dir_all(&base);
@@ -1392,7 +1472,9 @@ mod tests {
         // No overlay entry -> snapshot redirect to the backing file.
         assert_eq!(
             engine.decide(r"\??\C:\Games\Skyrim\Data\foo.esp"),
-            Decision::Redirect { target_nt: r"\??\D:\Mods\Cool\foo.esp".to_string() }
+            Decision::Redirect {
+                target_nt: r"\??\D:\Mods\Cool\foo.esp".to_string()
+            }
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

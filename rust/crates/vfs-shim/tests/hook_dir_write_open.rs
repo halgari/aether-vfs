@@ -32,8 +32,8 @@
 
 mod fakedirector;
 
-use std::ffi::c_void;
 use fakedirector::Fake;
+use std::ffi::c_void;
 use vfs_shim::{install, Engine};
 
 const GENERIC_READ: u32 = 0x8000_0000;

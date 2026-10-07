@@ -21,8 +21,8 @@
 //! bytes, so a root that got lost anywhere in the chain shows up as one root
 //! reading, modifying, or deleting the other's file.
 use std::io::Write;
-use vfs_shim::{install, overlay_layer_dir, Engine};
 use vfs_redirect::RootId;
+use vfs_shim::{install, overlay_layer_dir, Engine};
 
 #[test]
 fn writes_under_a_second_root_stay_in_that_root_s_overlay() {
@@ -62,7 +62,11 @@ fn writes_under_a_second_root_stay_in_that_root_s_overlay() {
             entries: vec![InputEntry {
                 vpath: "snap-only.esp".into(),
                 kind: EntryKind::File,
-                source: base.join("nonexistent-backing.esp").to_string_lossy().as_ref().into(),
+                source: base
+                    .join("nonexistent-backing.esp")
+                    .to_string_lossy()
+                    .as_ref()
+                    .into(),
                 size: 0,
                 mtime: 0,
             }],
@@ -96,7 +100,11 @@ fn writes_under_a_second_root_stay_in_that_root_s_overlay() {
         let mut f = std::fs::File::create(&created).expect("create under root 1");
         f.write_all(b"NEW").unwrap();
     }
-    assert_eq!(std::fs::read(&created).unwrap(), b"NEW", "readable back through root 1");
+    assert_eq!(
+        std::fs::read(&created).unwrap(),
+        b"NEW",
+        "readable back through root 1"
+    );
     assert_eq!(
         std::fs::read(ovl1.join("created.txt")).unwrap(),
         b"NEW",
@@ -125,7 +133,10 @@ fn writes_under_a_second_root_stay_in_that_root_s_overlay() {
 
     // --- Delete under root 1 whites out root 1's copy only ---
     std::fs::remove_file(root1.join("shared.txt")).expect("delete under root 1");
-    assert!(std::fs::read(root1.join("shared.txt")).is_err(), "deleted under root 1");
+    assert!(
+        std::fs::read(root1.join("shared.txt")).is_err(),
+        "deleted under root 1"
+    );
     assert!(
         ovl1.join("shared.txt.__vfs_wh__").exists(),
         "whiteout marker must be written under root 1's subtree"
@@ -143,12 +154,18 @@ fn writes_under_a_second_root_stay_in_that_root_s_overlay() {
     // --- Rename within root 1 stays within root 1 ---
     std::fs::rename(root1.join("created.txt"), root1.join("renamed.txt")).expect("rename");
     assert_eq!(std::fs::read(root1.join("renamed.txt")).unwrap(), b"NEW");
-    assert!(std::fs::read(root1.join("created.txt")).is_err(), "source hidden after rename");
+    assert!(
+        std::fs::read(root1.join("created.txt")).is_err(),
+        "source hidden after rename"
+    );
     assert!(
         ovl1.join("renamed.txt").exists(),
         "the renamed file must live in root 1's overlay subtree"
     );
-    assert!(!ovl0.join("renamed.txt").exists(), "rename crossed into root 0's subtree");
+    assert!(
+        !ovl0.join("renamed.txt").exists(),
+        "rename crossed into root 0's subtree"
+    );
 
     // --- A rename ACROSS roots fails, and moves nothing (gate 4, Task 5) ---
     //

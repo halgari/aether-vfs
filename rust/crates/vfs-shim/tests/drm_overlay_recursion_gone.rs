@@ -105,8 +105,12 @@ fn a_drm_named_file_with_the_overlay_under_the_root_resolves_one_level_deep() {
     );
 
     let build_engine = || {
-        Engine::with_overlay(root.to_str().unwrap(), overlay.to_str().unwrap(), snapshot.clone())
-            .unwrap()
+        Engine::with_overlay(
+            root.to_str().unwrap(),
+            overlay.to_str().unwrap(),
+            snapshot.clone(),
+        )
+        .unwrap()
     };
     let hooks = install(build_engine()).expect("install");
     let engine = build_engine();
@@ -114,7 +118,10 @@ fn a_drm_named_file_with_the_overlay_under_the_root_resolves_one_level_deep() {
     // The call that recursed. Reaching it does not depend on the exception any
     // more (that was the old route in), so it is made directly — what is under
     // test is what happens *inside* it, with the detours live.
-    let nt = format!(r"\??\{}", root.join("Data").join("steam_appid.txt").display());
+    let nt = format!(
+        r"\??\{}",
+        root.join("Data").join("steam_appid.txt").display()
+    );
     let decision = engine.decide_open(&nt, GENERIC_WRITE, vfs_redirect::FILE_OPEN);
 
     let drm_exceptions = outcome_count(OpenOutcome::FellThroughDrmException);
@@ -128,7 +135,8 @@ fn a_drm_named_file_with_the_overlay_under_the_root_resolves_one_level_deep() {
     // resolution names. The recursive version produced a target nested one
     // level deeper per iteration before it exhausted the stack, so anything
     // but this exact path is the hazard resurfacing.
-    let expected = vfs_redirect::to_nt(&layer.join("data").join("steam_appid.txt").to_string_lossy());
+    let expected =
+        vfs_redirect::to_nt(&layer.join("data").join("steam_appid.txt").to_string_lossy());
     assert_eq!(
         target_nt, &expected,
         "the overlay resolution walked past depth one — the probe of the overlay copy was \

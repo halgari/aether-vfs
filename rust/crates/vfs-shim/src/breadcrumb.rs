@@ -123,8 +123,12 @@ unsafe fn u64_at(base: *mut u8, off: usize) -> &'static AtomicU64 {
 fn pid_path(base: &std::ffi::OsStr) -> std::path::PathBuf {
     let p = std::path::Path::new(base);
     let pid = std::process::id();
-    let stem = p.file_stem().map_or_else(|| "breadcrumb".into(), |s| s.to_string_lossy());
-    let ext = p.extension().map_or_else(|| "bin".into(), |s| s.to_string_lossy());
+    let stem = p
+        .file_stem()
+        .map_or_else(|| "breadcrumb".into(), |s| s.to_string_lossy());
+    let ext = p
+        .extension()
+        .map_or_else(|| "bin".into(), |s| s.to_string_lossy());
     let name = format!("{stem}.{pid}.{ext}");
     match p.parent() {
         Some(d) if !d.as_os_str().is_empty() => d.join(name),

@@ -63,10 +63,13 @@ pub fn register_mapped_image(base: usize, size: u64) -> Option<isize> {
     let handle = SYNTH_SECTION_TAG | (*slot << 3);
     *slot += 1;
     drop(slot);
-    SYNTH_SECTIONS
-        .lock()
-        .ok()?
-        .insert(handle, SynthSection { window: base, length: size });
+    SYNTH_SECTIONS.lock().ok()?.insert(
+        handle,
+        SynthSection {
+            window: base,
+            length: size,
+        },
+    );
     Some(handle as isize)
 }
 
@@ -100,7 +103,11 @@ pub fn map_view(
         return None;
     }
     let max = s.length - section_offset;
-    let size = if view_size == 0 { max } else { view_size.min(max) };
+    let size = if view_size == 0 {
+        max
+    } else {
+        view_size.min(max)
+    };
     if size == 0 && max == 0 {
         // Empty file: still "succeed" with a non-null? Prefer fail.
         return None;
@@ -114,7 +121,10 @@ pub fn map_view(
                 v.refs += 1;
                 v.length = v.length.max(size);
             })
-            .or_insert(SynthView { length: size, refs: 1 });
+            .or_insert(SynthView {
+                length: size,
+                refs: 1,
+            });
     }
     Some((base, size))
 }

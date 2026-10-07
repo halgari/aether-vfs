@@ -75,13 +75,8 @@ type NtQueryAttributesFileFn =
     unsafe extern "system" fn(*const ObjectAttributes, *mut FileBasicInformation) -> i32;
 type NtQueryFullAttributesFileFn =
     unsafe extern "system" fn(*const ObjectAttributes, *mut FileNetworkOpenInformation) -> i32;
-type NtQueryInformationByNameFn = unsafe extern "system" fn(
-    *const ObjectAttributes,
-    *mut c_void,
-    *mut c_void,
-    u32,
-    u32,
-) -> i32;
+type NtQueryInformationByNameFn =
+    unsafe extern "system" fn(*const ObjectAttributes, *mut c_void, *mut c_void, u32, u32) -> i32;
 /// `NtDeleteFile` takes an `OBJECT_ATTRIBUTES` and nothing else — no handle, no
 /// access mask, no disposition. There is no Win32 wrapper that reaches it, so a
 /// test that wants to exercise the path-based delete has to call it directly.
@@ -125,7 +120,11 @@ pub fn rel_name(dir: *mut c_void, rel: &str) -> RelName {
         security_descriptor: core::ptr::null_mut(),
         security_qos: core::ptr::null_mut(),
     };
-    RelName { _wide: wide, _us: us, oa }
+    RelName {
+        _wide: wide,
+        _us: us,
+        oa,
+    }
 }
 
 /// Builds an `OBJECT_ATTRIBUTES` naming an absolute path with a **null**
@@ -163,12 +162,18 @@ pub fn abs_name(path: &str) -> AbsName {
         security_descriptor: core::ptr::null_mut(),
         security_qos: core::ptr::null_mut(),
     };
-    AbsName { _wide: wide, _us: us, oa }
+    AbsName {
+        _wide: wide,
+        _us: us,
+        oa,
+    }
 }
 
 /// `NtDeleteFile` against an absolute path. Returns the raw `NTSTATUS`.
 pub fn nt_delete_file(path: &str) -> i32 {
-    let Some(p) = ntdll_proc("NtDeleteFile") else { return -1 };
+    let Some(p) = ntdll_proc("NtDeleteFile") else {
+        return -1;
+    };
     let f: NtDeleteFileFn = unsafe { core::mem::transmute(p) };
     let n = abs_name(path);
     unsafe { f(&n.oa) }
@@ -181,7 +186,9 @@ pub const FILE_RENAME_INFORMATION_EX: u32 = 65;
 /// Open an absolute path with an explicit access mask (`DELETE` for the rename
 /// below, which is what `MoveFileExW` itself asks for).
 pub fn nt_open_abs(path: &str, access: u32) -> (i32, *mut c_void) {
-    let Some(p) = ntdll_proc("NtOpenFile") else { return (-1, core::ptr::null_mut()) };
+    let Some(p) = ntdll_proc("NtOpenFile") else {
+        return (-1, core::ptr::null_mut());
+    };
     let f: NtOpenFileFn = unsafe { core::mem::transmute(p) };
     let n = abs_name(path);
     let mut h: *mut c_void = core::ptr::null_mut();
@@ -206,7 +213,9 @@ pub const FILE_LIST_DIRECTORY: u32 = 0x0001;
 /// what a caller holding a directory handle to name children against has.
 pub fn nt_open_dir_abs(path: &str, access: u32) -> (i32, *mut c_void) {
     const FILE_DIRECTORY_FILE: u32 = 0x0000_0001;
-    let Some(p) = ntdll_proc("NtOpenFile") else { return (-1, core::ptr::null_mut()) };
+    let Some(p) = ntdll_proc("NtOpenFile") else {
+        return (-1, core::ptr::null_mut());
+    };
     let f: NtOpenFileFn = unsafe { core::mem::transmute(p) };
     let n = abs_name(path);
     let mut h: *mut c_void = core::ptr::null_mut();
@@ -228,7 +237,9 @@ pub fn nt_open_dir_abs(path: &str, access: u32) -> (i32, *mut c_void) {
 /// handle-relative `OBJECT_ATTRIBUTES` shape. Win32 decides on its own whether
 /// to build one, so a test that wants it certain has to build it here.
 pub fn nt_delete_relative(dir: *mut c_void, rel: &str) -> i32 {
-    let Some(p) = ntdll_proc("NtDeleteFile") else { return -1 };
+    let Some(p) = ntdll_proc("NtDeleteFile") else {
+        return -1;
+    };
     let f: NtDeleteFileFn = unsafe { core::mem::transmute(p) };
     let n = rel_name(dir, rel);
     unsafe { f(&n.oa) }
@@ -239,7 +250,9 @@ pub fn nt_delete_relative(dir: *mut c_void, rel: &str) -> i32 {
 /// happens when the last handle closes, so a caller must close before looking
 /// at the filesystem.
 pub fn nt_set_disposition_delete(h: *mut c_void) -> i32 {
-    let Some(p) = ntdll_proc("NtSetInformationFile") else { return -1 };
+    let Some(p) = ntdll_proc("NtSetInformationFile") else {
+        return -1;
+    };
     let f: NtSetInformationFileFn = unsafe { core::mem::transmute(p) };
     let mut info = [1u8; 1];
     let mut iosb = [0u8; 16];
@@ -261,7 +274,9 @@ pub fn nt_set_disposition_delete(h: *mut c_void) -> i32 {
 /// `ReplaceIfExists`/`Flags` at 0, `RootDirectory` at 8, `FileNameLength` at
 /// 16, `FileName` at 20.
 pub fn nt_rename(h: *mut c_void, target: &str, class: u32) -> i32 {
-    let Some(p) = ntdll_proc("NtSetInformationFile") else { return -1 };
+    let Some(p) = ntdll_proc("NtSetInformationFile") else {
+        return -1;
+    };
     let f: NtSetInformationFileFn = unsafe { core::mem::transmute(p) };
     let wide: Vec<u16> = to_nt(target).encode_utf16().collect();
     let namelen = wide.len() * 2;
@@ -292,7 +307,9 @@ const FILE_NON_DIRECTORY_FILE: u32 = 0x40;
 
 /// `(status, handle)` from `NtCreateFile` against a directory handle.
 pub fn nt_create_relative(dir: *mut c_void, rel: &str) -> (i32, *mut c_void) {
-    let Some(p) = ntdll_proc("NtCreateFile") else { return (-1, core::ptr::null_mut()) };
+    let Some(p) = ntdll_proc("NtCreateFile") else {
+        return (-1, core::ptr::null_mut());
+    };
     let f: NtCreateFileFn = unsafe { core::mem::transmute(p) };
     let n = rel_name(dir, rel);
     let mut h: *mut c_void = core::ptr::null_mut();
@@ -316,7 +333,9 @@ pub fn nt_create_relative(dir: *mut c_void, rel: &str) -> (i32, *mut c_void) {
 }
 
 pub fn nt_open_relative(dir: *mut c_void, rel: &str) -> (i32, *mut c_void) {
-    let Some(p) = ntdll_proc("NtOpenFile") else { return (-1, core::ptr::null_mut()) };
+    let Some(p) = ntdll_proc("NtOpenFile") else {
+        return (-1, core::ptr::null_mut());
+    };
     let f: NtOpenFileFn = unsafe { core::mem::transmute(p) };
     let n = rel_name(dir, rel);
     let mut h: *mut c_void = core::ptr::null_mut();
@@ -336,7 +355,9 @@ pub fn nt_open_relative(dir: *mut c_void, rel: &str) -> (i32, *mut c_void) {
 
 /// `(status, FileAttributes)`.
 pub fn nt_query_attributes_relative(dir: *mut c_void, rel: &str) -> (i32, u32) {
-    let Some(p) = ntdll_proc("NtQueryAttributesFile") else { return (-1, 0) };
+    let Some(p) = ntdll_proc("NtQueryAttributesFile") else {
+        return (-1, 0);
+    };
     let f: NtQueryAttributesFileFn = unsafe { core::mem::transmute(p) };
     let n = rel_name(dir, rel);
     let mut info = FileBasicInformation::default();
@@ -346,7 +367,9 @@ pub fn nt_query_attributes_relative(dir: *mut c_void, rel: &str) -> (i32, u32) {
 
 /// `(status, EndOfFile)`.
 pub fn nt_query_full_attributes_relative(dir: *mut c_void, rel: &str) -> (i32, i64) {
-    let Some(p) = ntdll_proc("NtQueryFullAttributesFile") else { return (-1, 0) };
+    let Some(p) = ntdll_proc("NtQueryFullAttributesFile") else {
+        return (-1, 0);
+    };
     let f: NtQueryFullAttributesFileFn = unsafe { core::mem::transmute(p) };
     let n = rel_name(dir, rel);
     let mut info = FileNetworkOpenInformation::default();
@@ -378,15 +401,25 @@ pub fn nt_query_by_name_relative(dir: *mut c_void, rel: &str, class: u32) -> Opt
         5 => 8,
         _ => return Some((st, 0)),
     };
-    Some((st, i64::from_le_bytes(buf[off..off + 8].try_into().unwrap())))
+    Some((
+        st,
+        i64::from_le_bytes(buf[off..off + 8].try_into().unwrap()),
+    ))
 }
 
 pub fn read_all(h: *mut c_void) -> Vec<u8> {
     // Read through the handle with NtReadFile so the test stays on the NT
     // surface it is exercising.
     type NtReadFileFn = unsafe extern "system" fn(
-        *mut c_void, *mut c_void, *const c_void, *const c_void,
-        *mut c_void, *mut c_void, u32, *const i64, *const u32,
+        *mut c_void,
+        *mut c_void,
+        *const c_void,
+        *const c_void,
+        *mut c_void,
+        *mut c_void,
+        u32,
+        *const i64,
+        *const u32,
     ) -> i32;
     let p = ntdll_proc("NtReadFile").expect("NtReadFile");
     let f: NtReadFileFn = unsafe { core::mem::transmute(p) };
@@ -458,9 +491,14 @@ pub fn nt_enum_classic_filtered(dir: *mut c_void, wildcard: Option<&str>) -> Vec
         maximum_length: (wide.len() * 2) as u16,
         buffer: wide.as_mut_ptr(),
     };
-    let name_ptr: *const UnicodeString =
-        if wildcard.is_some() { &us } else { core::ptr::null() };
-    let Some(p) = ntdll_proc("NtQueryDirectoryFile") else { return Vec::new() };
+    let name_ptr: *const UnicodeString = if wildcard.is_some() {
+        &us
+    } else {
+        core::ptr::null()
+    };
+    let Some(p) = ntdll_proc("NtQueryDirectoryFile") else {
+        return Vec::new();
+    };
     let f: NtQueryDirectoryFileFn = unsafe { core::mem::transmute(p) };
     let mut out = Vec::new();
     let mut buf = vec![0u8; 64 * 1024];
@@ -491,8 +529,7 @@ pub fn nt_enum_classic_filtered(dir: *mut c_void, wildcard: Option<&str>) -> Vec
         let mut off = 0usize;
         loop {
             let next = u32::from_le_bytes(buf[off..off + 4].try_into().unwrap()) as usize;
-            let namelen =
-                u32::from_le_bytes(buf[off + 60..off + 64].try_into().unwrap()) as usize;
+            let namelen = u32::from_le_bytes(buf[off + 60..off + 64].try_into().unwrap()) as usize;
             let start = off + 64;
             if start + namelen <= buf.len() {
                 let units: Vec<u16> = buf[start..start + namelen]

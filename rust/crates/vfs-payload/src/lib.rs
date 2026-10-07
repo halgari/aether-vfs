@@ -152,7 +152,11 @@ fn lc(c: u16) -> u16 {
 
 /// Does the UNICODE_STRING at `oa` end with `suffix` (case-insensitive), with a
 /// path separator (or start) immediately before the match?
-unsafe fn ends_with_suffix(oa: *const ObjectAttributes, suffix_ptr: usize, suffix_wlen: u32) -> bool {
+unsafe fn ends_with_suffix(
+    oa: *const ObjectAttributes,
+    suffix_ptr: usize,
+    suffix_wlen: u32,
+) -> bool {
     if oa.is_null() || suffix_ptr == 0 || suffix_wlen == 0 {
         return false;
     }
@@ -263,7 +267,16 @@ unsafe extern "system" fn create_hook(
         let (mut new_oa, us) = redirect_oa(entry);
         new_oa.object_name = &us;
         let st = orig(
-            handle, access, &new_oa, iosb, alloc_size, file_attrs, share, disposition, options, ea,
+            handle,
+            access,
+            &new_oa,
+            iosb,
+            alloc_size,
+            file_attrs,
+            share,
+            disposition,
+            options,
+            ea,
             ea_len,
         );
         record_status(st);
@@ -272,12 +285,31 @@ unsafe extern "system" fn create_hook(
     if c.secondary_create != 0 {
         let sec: NtCreateFileFn = core::mem::transmute(c.secondary_create);
         return sec(
-            handle, access, oa, iosb, alloc_size, file_attrs, share, disposition, options, ea,
+            handle,
+            access,
+            oa,
+            iosb,
+            alloc_size,
+            file_attrs,
+            share,
+            disposition,
+            options,
+            ea,
             ea_len,
         );
     }
     orig(
-        handle, access, oa, iosb, alloc_size, file_attrs, share, disposition, options, ea, ea_len,
+        handle,
+        access,
+        oa,
+        iosb,
+        alloc_size,
+        file_attrs,
+        share,
+        disposition,
+        options,
+        ea,
+        ea_len,
     )
 }
 
@@ -510,7 +542,8 @@ pub unsafe extern "C" fn memset(dst: *mut u8, val: i32, n: usize) -> *mut u8 {
 pub unsafe extern "C" fn memcmp(a: *const u8, b: *const u8, n: usize) -> i32 {
     let mut i = 0;
     while i < n {
-        let d = core::ptr::read_volatile(a.add(i)) as i32 - core::ptr::read_volatile(b.add(i)) as i32;
+        let d =
+            core::ptr::read_volatile(a.add(i)) as i32 - core::ptr::read_volatile(b.add(i)) as i32;
         if d != 0 {
             return d;
         }
@@ -556,7 +589,11 @@ mod tests {
             security_descriptor: core::ptr::null(),
             security_qos: core::ptr::null(),
         });
-        Named { _buf: buf, _us: us, oa }
+        Named {
+            _buf: buf,
+            _us: us,
+            oa,
+        }
     }
 
     fn matches(path: &str, suffix: &str) -> bool {
@@ -599,7 +636,10 @@ mod tests {
     #[test]
     fn a_suffix_must_start_at_a_path_component_boundary() {
         assert!(!matches(r"\??\C:\game\steam_api.dll", "api.dll"));
-        assert!(!matches(r"\??\C:\game\notsteam_api64.dll", "steam_api64.dll"));
+        assert!(!matches(
+            r"\??\C:\game\notsteam_api64.dll",
+            "steam_api64.dll"
+        ));
         // …but a bare name with no directory part is a component boundary.
         assert!(matches("steam_api64.dll", "steam_api64.dll"));
     }
@@ -629,7 +669,11 @@ mod tests {
             security_qos: core::ptr::null(),
         };
         assert!(!unsafe { ends_with_suffix(&oa, sp, suf.len() as u32) });
-        let empty = UnicodeString { length: 0, maximum_length: 0, buffer: core::ptr::null_mut() };
+        let empty = UnicodeString {
+            length: 0,
+            maximum_length: 0,
+            buffer: core::ptr::null_mut(),
+        };
         oa.object_name = &empty;
         assert!(!unsafe { ends_with_suffix(&oa, sp, suf.len() as u32) });
     }

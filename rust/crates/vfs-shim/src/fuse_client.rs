@@ -12,7 +12,6 @@ use std::path::Path;
 use std::sync::OnceLock;
 
 use vfs_ipc::{DataGate, Geom, ReadPlan, RingClient};
-use vfs_redirect::{RootId, RootMap};
 use vfs_protocol::{
     decode_getattr_resp, decode_open_resp, decode_readdir_resp, decode_write_resp,
     encode_close_req, encode_mkdir_req, encode_names_req, encode_open_req, encode_path_req,
@@ -20,6 +19,7 @@ use vfs_protocol::{
     SetattrReq, WriteReq, OPEN_READ, OPEN_WRITE, OP_CLOSE, OP_DELETE, OP_GETATTR, OP_HEARTBEAT,
     OP_MKDIR, OP_OPEN, OP_READDIR, OP_RENAME, OP_SETATTR, OP_STORED_NAMES, OP_WRITE, ST_OK,
 };
+use vfs_redirect::{RootId, RootMap};
 use vfs_win::SharedMapping;
 use windows_sys::Win32::Foundation::HANDLE;
 use windows_sys::Win32::System::Threading::{OpenEventW, SetEvent, Sleep, SwitchToThread};
@@ -130,9 +130,10 @@ pub fn try_init_from_env() -> Result<(), FuseInitError> {
     // the launch-abort path be exercised without standing up a director that is
     // actually broken.
     if vfs_env::opt_in(vfs_env::TEST_FUSE_INIT_FAIL) {
-        return Err(FuseInitError::ConnectFailed(
-            format!("forced failure via {}", vfs_env::TEST_FUSE_INIT_FAIL),
-        ));
+        return Err(FuseInitError::ConnectFailed(format!(
+            "forced failure via {}",
+            vfs_env::TEST_FUSE_INIT_FAIL
+        )));
     }
     let source = ring_source_from_env().ok_or(FuseInitError::NotConfigured)?;
     let ring_bytes: usize = vfs_env::text(vfs_env::RING_BYTES)
@@ -414,8 +415,7 @@ impl FuseClient {
         // `resolve_volume_map_for`.
         let scan: Vec<&str> = decls.iter().map(|(_, p)| p.as_str()).collect();
         let volumes = vfs_redirect::resolve_volume_map_for(&scan);
-        let refs: Vec<(RootId, &str)> =
-            decls.iter().map(|(id, p)| (*id, p.as_str())).collect();
+        let refs: Vec<(RootId, &str)> = decls.iter().map(|(id, p)| (*id, p.as_str())).collect();
         let roots = RootMap::with_roots(&refs, volumes)
             .map_err(|e| format!("managed root is not a usable path: {e:?}"))?;
 
@@ -626,12 +626,7 @@ impl FuseClient {
     /// `vfs_ipc::read_fragmented` — there rather than here so the code a game
     /// thread runs is the code the native tests and `ring-bench` run. This
     /// only says how this ring is to be cut up.
-    pub fn read_fragmented(
-        &self,
-        fh: u64,
-        offset: u64,
-        buf: &mut [u8],
-    ) -> Result<usize, i32> {
+    pub fn read_fragmented(&self, fh: u64, offset: u64, buf: &mut [u8]) -> Result<usize, i32> {
         let plan = ReadPlan {
             // Prefer the arena from `BULK_THRESHOLD` up; a ring with no arena
             // has nothing to prefer.
@@ -908,7 +903,10 @@ impl FuseClient {
 /// exist, and the cheapest way to guarantee that is for there to be one
 /// parse rather than two.
 pub(crate) fn roots_from_env(virtual_dir: &str) -> Vec<(RootId, String)> {
-    merge_extra_roots(virtual_dir, vfs_env::text(vfs_env::VIRTUAL_ROOTS).as_deref())
+    merge_extra_roots(
+        virtual_dir,
+        vfs_env::text(vfs_env::VIRTUAL_ROOTS).as_deref(),
+    )
 }
 
 /// The parsing half of [`roots_from_env`], split out so it can be tested
@@ -967,9 +965,7 @@ pub fn strip_nt_device(p: &str) -> &str {
 }
 
 pub fn normalize_path_for_root(p: &str) -> String {
-    strip_nt_device(p)
-        .replace('/', "\\")
-        .to_ascii_lowercase()
+    strip_nt_device(p).replace('/', "\\").to_ascii_lowercase()
 }
 
 #[cfg(test)]
@@ -1066,7 +1062,10 @@ mod tests {
             Some((RootId::DEFAULT, "ccasvsse001-almsivi.esm".to_string()))
         );
         // A sibling staging directory must not match.
-        assert_eq!(resolve(&m, r"\??\c:\tmp\skyrim-data\stage\other\data\x.esl"), None);
+        assert_eq!(
+            resolve(&m, r"\??\c:\tmp\skyrim-data\stage\other\data\x.esl"),
+            None
+        );
     }
 
     #[test]
@@ -1104,8 +1103,14 @@ mod tests {
             (RootId(0), r"C:\Games\Skyrim"),
             (RootId(1), r"C:\Docs\Skyrim"),
         ]);
-        assert_eq!(resolve(&m, r"\??\C:\Games\Skyrim"), Some((RootId(0), String::new())));
-        assert_eq!(resolve(&m, r"\??\C:\Docs\Skyrim"), Some((RootId(1), String::new())));
+        assert_eq!(
+            resolve(&m, r"\??\C:\Games\Skyrim"),
+            Some((RootId(0), String::new()))
+        );
+        assert_eq!(
+            resolve(&m, r"\??\C:\Docs\Skyrim"),
+            Some((RootId(1), String::new()))
+        );
     }
 
     /// **This is the unification, stated as a test.** The five alternate
@@ -1123,7 +1128,10 @@ mod tests {
         let mut volumes = vfs_redirect::VolumeMap::empty();
         volumes.insert(r"\Device\HarddiskVolume3", 'C');
         let m = RootMap::with_roots(
-            &[(RootId(0), r"C:\Games\Skyrim"), (RootId(1), r"C:\Docs\Skyrim")],
+            &[
+                (RootId(0), r"C:\Games\Skyrim"),
+                (RootId(1), r"C:\Docs\Skyrim"),
+            ],
             volumes,
         )
         .unwrap();
@@ -1139,7 +1147,10 @@ mod tests {
         );
         // The over-eager direction stays closed: registering a device prefix
         // must not swallow the rest of the volume.
-        assert_eq!(resolve(&m, r"\Device\HarddiskVolume3\Windows\System32\x.dll"), None);
+        assert_eq!(
+            resolve(&m, r"\Device\HarddiskVolume3\Windows\System32\x.dll"),
+            None
+        );
     }
 
     /// `VFS_VIRTUAL_ROOTS` is additive on top of `VFS_VIRTUAL_DIR`. Exercised
@@ -1205,8 +1216,7 @@ mod tests {
         const CAP: u32 = 4096;
         const MAP: usize = 256 * 1024;
 
-        let p = std::env::temp_dir()
-            .join(format!("vfs-shim-ring-{}.bin", std::process::id()));
+        let p = std::env::temp_dir().join(format!("vfs-shim-ring-{}.bin", std::process::id()));
         let _ = std::fs::remove_file(&p);
         // Stands in for `IpcServe::start_file_backed`: create the backing file
         // and lay a ring out in it. No director, no threads — this test is

@@ -117,7 +117,9 @@ impl VolumeMap {
     /// A map with no device, volume-GUID, junction, or UNC-share aliases
     /// registered.
     pub fn empty() -> Self {
-        VolumeMap { entries: Vec::new() }
+        VolumeMap {
+            entries: Vec::new(),
+        }
     }
 
     /// Register an NT device prefix (e.g. `\Device\HarddiskVolume3`) or a
@@ -138,7 +140,8 @@ impl VolumeMap {
     /// caller had spelled `replacement` themselves, so a multi-component
     /// replacement works with no extra handling.
     pub fn insert_alias(&mut self, prefix: &str, replacement: &str) {
-        self.entries.push((prefix.to_string(), replacement.to_string()));
+        self.entries
+            .push((prefix.to_string(), replacement.to_string()));
     }
 
     /// If `path` starts with a registered prefix at a component boundary
@@ -521,7 +524,9 @@ mod tests {
     #[test]
     fn strips_an_alternate_data_stream_suffix() {
         assert_eq!(
-            canonicalise(r"C:\Games\Skyrim\Data\a.esp:evil", &vols()).unwrap().to_ascii_lowercase(),
+            canonicalise(r"C:\Games\Skyrim\Data\a.esp:evil", &vols())
+                .unwrap()
+                .to_ascii_lowercase(),
             "c:/games/skyrim/data/a.esp"
         );
     }
@@ -661,7 +666,10 @@ mod tests {
             r"\??\globalroot\device\harddiskvolume3\Games\Skyrim\Data\a.esp",
             &vols(),
         );
-        assert_eq!(got.unwrap().to_ascii_lowercase(), "c:/games/skyrim/data/a.esp");
+        assert_eq!(
+            got.unwrap().to_ascii_lowercase(),
+            "c:/games/skyrim/data/a.esp"
+        );
     }
 
     /// An unmapped device behind a `GLOBALROOT` wrapper must still not be
@@ -777,7 +785,10 @@ mod tests {
     #[test]
     fn alias_does_not_match_a_similarly_prefixed_unrelated_path() {
         let mut v = vols();
-        v.insert_alias(r"\??\C:\Temp\vfs-escape-junction-1234", "C:/Games/Skyrim/Data");
+        v.insert_alias(
+            r"\??\C:\Temp\vfs-escape-junction-1234",
+            "C:/Games/Skyrim/Data",
+        );
         let raw = r"\??\C:\Temp\vfs-escape-junction-12345\a.esp";
         let got = canonicalise(raw, &v).unwrap();
         assert!(

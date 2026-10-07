@@ -1,4 +1,4 @@
-﻿//! The ntdll detours. ALL `unsafe` in the crate lives here.
+//! The ntdll detours. ALL `unsafe` in the crate lives here.
 #![allow(unsafe_code)]
 
 use core::cell::Cell;
@@ -678,8 +678,8 @@ fn child_cwd_root() -> bool {
 
 use retour::RawDetour;
 use vfs_redirect::{
-    nt_to_volume_relative, write_dir_info, write_file_name_info,
-    Decision, DirInfoClass, DirItem, DirStatus, SYNTH_FILETIME,
+    nt_to_volume_relative, write_dir_info, write_file_name_info, Decision, DirInfoClass, DirItem,
+    DirStatus, SYNTH_FILETIME,
 };
 use windows_sys::Win32::Foundation::{ERROR_INTERNAL_ERROR, HANDLE, HMODULE, NTSTATUS};
 use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
@@ -689,46 +689,37 @@ use windows_sys::Win32::System::Threading::{
 
 use crate::engine::Engine;
 use crate::inject::{inject_child, re_suspend, self_dll_path};
-use crate::overlay::OverlayState;
 use crate::ntdef::{
-
-    FileBasicInformation, FileFsDeviceInformation,
-    FileEndOfFileInformation, FileInternalInformation, FileNetworkOpenInformation,
-    FilePositionInformation,
-    FileStandardInformation, NtCloseFn, NtCreateFileFn, NtCreateSectionFn,
-    NtDeleteFileFn, NtFlushBuffersFileFn, NtLockFileFn, NtMapViewOfSectionFn,
-    NtOpenFileFn, NtQueryAttributesFileFn, NtQueryDirectoryFileExFn, NtQueryDirectoryFileFn,
-    NtQueryInformationByNameFn, NtQueryObjectFn, NtUnlockFileFn,
-    NtCreateKeyFn, NtDuplicateObjectFn, NtOpenKeyExFn, NtOpenKeyFn, NtQueryKeyFn,
-    NtDeleteKeyFn, NtDeleteValueKeyFn, NtEnumerateKeyFn, NtEnumerateValueKeyFn, NtFlushKeyFn,
-    NtQueryMultipleValueKeyFn, NtQueryValueKeyFn, NtRenameKeyFn, NtSetInformationKeyFn,
-    NtSetValueKeyFn,
-    NtNotifyChangeKeyFn, NtNotifyChangeMultipleKeysFn, NtQuerySecurityObjectFn,
-    NtSetSecurityObjectFn, NtSetInformationObjectFn, NtCreateKeyTransactedFn,
-    NtOpenKeyTransactedFn, NtOpenKeyTransactedExFn, NtLoadKeyFn, NtLoadKey2Fn, NtLoadKey8Fn,
-    NtUnloadKeyFn, NtUnloadKey2Fn, NtSaveKeyFn, NtSaveKeyExFn, NtSaveMergedKeysFn,
-    NtReplaceKeyFn, NtRestoreKeyFn, NtKeyOnlyFn, STATUS_NOT_SUPPORTED,
-    STATUS_OBJECT_NAME_INVALID,
-    NtQueryFullAttributesFileFn,
-    NtQueryInformationFileFn, NtQueryVolumeInformationFileFn, NtReadFileFn, NtSetInformationFileFn,
-    NtWriteFileFn, NtUnmapViewOfSectionFn, ObjectAttributes, UnicodeString, FILE_ATTRIBUTE_DIRECTORY,
-    FILE_ATTRIBUTE_NORMAL, FILE_ALL_INFORMATION,
-    FILE_ATTRIBUTE_TAG_INFORMATION, FILE_STAT_INFORMATION, FILE_ID_INFORMATION,
+    FileBasicInformation, FileEndOfFileInformation, FileFsDeviceInformation,
+    FileInternalInformation, FileNetworkOpenInformation, FilePositionInformation,
+    FileStandardInformation, NtCloseFn, NtCreateFileFn, NtCreateKeyFn, NtCreateKeyTransactedFn,
+    NtCreateSectionFn, NtDeleteFileFn, NtDeleteKeyFn, NtDeleteValueKeyFn, NtDuplicateObjectFn,
+    NtEnumerateKeyFn, NtEnumerateValueKeyFn, NtFlushBuffersFileFn, NtFlushKeyFn, NtKeyOnlyFn,
+    NtLoadKey2Fn, NtLoadKey8Fn, NtLoadKeyFn, NtLockFileFn, NtMapViewOfSectionFn,
+    NtNotifyChangeKeyFn, NtNotifyChangeMultipleKeysFn, NtOpenFileFn, NtOpenKeyExFn, NtOpenKeyFn,
+    NtOpenKeyTransactedExFn, NtOpenKeyTransactedFn, NtQueryAttributesFileFn,
+    NtQueryDirectoryFileExFn, NtQueryDirectoryFileFn, NtQueryFullAttributesFileFn,
+    NtQueryInformationByNameFn, NtQueryInformationFileFn, NtQueryKeyFn, NtQueryMultipleValueKeyFn,
+    NtQueryObjectFn, NtQuerySecurityObjectFn, NtQueryValueKeyFn, NtQueryVolumeInformationFileFn,
+    NtReadFileFn, NtRenameKeyFn, NtReplaceKeyFn, NtRestoreKeyFn, NtSaveKeyExFn, NtSaveKeyFn,
+    NtSaveMergedKeysFn, NtSetInformationFileFn, NtSetInformationKeyFn, NtSetInformationObjectFn,
+    NtSetSecurityObjectFn, NtSetValueKeyFn, NtUnloadKey2Fn, NtUnloadKeyFn, NtUnlockFileFn,
+    NtUnmapViewOfSectionFn, NtWriteFileFn, ObjectAttributes, UnicodeString, FILE_ALL_INFORMATION,
+    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_TAG_INFORMATION,
     FILE_BASIC_INFORMATION, FILE_CREATED, FILE_DEVICE_DISK, FILE_DIRECTORY_FILE,
-    FILE_DISPOSITION_DELETE, FILE_DISPOSITION_INFORMATION,
-    FILE_DISPOSITION_INFORMATION_EX, FILE_END_OF_FILE_INFORMATION, FILE_FS_DEVICE_INFORMATION,
-    FILE_INTERNAL_INFORMATION,
-    FILE_NAME_INFORMATION,
-    FILE_NETWORK_OPEN_INFORMATION, FILE_NORMALIZED_NAME_INFORMATION, FILE_POSITION_INFORMATION,
-    FILE_RENAME_INFORMATION, FILE_RENAME_INFORMATION_EX, FILE_STANDARD_INFORMATION, SEC_IMAGE,
-    OBJECT_NAME_INFORMATION, OBJECT_NAME_INFORMATION_HEADER,
-    SL_RESTART_SCAN, SL_RETURN_SINGLE_ENTRY, STATUS_ACCESS_DENIED, STATUS_BUFFER_OVERFLOW,
-    STATUS_INFO_LENGTH_MISMATCH,
-    STATUS_END_OF_FILE, STATUS_INVALID_FILE_FOR_SECTION, STATUS_INVALID_HANDLE,
-    STATUS_FILE_IS_A_DIRECTORY, STATUS_NO_MORE_FILES, STATUS_OBJECT_NAME_COLLISION,
-    STATUS_OBJECT_NAME_NOT_FOUND,
+    FILE_DISPOSITION_DELETE, FILE_DISPOSITION_INFORMATION, FILE_DISPOSITION_INFORMATION_EX,
+    FILE_END_OF_FILE_INFORMATION, FILE_FS_DEVICE_INFORMATION, FILE_ID_INFORMATION,
+    FILE_INTERNAL_INFORMATION, FILE_NAME_INFORMATION, FILE_NETWORK_OPEN_INFORMATION,
+    FILE_NORMALIZED_NAME_INFORMATION, FILE_POSITION_INFORMATION, FILE_RENAME_INFORMATION,
+    FILE_RENAME_INFORMATION_EX, FILE_STANDARD_INFORMATION, FILE_STAT_INFORMATION,
+    OBJECT_NAME_INFORMATION, OBJECT_NAME_INFORMATION_HEADER, SEC_IMAGE, SL_RESTART_SCAN,
+    SL_RETURN_SINGLE_ENTRY, STATUS_ACCESS_DENIED, STATUS_BUFFER_OVERFLOW, STATUS_END_OF_FILE,
+    STATUS_FILE_IS_A_DIRECTORY, STATUS_INFO_LENGTH_MISMATCH, STATUS_INVALID_FILE_FOR_SECTION,
+    STATUS_INVALID_HANDLE, STATUS_NOT_SUPPORTED, STATUS_NO_MORE_FILES,
+    STATUS_OBJECT_NAME_COLLISION, STATUS_OBJECT_NAME_INVALID, STATUS_OBJECT_NAME_NOT_FOUND,
     STATUS_OBJECT_PATH_NOT_FOUND, STATUS_SECTION_TOO_BIG, STATUS_SUCCESS, STATUS_UNSUCCESSFUL,
 };
+use crate::overlay::OverlayState;
 
 /// Errors installing the hooks.
 #[derive(Debug)]
@@ -922,7 +913,9 @@ pub fn install(engine: Engine) -> Result<HookGuard, InstallError> {
     // once hooks are installed that I/O re-enters them.
     crate::breadcrumb::init();
     crate::hookstats::start_reporter();
-    ENGINE.set(engine).map_err(|_| InstallError::AlreadyInstalled)?;
+    ENGINE
+        .set(engine)
+        .map_err(|_| InstallError::AlreadyInstalled)?;
     // SAFETY: ntdll lookup + detour install; each hook matches its ABI.
     unsafe { install_all_detours(true) }
 }
@@ -971,8 +964,7 @@ pub fn install(engine: Engine) -> Result<HookGuard, InstallError> {
 fn install_panic_hook() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
-        let default = vfs_env::text(vfs_env::STATE_DIR)
-            .map(|d| format!("{d}\\shim-panic.log"));
+        let default = vfs_env::text(vfs_env::STATE_DIR).map(|d| format!("{d}\\shim-panic.log"));
         let path = vfs_env::text(vfs_env::SHIM_PANIC_LOG)
             .or(default)
             .unwrap_or_else(|| r"C:\tmp\skyrim-data\vfs-state\shim-panic.log".to_string());
@@ -982,7 +974,10 @@ fn install_panic_hook() {
                 .location()
                 .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
                 .unwrap_or_else(|| "<unknown location>".into());
-            let msg = info.payload().downcast_ref::<&str>().map(|s| (*s).to_string())
+            let msg = info
+                .payload()
+                .downcast_ref::<&str>()
+                .map(|s| (*s).to_string())
                 .or_else(|| info.payload().downcast_ref::<String>().cloned())
                 .unwrap_or_else(|| "<non-string payload>".into());
             let line = format!(
@@ -997,8 +992,10 @@ fn install_panic_hook() {
                     let _ = std::fs::create_dir_all(parent);
                 }
                 use std::io::Write;
-                if let Ok(mut f) =
-                    std::fs::OpenOptions::new().create(true).append(true).open(&path)
+                if let Ok(mut f) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&path)
                 {
                     let _ = f.write_all(line.as_bytes());
                     let _ = f.flush();
@@ -1032,25 +1029,28 @@ pub unsafe fn install_late(
     // once hooks are installed that I/O re-enters them.
     crate::breadcrumb::init();
     crate::hookstats::start_reporter();
-    ENGINE.set(engine).map_err(|_| InstallError::AlreadyInstalled)?;
+    ENGINE
+        .set(engine)
+        .map_err(|_| InstallError::AlreadyInstalled)?;
 
     // SAFETY: cfg is the live early Config in this process; tramp addresses
     // are RWX pages the injector allocated; secondary pointers are our hooks.
     unsafe {
         let cfg = &mut *payload_cfg;
         // Call originals via the early payload's trampolines (real ntdll tails).
-        TRAMP_CREATE = Some(core::mem::transmute::<usize, NtCreateFileFn>(cfg.create_tramp));
+        TRAMP_CREATE = Some(core::mem::transmute::<usize, NtCreateFileFn>(
+            cfg.create_tramp,
+        ));
         TRAMP_OPEN = Some(core::mem::transmute::<usize, NtOpenFileFn>(cfg.open_tramp));
-        TRAMP_QATTR =
-            Some(core::mem::transmute::<usize, NtQueryAttributesFileFn>(cfg.qattr_tramp));
-        TRAMP_QFULL =
-            Some(core::mem::transmute::<usize, NtQueryFullAttributesFileFn>(cfg.qfull_tramp));
+        TRAMP_QATTR = Some(core::mem::transmute::<usize, NtQueryAttributesFileFn>(
+            cfg.qattr_tramp,
+        ));
+        TRAMP_QFULL = Some(core::mem::transmute::<usize, NtQueryFullAttributesFileFn>(
+            cfg.qfull_tramp,
+        ));
 
         // Publish secondary last-ish: hooks become Engine-backed for non-table paths.
-        core::ptr::write_volatile(
-            &mut cfg.secondary_create,
-            create_hook as *const () as usize,
-        );
+        core::ptr::write_volatile(&mut cfg.secondary_create, create_hook as *const () as usize);
         core::ptr::write_volatile(&mut cfg.secondary_open, open_hook as *const () as usize);
         core::ptr::write_volatile(&mut cfg.secondary_qattr, qattr_hook as *const () as usize);
         core::ptr::write_volatile(&mut cfg.secondary_qfull, qfull_hook as *const () as usize);
@@ -1079,11 +1079,12 @@ unsafe fn install_all_detours(patch_early_owned: bool) -> Result<HookGuard, Inst
         TRAMP_QATTR = Some(core::mem::transmute::<*const (), NtQueryAttributesFileFn>(
             d_qattr.trampoline() as *const (),
         ));
-        let d_qfull =
-            make_detour(ntdll, c"NtQueryFullAttributesFile", qfull_hook as *const ())?;
-        TRAMP_QFULL = Some(core::mem::transmute::<*const (), NtQueryFullAttributesFileFn>(
-            d_qfull.trampoline() as *const (),
-        ));
+        let d_qfull = make_detour(ntdll, c"NtQueryFullAttributesFile", qfull_hook as *const ())?;
+        TRAMP_QFULL = Some(
+            core::mem::transmute::<*const (), NtQueryFullAttributesFileFn>(
+                d_qfull.trampoline() as *const ()
+            ),
+        );
         let d_open = make_detour(ntdll, c"NtOpenFile", open_hook as *const ())?;
         TRAMP_OPEN = Some(core::mem::transmute::<*const (), NtOpenFileFn>(
             d_open.trampoline() as *const (),
@@ -1178,11 +1179,15 @@ unsafe fn install_all_detours(patch_early_owned: bool) -> Result<HookGuard, Inst
     TRAMP_UNMAP_VIEW = Some(core::mem::transmute::<*const (), NtUnmapViewOfSectionFn>(
         d_unmap.trampoline() as *const (),
     ));
-    let d_qvol =
-        make_detour(ntdll, c"NtQueryVolumeInformationFile", qvol_hook as *const ())?;
-    TRAMP_QVOL = Some(core::mem::transmute::<*const (), NtQueryVolumeInformationFileFn>(
-        d_qvol.trampoline() as *const (),
-    ));
+    let d_qvol = make_detour(
+        ntdll,
+        c"NtQueryVolumeInformationFile",
+        qvol_hook as *const (),
+    )?;
+    TRAMP_QVOL = Some(core::mem::transmute::<
+        *const (),
+        NtQueryVolumeInformationFileFn,
+    >(d_qvol.trampoline() as *const ()));
     // The lock/flush trio. Without these a synthetic handle is not merely
     // missing a feature — the *next* call after a successful open fails, and
     // the caller abandons the file entirely. See `lock_hook`.
@@ -1202,9 +1207,11 @@ unsafe fn install_all_detours(patch_early_owned: bool) -> Result<HookGuard, Inst
     // Present since Win10 1709. Optional so an older host still installs.
     let mut qibn_installed = false;
     if let Ok(d_qibn) = make_detour(ntdll, c"NtQueryInformationByName", qibn_hook as *const ()) {
-        TRAMP_QIBN = Some(core::mem::transmute::<*const (), NtQueryInformationByNameFn>(
-            d_qibn.trampoline() as *const (),
-        ));
+        TRAMP_QIBN = Some(
+            core::mem::transmute::<*const (), NtQueryInformationByNameFn>(
+                d_qibn.trampoline() as *const ()
+            ),
+        );
         if d_qibn.enable().is_ok() {
             detours.push(d_qibn);
             qibn_installed = true;
@@ -1261,8 +1268,8 @@ unsafe fn install_all_detours(patch_early_owned: bool) -> Result<HookGuard, Inst
     // Every enabled detour must be kept alive here: dropping one silently
     // un-patches it, which reads exactly like "the process never calls this".
     detours.extend([
-        d_qdir, d_delete, d_close, d_qif, d_setinfo, d_read, d_write, d_csec, d_map,
-        d_unmap, d_qvol, d_lock, d_unlock, d_flush,
+        d_qdir, d_delete, d_close, d_qif, d_setinfo, d_read, d_write, d_csec, d_map, d_unmap,
+        d_qvol, d_lock, d_unlock, d_flush,
     ]);
 
     // The registry overlay's detours go in only when the host asked for the overlay
@@ -1273,10 +1280,7 @@ unsafe fn install_all_detours(patch_early_owned: bool) -> Result<HookGuard, Inst
     if vfs_env::opt_in(vfs_env::REGISTRY) {
         let before = detours.len();
         install_registry_detours(ntdll, &mut detours, qobj_installed);
-        REG_DETOURS_INSTALLED.store(
-            detours.len() - before,
-            std::sync::atomic::Ordering::Relaxed,
-        );
+        REG_DETOURS_INSTALLED.store(detours.len() - before, std::sync::atomic::Ordering::Relaxed);
     } else {
         crate::regclient::overlay_off();
     }
@@ -1289,8 +1293,7 @@ unsafe fn install_all_detours(patch_early_owned: bool) -> Result<HookGuard, Inst
             kb = GetModuleHandleA(c"kernel32.dll".as_ptr().cast());
         }
         if !kb.is_null() {
-            if let Ok(d_cpiw) = make_detour(kb, c"CreateProcessInternalW", cpiw_hook as *const ())
-            {
+            if let Ok(d_cpiw) = make_detour(kb, c"CreateProcessInternalW", cpiw_hook as *const ()) {
                 TRAMP_CPIW = Some(core::mem::transmute::<*const (), CreateProcessInternalWFn>(
                     d_cpiw.trampoline() as *const (),
                 ));
@@ -2641,7 +2644,10 @@ unsafe fn cwd_from_peb() -> Option<(isize, String)> {
     if buf.is_null() || units == 0 || handle == 0 {
         return None;
     }
-    Some((handle, String::from_utf16_lossy(core::slice::from_raw_parts(buf, units))))
+    Some((
+        handle,
+        String::from_utf16_lossy(core::slice::from_raw_parts(buf, units)),
+    ))
 }
 
 /// The directory that a relative name is expressed against, plus whether
@@ -2758,13 +2764,20 @@ unsafe fn path_of_tracked(oa: *const ObjectAttributes) -> Option<DecodedPath> {
         return if name.is_empty() {
             None
         } else {
-            Some(DecodedPath { path: name, os_consulted: false })
+            Some(DecodedPath {
+                path: name,
+                os_consulted: false,
+            })
         };
     }
     let (parent, os_consulted) = parent_dir_of_handle(oa_ref.root_directory)?;
     let parent = parent.trim_end_matches(['\\', '/']);
     let rel = name.trim_start_matches(['\\', '/']);
-    let path = if rel.is_empty() { parent.to_string() } else { format!("{parent}\\{rel}") };
+    let path = if rel.is_empty() {
+        parent.to_string()
+    } else {
+        format!("{parent}\\{rel}")
+    };
     Some(DecodedPath { path, os_consulted })
 }
 
@@ -2894,7 +2907,13 @@ unsafe fn tag_under_root(file_handle: *mut HANDLE, path: Option<&str>, status: N
     }
     if path_is_ours(path) {
         if let Ok(mut table) = DIR_TABLE.lock() {
-            table.insert(key, DirTracked { dir_nt_path: path.to_string(), state: None });
+            table.insert(
+                key,
+                DirTracked {
+                    dir_nt_path: path.to_string(),
+                    state: None,
+                },
+            );
         }
     }
 }
@@ -3231,7 +3250,11 @@ unsafe fn try_fuse_create(
     let path = path?.to_string();
     let (root, vpath) = client.vpath_under_root(&path)?;
     // Directory open of root: empty vpath → "."
-    let vp = if vpath.is_empty() { "." } else { vpath.as_str() };
+    let vp = if vpath.is_empty() {
+        "."
+    } else {
+        vpath.as_str()
+    };
 
     // **Gate 5, Task 4 — the DRM/identity exceptions, closed.** Four basenames
     // (`steam_appid.txt`, `SkyrimSELauncher.exe`, `steam_api{,64}.dll`,
@@ -3528,7 +3551,10 @@ unsafe fn try_fuse_create(
 /// The `route=` field the old format carried is gone: there is one route now.
 fn drm_exe_trace(nt_or_win_path: &str, rel: bool, write: bool) {
     static LOG: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
-    let Some(path) = LOG.get_or_init(|| vfs_env::path(vfs_env::DRM_EXE_LOG)).as_ref() else {
+    let Some(path) = LOG
+        .get_or_init(|| vfs_env::path(vfs_env::DRM_EXE_LOG))
+        .as_ref()
+    else {
         return;
     };
     if !std::path::Path::new(nt_or_win_path)
@@ -3556,7 +3582,11 @@ fn drm_exe_trace(nt_or_win_path: &str, rel: bool, write: bool) {
         let _ = std::fs::create_dir_all(parent);
     }
     use std::io::Write;
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
         let _ = f.write_all(line.as_bytes());
     }
 }
@@ -3633,7 +3663,11 @@ unsafe fn try_fuse_mkdir(
     // A directory is named as it is created: the caller's spelling, not the
     // folded path. See `FuseClient::vpath_as_spelled`.
     let (root, vpath) = client.vpath_as_spelled(path)?;
-    let vp = if vpath.is_empty() { "." } else { vpath.as_str() };
+    let vp = if vpath.is_empty() {
+        "."
+    } else {
+        vpath.as_str()
+    };
     client.names_changed(root, &vfs_core::fold(vp));
     match client.mkdir(root, vp, 0o755) {
         Ok(()) => {
@@ -3677,7 +3711,10 @@ unsafe fn try_fuse_mkdir(
                     if !iosb.is_null() {
                         let p = iosb as *mut u8;
                         core::ptr::write_unaligned(p as *mut u32, STATUS_SUCCESS as u32);
-                        core::ptr::write_unaligned(p.add(8) as *mut usize, crate::ntdef::FILE_OPENED);
+                        core::ptr::write_unaligned(
+                            p.add(8) as *mut usize,
+                            crate::ntdef::FILE_OPENED,
+                        );
                     }
                     record_path(file_handle, Some(path), STATUS_SUCCESS);
                     tag_under_root(file_handle, Some(path), STATUS_SUCCESS);
@@ -3715,7 +3752,17 @@ unsafe fn create_hook_body(
     // Re-entrant host probes (is_file / log append) must hit the real ntdll.
     if in_hook_reenter() {
         return tramp(
-            file_handle, access, oa, iosb, alloc, attrs, share, disp, opts, ea, ealen,
+            file_handle,
+            access,
+            oa,
+            iosb,
+            alloc,
+            attrs,
+            share,
+            disp,
+            opts,
+            ea,
+            ealen,
         );
     }
     // Decode once for the whole call and thread the result through every
@@ -3802,7 +3849,17 @@ unsafe fn create_hook_body(
                 security_qos: oa_ref.security_qos,
             };
             let status = tramp(
-                file_handle, access, &new_oa, iosb, alloc, attrs, share, disp, opts, ea, ealen,
+                file_handle,
+                access,
+                &new_oa,
+                iosb,
+                alloc,
+                attrs,
+                share,
+                disp,
+                opts,
+                ea,
+                ealen,
             );
             drop(wbuf);
             record_identity(file_handle, path, status);
@@ -3810,7 +3867,11 @@ unsafe fn create_hook_body(
             status
         }
         Some(Decision::Deny) => {
-            note_decision_outcome(path, outcome_recorded, crate::hookstats::OpenOutcome::Denied);
+            note_decision_outcome(
+                path,
+                outcome_recorded,
+                crate::hookstats::OpenOutcome::Denied,
+            );
             STATUS_OBJECT_NAME_NOT_FOUND
         }
         Some(Decision::PassThrough) | None => {
@@ -3824,8 +3885,19 @@ unsafe fn create_hook_body(
             if fuse_root_directory(oa) {
                 if let Some(path) = path {
                     let status = tramp_create_abs(
-                        tramp, file_handle, access, oa, iosb, alloc, attrs, share, disp, opts,
-                        ea, ealen, path,
+                        tramp,
+                        file_handle,
+                        access,
+                        oa,
+                        iosb,
+                        alloc,
+                        attrs,
+                        share,
+                        disp,
+                        opts,
+                        ea,
+                        ealen,
+                        path,
                     );
                     tag_under_root(file_handle, Some(path), status);
                     record_path(file_handle, Some(path), status);
@@ -3833,8 +3905,19 @@ unsafe fn create_hook_body(
                 }
                 return STATUS_OBJECT_NAME_NOT_FOUND;
             }
-            let status =
-                tramp(file_handle, access, oa, iosb, alloc, attrs, share, disp, opts, ea, ealen);
+            let status = tramp(
+                file_handle,
+                access,
+                oa,
+                iosb,
+                alloc,
+                attrs,
+                share,
+                disp,
+                opts,
+                ea,
+                ealen,
+            );
             tag_under_root(file_handle, path, status);
             record_path(file_handle, path, status);
             status
@@ -3909,7 +3992,17 @@ unsafe fn tramp_create_abs(
         security_qos: oa_ref.security_qos,
     };
     let status = tramp(
-        file_handle, access, &new_oa, iosb, alloc, attrs, share, disp, opts, ea, ealen,
+        file_handle,
+        access,
+        &new_oa,
+        iosb,
+        alloc,
+        attrs,
+        share,
+        disp,
+        opts,
+        ea,
+        ealen,
     );
     drop(wbuf);
     status
@@ -4043,7 +4136,11 @@ unsafe fn open_hook_body(
             status
         }
         Some(Decision::Deny) => {
-            note_decision_outcome(path, outcome_recorded, crate::hookstats::OpenOutcome::Denied);
+            note_decision_outcome(
+                path,
+                outcome_recorded,
+                crate::hookstats::OpenOutcome::Denied,
+            );
             STATUS_OBJECT_NAME_NOT_FOUND
         }
         Some(Decision::PassThrough) | None => {
@@ -4074,7 +4171,11 @@ unsafe fn open_hook_body(
 unsafe fn fuse_path_attr(path: &str) -> Option<Result<(bool, u64, i64), i32>> {
     let client = crate::fuse_client::global()?;
     let (root, vpath) = client.vpath_under_root(path)?;
-    let vp = if vpath.is_empty() { "." } else { vpath.as_str() };
+    let vp = if vpath.is_empty() {
+        "."
+    } else {
+        vpath.as_str()
+    };
     Some(match client.getattr(root, vp) {
         Ok(a) if a.found => Ok((a.is_dir, a.size, a.mtime)),
         Ok(_) => Err(vfs_protocol::ST_NOT_FOUND),
@@ -4101,7 +4202,11 @@ unsafe fn fill_by_name(
     is_dir: bool,
     size: u64,
 ) -> Option<usize> {
-    let attrs = if is_dir { FILE_ATTRIBUTE_DIRECTORY } else { FILE_ATTRIBUTE_NORMAL };
+    let attrs = if is_dir {
+        FILE_ATTRIBUTE_DIRECTORY
+    } else {
+        FILE_ATTRIBUTE_NORMAL
+    };
     // Byte layouts per FILE_INFORMATION_CLASS. Written field-by-field with
     // unaligned writes because the caller's buffer has no alignment guarantee.
     let need: usize = match class_raw {
@@ -4260,8 +4365,11 @@ unsafe fn qattr_hook_body(
                         (*info).last_access_time = SYNTH_FILETIME;
                         (*info).last_write_time = SYNTH_FILETIME;
                         (*info).change_time = SYNTH_FILETIME;
-                        (*info).file_attributes =
-                            if is_dir { FILE_ATTRIBUTE_DIRECTORY } else { FILE_ATTRIBUTE_NORMAL };
+                        (*info).file_attributes = if is_dir {
+                            FILE_ATTRIBUTE_DIRECTORY
+                        } else {
+                            FILE_ATTRIBUTE_NORMAL
+                        };
                     }
                     return STATUS_SUCCESS;
                 }
@@ -4285,8 +4393,11 @@ unsafe fn qattr_hook_body(
                         (*info).last_access_time = SYNTH_FILETIME;
                         (*info).last_write_time = SYNTH_FILETIME;
                         (*info).change_time = SYNTH_FILETIME;
-                        (*info).file_attributes =
-                            if is_dir { FILE_ATTRIBUTE_DIRECTORY } else { FILE_ATTRIBUTE_NORMAL };
+                        (*info).file_attributes = if is_dir {
+                            FILE_ATTRIBUTE_DIRECTORY
+                        } else {
+                            FILE_ATTRIBUTE_NORMAL
+                        };
                     }
                     return STATUS_SUCCESS;
                 }
@@ -4333,8 +4444,11 @@ unsafe fn qfull_hook_body(
                         (*info).change_time = SYNTH_FILETIME;
                         (*info).allocation_size = size as i64;
                         (*info).end_of_file = size as i64;
-                        (*info).file_attributes =
-                            if is_dir { FILE_ATTRIBUTE_DIRECTORY } else { FILE_ATTRIBUTE_NORMAL };
+                        (*info).file_attributes = if is_dir {
+                            FILE_ATTRIBUTE_DIRECTORY
+                        } else {
+                            FILE_ATTRIBUTE_NORMAL
+                        };
                     }
                     return STATUS_SUCCESS;
                 }
@@ -4358,8 +4472,11 @@ unsafe fn qfull_hook_body(
                         (*info).change_time = SYNTH_FILETIME;
                         (*info).allocation_size = size as i64;
                         (*info).end_of_file = size as i64;
-                        (*info).file_attributes =
-                            if is_dir { FILE_ATTRIBUTE_DIRECTORY } else { FILE_ATTRIBUTE_NORMAL };
+                        (*info).file_attributes = if is_dir {
+                            FILE_ATTRIBUTE_DIRECTORY
+                        } else {
+                            FILE_ATTRIBUTE_NORMAL
+                        };
                     }
                     return STATUS_SUCCESS;
                 }
@@ -4524,8 +4641,10 @@ unsafe fn delete_hook_body(oa: *const ObjectAttributes) -> NTSTATUS {
     // `decision_for` is. See `parent_dir_of_handle`'s case 4 and
     // `DecodedPath`'s doc comment.
     let decoded = path_of_tracked(oa);
-    let _uncached_guard =
-        decoded.as_ref().is_some_and(|d| d.os_consulted).then(vfs_redirect::UncachedScope::enter);
+    let _uncached_guard = decoded
+        .as_ref()
+        .is_some_and(|d| d.os_consulted)
+        .then(vfs_redirect::UncachedScope::enter);
     let Some(path) = decoded.as_ref().map(|d| d.path.as_str()) else {
         // An undecodable delete is an undecodable open by another name: it
         // bypasses every decision we would have made. Recorded rather than
@@ -4536,7 +4655,11 @@ unsafe fn delete_hook_body(oa: *const ObjectAttributes) -> NTSTATUS {
 
     if let Some(client) = crate::fuse_client::global() {
         if let Some((root, vpath)) = client.vpath_under_root(path) {
-            let vp = if vpath.is_empty() { "." } else { vpath.as_str() };
+            let vp = if vpath.is_empty() {
+                "."
+            } else {
+                vpath.as_str()
+            };
             client.names_changed(root, vp);
             crate::read_cache::invalidate_path(root.0, vp);
             return match client.delete(root, vp) {
@@ -4787,7 +4910,11 @@ unsafe fn setinfo_hook_body(
             };
             if let (Some(nt), Some(c)) = (nt, crate::fuse_client::global()) {
                 if let Some((root, vpath)) = c.vpath_under_root(&nt) {
-                    let src = if vpath.is_empty() { ".".to_string() } else { vpath };
+                    let src = if vpath.is_empty() {
+                        ".".to_string()
+                    } else {
+                        vpath
+                    };
                     c.names_changed(root, &src);
                     crate::read_cache::invalidate_path(root.0, &src);
                     let ok = if is_delete {
@@ -4815,7 +4942,11 @@ unsafe fn setinfo_hook_body(
                             // delete/rename on a virtual handle. The engine
                             // branch now fails closed the same way.
                             Some((dst_root, dstv)) if dst_root == root => {
-                                let dst = if dstv.is_empty() { ".".to_string() } else { dstv };
+                                let dst = if dstv.is_empty() {
+                                    ".".to_string()
+                                } else {
+                                    dstv
+                                };
                                 c.names_changed(root, &vfs_core::fold(&dst));
                                 crate::read_cache::invalidate_path(root.0, &vfs_core::fold(&dst));
                                 let renamed = c.rename(root, &src, &dst).is_ok();
@@ -4889,9 +5020,7 @@ unsafe fn setinfo_hook_body(
                         // the provider graph does not serve. Fail closed, with
                         // the same status the FUSE-handle branch above already
                         // returns for the identical case.
-                        crate::engine::RenameOutcome::CrossRoot => {
-                            return STATUS_UNSUCCESSFUL
-                        }
+                        crate::engine::RenameOutcome::CrossRoot => return STATUS_UNSUCCESSFUL,
                         crate::engine::RenameOutcome::Declined => false,
                     },
                     None => false,
@@ -5122,8 +5251,11 @@ unsafe fn fuse_query_information(
             (*bi).last_access_time = SYNTH_FILETIME;
             (*bi).last_write_time = SYNTH_FILETIME;
             (*bi).change_time = SYNTH_FILETIME;
-            (*bi).file_attributes =
-                if is_dir { FILE_ATTRIBUTE_DIRECTORY } else { FILE_ATTRIBUTE_NORMAL };
+            (*bi).file_attributes = if is_dir {
+                FILE_ATTRIBUTE_DIRECTORY
+            } else {
+                FILE_ATTRIBUTE_NORMAL
+            };
             (*bi)._reserved = 0;
             synth_iosb_ok(iosb, core::mem::size_of::<FileBasicInformation>());
             STATUS_SUCCESS
@@ -5169,8 +5301,11 @@ unsafe fn fuse_query_information(
             (*ni).change_time = SYNTH_FILETIME;
             (*ni).allocation_size = size as i64;
             (*ni).end_of_file = size as i64;
-            (*ni).file_attributes =
-                if is_dir { FILE_ATTRIBUTE_DIRECTORY } else { FILE_ATTRIBUTE_NORMAL };
+            (*ni).file_attributes = if is_dir {
+                FILE_ATTRIBUTE_DIRECTORY
+            } else {
+                FILE_ATTRIBUTE_NORMAL
+            };
             synth_iosb_ok(iosb, core::mem::size_of::<FileNetworkOpenInformation>());
             STATUS_SUCCESS
         }
@@ -5186,7 +5321,11 @@ unsafe fn fuse_query_information(
             }
             let p = info as *mut u8;
             core::ptr::write_bytes(p, 0, PREFIX);
-            let attrs = if is_dir { FILE_ATTRIBUTE_DIRECTORY } else { FILE_ATTRIBUTE_NORMAL };
+            let attrs = if is_dir {
+                FILE_ATTRIBUTE_DIRECTORY
+            } else {
+                FILE_ATTRIBUTE_NORMAL
+            };
             // Basic.FileAttributes @ 32
             core::ptr::write_unaligned(p.add(32) as *mut u32, attrs);
             // Standard.AllocationSize @ 40, EndOfFile @ 48, NumberOfLinks @ 56
@@ -5340,7 +5479,8 @@ unsafe fn qvol_hook_body(
     };
     if crate::fuse_synth::is_fuse_synth(handle as isize) {
         if class == FILE_FS_DEVICE_INFORMATION {
-            if info.is_null() || (length as usize) < core::mem::size_of::<FileFsDeviceInformation>() {
+            if info.is_null() || (length as usize) < core::mem::size_of::<FileFsDeviceInformation>()
+            {
                 return STATUS_BUFFER_OVERFLOW;
             }
             let di = info as *mut FileFsDeviceInformation;
@@ -5481,7 +5621,11 @@ unsafe fn lock_hook_body(
         // like an ordinary synchronous grant.
         crate::hookstats::note_read_completion(!apc.is_null(), !event.is_null());
         crate::hookstats::note_synthetic_lock(
-            if exclusive != 0 { "lock-exclusive" } else { "lock-shared" },
+            if exclusive != 0 {
+                "lock-exclusive"
+            } else {
+                "lock-shared"
+            },
             synth_path(handle).as_deref(),
         );
         synth_iosb_ok(iosb, 0);
@@ -5490,7 +5634,18 @@ unsafe fn lock_hook_body(
         }
         return STATUS_SUCCESS;
     }
-    tramp(handle, event, apc, apc_ctx, iosb, byte_offset, length, key, fail_immediately, exclusive)
+    tramp(
+        handle,
+        event,
+        apc,
+        apc_ctx,
+        iosb,
+        byte_offset,
+        length,
+        key,
+        fail_immediately,
+        exclusive,
+    )
 }
 
 /// `NtUnlockFile` hook — the release half of [`lock_hook`], and success for
@@ -5954,7 +6109,11 @@ unsafe fn write_hook_body(
             // forces every write to the current end of file at the kernel
             // level, ignoring any offset the caller supplies — a real handle
             // enforces this itself; ours has to do it here.
-            let off = if append_only { pos } else { explicit.unwrap_or(pos) };
+            let off = if append_only {
+                pos
+            } else {
+                explicit.unwrap_or(pos)
+            };
             let want = length as usize;
             // The file is changing: the read cache drops it. (A write handle
             // already dropped it at open; this keeps the rule local.)
@@ -6016,7 +6175,15 @@ unsafe fn write_hook_body(
         return STATUS_UNSUCCESSFUL;
     }
     tramp(
-        handle, event, apc, apc_ctx, iosb, buffer, length, byte_offset, key,
+        handle,
+        event,
+        apc,
+        apc_ctx,
+        iosb,
+        buffer,
+        length,
+        byte_offset,
+        key,
     )
 }
 
@@ -6073,8 +6240,7 @@ unsafe fn read_hook_body(
                 0usize
             } else {
                 // SAFETY: NtReadFile contract — buffer is writable for `length` bytes.
-                let slice =
-                    unsafe { core::slice::from_raw_parts_mut(buffer as *mut u8, max) };
+                let slice = unsafe { core::slice::from_raw_parts_mut(buffer as *mut u8, max) };
                 // A small synchronous read of an immutable file is offered to
                 // the read cache first. Not one that asked for completion by
                 // APC or event (those keep exactly the path they had), and not
@@ -6126,7 +6292,17 @@ unsafe fn read_hook_body(
         }
         return STATUS_UNSUCCESSFUL;
     }
-    tramp(handle, event, apc, apc_ctx, iosb, buffer, length, byte_offset, key)
+    tramp(
+        handle,
+        event,
+        apc,
+        apc_ctx,
+        iosb,
+        buffer,
+        length,
+        byte_offset,
+        key,
+    )
 }
 
 /// Back a VFS-served PE with a real file so the kernel can build the image
@@ -6168,7 +6344,8 @@ unsafe fn real_image_section(
 
     // Write once. A concurrent writer would be writing identical bytes, but a
     // reader must never see a half-written image, so build beside it and rename.
-    let good = |p: &std::path::Path| std::fs::metadata(p).map(|m| m.len()).ok() == Some(pe.len() as u64);
+    let good =
+        |p: &std::path::Path| std::fs::metadata(p).map(|m| m.len()).ok() == Some(pe.len() as u64);
     if !good(&path) {
         let tmp = dir.join(format!("{name}.{}.tmp", std::process::id()));
         std::fs::write(&tmp, pe).ok()?;
@@ -6277,18 +6454,17 @@ unsafe fn fuse_create_section(
         }
 
         return match vfs_inject::map_image_from_pe_bytes_local(&pe) {
-            Ok((base, img_size)) => match crate::zipserve::register_mapped_image(base as usize, img_size as u64)
-            {
-                Some(h) => {
-                    if !section_handle.is_null() {
-                        *section_handle = h as HANDLE;
+            Ok((base, img_size)) => {
+                match crate::zipserve::register_mapped_image(base as usize, img_size as u64) {
+                    Some(h) => {
+                        if !section_handle.is_null() {
+                            *section_handle = h as HANDLE;
+                        }
+                        STATUS_SUCCESS
                     }
-                    STATUS_SUCCESS
+                    None => STATUS_INVALID_FILE_FOR_SECTION,
                 }
-                None => {
-                    STATUS_INVALID_FILE_FOR_SECTION
-                }
-            },
+            }
             Err(_) => STATUS_INVALID_FILE_FOR_SECTION,
         };
     }
@@ -6356,7 +6532,11 @@ unsafe fn fuse_create_section(
     // Opt-in trace only: this runs inside NtCreateSection, so the file I/O
     // re-enters our own hooks on every section the game creates.
     if let Some(path) = vfs_env::raw(vfs_env::SECTION_FILL_LOG) {
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
             use std::io::Write;
             let _ = writeln!(f, "eager fh={fh} size={size} ok={fill_ok}");
         }
@@ -6485,7 +6665,14 @@ unsafe fn map_view_hook_body(
                 if !section_offset.is_null() {
                     core::ptr::write_unaligned(section_offset, off as i64);
                 }
-                let _ = (process, zero_bits, commit_size, inherit, alloc_type, protect);
+                let _ = (
+                    process,
+                    zero_bits,
+                    commit_size,
+                    inherit,
+                    alloc_type,
+                    protect,
+                );
                 STATUS_SUCCESS
             }
             None => STATUS_UNSUCCESSFUL,
@@ -6567,10 +6754,20 @@ unsafe fn cpiw_hook_body(
         None => cur_dir,
     };
 
-
     let forced = flags | CREATE_SUSPENDED;
     let r = tramp(
-        token, app, cmd, proc_attr, thread_attr, inherit, forced, env, cur_dir_eff, si, pi, ptok,
+        token,
+        app,
+        cmd,
+        proc_attr,
+        thread_attr,
+        inherit,
+        forced,
+        env,
+        cur_dir_eff,
+        si,
+        pi,
+        ptok,
     );
     if r != 0 && !pi.is_null() {
         let pid = (*pi).dwProcessId;
@@ -6637,7 +6834,11 @@ unsafe fn qdirex_hook_body(
         flags & SL_RESTART_SCAN != 0,
         flags & SL_RETURN_SINGLE_ENTRY != 0,
         file_name,
-        &|| tramp(handle, event, apc, apc_ctx, iosb, info, length, class_raw, flags, file_name),
+        &|| {
+            tramp(
+                handle, event, apc, apc_ctx, iosb, info, length, class_raw, flags, file_name,
+            )
+        },
     )
 }
 
@@ -6819,7 +7020,11 @@ unsafe fn serve_dir_query(
             .and_then(|c| c.vpath_under_root(&dir_path).map(|hit| (c, hit)));
         match routed {
             Some((client, (root, vpath))) => {
-                let vp = if vpath.is_empty() { "." } else { vpath.as_str() };
+                let vp = if vpath.is_empty() {
+                    "."
+                } else {
+                    vpath.as_str()
+                };
                 let items = match client.readdir(root, vp) {
                     Ok(entries) => {
                         let items: Vec<DirItem> = entries
@@ -7041,7 +7246,9 @@ mod tests {
         // The device lookup failing is a decline, not a fallback: with no
         // device name there is nothing to build the Windows form out of.
         assert_eq!(
-            spoofed_object_name(r"\Device\HarddiskVolume3\x", r"\??\C:\root\mod.esp", |_| None),
+            spoofed_object_name(r"\Device\HarddiskVolume3\x", r"\??\C:\root\mod.esp", |_| {
+                None
+            }),
             None
         );
     }
@@ -7068,7 +7275,11 @@ mod tests {
     /// spellings silently declines the spoof and leaks.
     #[test]
     fn spoofed_object_name_accepts_every_prefix_path_table_can_hold() {
-        for vpath in [r"\??\C:\root\mod.esp", r"\\?\C:\root\mod.esp", r"C:\root\mod.esp"] {
+        for vpath in [
+            r"\??\C:\root\mod.esp",
+            r"\\?\C:\root\mod.esp",
+            r"C:\root\mod.esp",
+        ] {
             assert_eq!(
                 spoofed_object_name(r"\??\C:\backing", vpath, |_| unreachable!()),
                 Some(r"\??\C:\root\mod.esp".to_string()),
@@ -7130,7 +7341,10 @@ mod tests {
         ] {
             let mut buf = vec![0xAAu8; need - 1];
             assert_eq!(fill(class, &mut buf, false, 1), None, "class {class}");
-            assert!(buf.iter().all(|b| *b == 0xAA), "class {class} wrote into a short buffer");
+            assert!(
+                buf.iter().all(|b| *b == 0xAA),
+                "class {class} wrote into a short buffer"
+            );
         }
     }
 
@@ -7158,7 +7372,11 @@ mod tests {
         for class in [CLASS_STAT, CLASS_STAT_BASIC] {
             buf.iter_mut().for_each(|b| *b = 0);
             fill(class, &mut buf, false, SIZE).unwrap();
-            assert_eq!(i64_at(&buf, 40), SIZE as i64, "class {class} AllocationSize");
+            assert_eq!(
+                i64_at(&buf, 40),
+                SIZE as i64,
+                "class {class} AllocationSize"
+            );
             assert_eq!(i64_at(&buf, 48), SIZE as i64, "class {class} EndOfFile");
         }
     }
@@ -7220,7 +7438,10 @@ mod tests {
     #[test]
     fn an_absolute_rename_target_is_returned_as_is() {
         let mut buf = rename_info(0, r"\??\C:\root\new.esp");
-        assert_eq!(parse_rename(&mut buf).as_deref(), Some(r"\??\C:\root\new.esp"));
+        assert_eq!(
+            parse_rename(&mut buf).as_deref(),
+            Some(r"\??\C:\root\new.esp")
+        );
     }
 
     /// A rename target may be named against a directory handle. Refusing to
@@ -7329,8 +7550,14 @@ mod tests {
     /// handing the caller a directory handle it never asked for.
     #[test]
     fn only_non_creating_dispositions_downgrade_a_directory_open() {
-        assert!(dir_open_downgrades(1), "FILE_OPEN opens an existing directory");
-        assert!(dir_open_downgrades(3), "FILE_OPEN_IF opens an existing directory");
+        assert!(
+            dir_open_downgrades(1),
+            "FILE_OPEN opens an existing directory"
+        );
+        assert!(
+            dir_open_downgrades(3),
+            "FILE_OPEN_IF opens an existing directory"
+        );
         for disposition in [0u32, 2, 4, 5] {
             assert!(
                 !dir_open_downgrades(disposition),
@@ -7474,7 +7701,10 @@ mod tests {
         let st = unsafe { panicking_hook(&mut reached) };
         assert_eq!(reached, 1, "the body must have run far enough to panic");
         assert_eq!(st, STATUS_UNSUCCESSFUL);
-        assert!(st < 0, "NTSTATUS {st:#x} has no severity bits — a caller reads it as success");
+        assert!(
+            st < 0,
+            "NTSTATUS {st:#x} has no severity bits — a caller reads it as success"
+        );
     }
 
     /// The unwind stops at the `extern "system"` boundary and does not run the
@@ -7528,7 +7758,10 @@ mod tests {
 
         assert_eq!(unsafe { guarded_panicking_hook() }, STATUS_UNSUCCESSFUL);
 
-        assert!(!in_hook_reenter(), "HOOK_REENTER stayed raised after the panic");
+        assert!(
+            !in_hook_reenter(),
+            "HOOK_REENTER stayed raised after the panic"
+        );
         assert_eq!(
             unsafe { reentrancy_probe() },
             STATUS_SUCCESS,
@@ -7561,7 +7794,10 @@ mod tests {
     /// nothing filled in.
     #[test]
     fn a_panicking_bool_hook_reports_false_rather_than_a_status() {
-        assert_ne!(STATUS_HOOK_PANICKED, 0, "the trap this test exists for is gone");
+        assert_ne!(
+            STATUS_HOOK_PANICKED, 0,
+            "the trap this test exists for is gone"
+        );
         let r = unsafe { panicking_bool_hook() };
         assert_eq!(r, 0, "a BOOL-returning hook must fail with FALSE");
         assert_eq!(
@@ -7619,8 +7855,8 @@ mod tests {
         ];
 
         fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
-            let entries = std::fs::read_dir(dir)
-                .unwrap_or_else(|e| panic!("read {}: {e}", dir.display()));
+            let entries =
+                std::fs::read_dir(dir).unwrap_or_else(|e| panic!("read {}: {e}", dir.display()));
             for e in entries.flatten() {
                 let p = e.path();
                 if p.is_dir() {

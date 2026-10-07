@@ -122,7 +122,11 @@ fn a_path_based_delete_under_a_managed_root_never_reaches_the_real_file() {
             mtime: 0,
         })
         .collect();
-        let tree = build(vec![Layer { id: LayerId(0), entries }]).unwrap();
+        let tree = build(vec![Layer {
+            id: LayerId(0),
+            entries,
+        }])
+        .unwrap();
         vfs_shared::bridge::flatten(&tree)
     };
 
@@ -144,7 +148,8 @@ fn a_path_based_delete_under_a_managed_root_never_reaches_the_real_file() {
     let engine = Engine::new(root.to_str().unwrap(), snapshot).unwrap();
     let hooks = install(engine).expect("install");
 
-    let served_status = ntapi::nt_delete_file(&root.join("data").join("served.esp").to_string_lossy());
+    let served_status =
+        ntapi::nt_delete_file(&root.join("data").join("served.esp").to_string_lossy());
     let unserved_status =
         ntapi::nt_delete_file(&root.join("data").join("unserved.bin").to_string_lossy());
     let locked_status =
@@ -155,8 +160,10 @@ fn a_path_based_delete_under_a_managed_root_never_reaches_the_real_file() {
     // A FUSE-synthetic directory handle for `<root>\data`: the shape a caller
     // gets from any directory open under a managed root, and the one the
     // kernel can never be handed.
-    let (st, synth_dir) =
-        ntapi::nt_open_dir_abs(&root.join("data").to_string_lossy(), ntapi::FILE_LIST_DIRECTORY);
+    let (st, synth_dir) = ntapi::nt_open_dir_abs(
+        &root.join("data").to_string_lossy(),
+        ntapi::FILE_LIST_DIRECTORY,
+    );
     assert!(st >= 0, "the director's directory open failed: {st:#x}");
     let synth_rel_status = ntapi::nt_delete_relative(synth_dir, "relative.esp");
     // A relative name that climbs back out of the root through that same
@@ -169,7 +176,8 @@ fn a_path_based_delete_under_a_managed_root_never_reaches_the_real_file() {
 
     // A *real* directory handle, outside every root, that the shim watched
     // being opened — `parent_dir_of_handle`'s second case.
-    let (st, real_dir) = ntapi::nt_open_dir_abs(&base.to_string_lossy(), ntapi::FILE_LIST_DIRECTORY);
+    let (st, real_dir) =
+        ntapi::nt_open_dir_abs(&base.to_string_lossy(), ntapi::FILE_LIST_DIRECTORY);
     assert!(st >= 0, "the outside directory open failed: {st:#x}");
     let real_rel_status = ntapi::nt_delete_relative(real_dir, "outside-rel.txt");
     ntapi::close(real_dir);
@@ -181,26 +189,34 @@ fn a_path_based_delete_under_a_managed_root_never_reaches_the_real_file() {
     // **The filesystem side first.** A delete that reached disk reports
     // success and says nothing else; the bytes are the only witness.
     assert_eq!(
-        std::fs::read(root.join("data").join("served.esp")).ok().as_deref(),
+        std::fs::read(root.join("data").join("served.esp"))
+            .ok()
+            .as_deref(),
         Some(HOST_SERVED),
         "the real data/served.esp under the managed root was deleted — a path-based delete \
          must be answered by the director, never performed on the file behind the root"
     );
     assert_eq!(
-        std::fs::read(root.join("data").join("unserved.bin")).ok().as_deref(),
+        std::fs::read(root.join("data").join("unserved.bin"))
+            .ok()
+            .as_deref(),
         Some(HOST_UNSERVED),
         "the real data/unserved.bin was deleted. The director does not serve it, so the \
          delete had to fail — a real file under a managed root that the provider graph \
          never agreed to is unreachable, deletes included"
     );
     assert_eq!(
-        std::fs::read(root.join("readonly").join("locked.esp")).ok().as_deref(),
+        std::fs::read(root.join("readonly").join("locked.esp"))
+            .ok()
+            .as_deref(),
         Some(HOST_LOCKED),
         "the real readonly/locked.esp was deleted — the director serves it from a layer that \
          accepts no writes, and its refusal is the caller's answer"
     );
     assert_eq!(
-        std::fs::read(root.join("data").join("relative.esp")).ok().as_deref(),
+        std::fs::read(root.join("data").join("relative.esp"))
+            .ok()
+            .as_deref(),
         Some(HOST_RELATIVE),
         "the real data/relative.esp was deleted — a delete named against a FUSE-synthetic \
          directory handle decodes to the same path an absolute one does, and must be answered \

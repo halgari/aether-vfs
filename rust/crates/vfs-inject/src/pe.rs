@@ -49,7 +49,9 @@ pub use vfs_pe::{is_system_import_dll, pe_looks_like_image};
 // with the shim-side exception it was supposed to mirror.
 
 pub fn map_image_from_pe_bytes_local(pe: &[u8]) -> Result<(*mut c_void, usize), &'static str> {
-    use windows_sys::Win32::System::Memory::{VirtualAlloc, MEM_COMMIT, MEM_RESERVE, PAGE_EXECUTE_READWRITE};
+    use windows_sys::Win32::System::Memory::{
+        VirtualAlloc, MEM_COMMIT, MEM_RESERVE, PAGE_EXECUTE_READWRITE,
+    };
 
     if !pe_looks_like_image(pe) {
         return Err("not a PE");
@@ -87,7 +89,9 @@ pub fn map_image_from_pe_bytes_local(pe: &[u8]) -> Result<(*mut c_void, usize), 
         // x64 unwind data only: a PE32 image has no .pdata to register, and
         // RtlAddFunctionTable over a directory read at the PE32+ offset would
         // be pointing at whatever field happens to live there.
-        if let Some(rtl) = ntdll_proc(c"RtlAddFunctionTable").filter(|_| crate::map::is_pe32_plus(&img, e_lfanew)) {
+        if let Some(rtl) =
+            ntdll_proc(c"RtlAddFunctionTable").filter(|_| crate::map::is_pe32_plus(&img, e_lfanew))
+        {
             let ex_dir = crate::map::dd_base(&img, e_lfanew) + 3 * 8;
             if ex_dir + 8 <= img.len() {
                 let ex_rva = rd_u32(&img, ex_dir) as usize;

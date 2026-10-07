@@ -83,7 +83,11 @@ pub fn strip_whiteout_markers(items: Vec<DirItem>) -> Vec<DirItem> {
 /// What the overlay says about a path.
 pub enum OverlayState {
     /// An overlay file or directory exists here.
-    Present { path: PathBuf, is_dir: bool, size: u64 },
+    Present {
+        path: PathBuf,
+        is_dir: bool,
+        size: u64,
+    },
     /// A whiteout marker hides this path (mod-deleted at runtime).
     Whiteout,
     /// The overlay has nothing for this path; fall through to snapshot/real.
@@ -125,7 +129,9 @@ pub struct Overlay {
 
 impl Overlay {
     pub fn new(overlay_root: &str) -> Overlay {
-        Overlay { root: PathBuf::from(overlay_root) }
+        Overlay {
+            root: PathBuf::from(overlay_root),
+        }
     }
 
     /// The root-scoped overlay subdirectory: distinct roots get distinct
@@ -168,7 +174,11 @@ impl Overlay {
         }
         let f = self.file_path(root, comps);
         if let Ok(md) = std::fs::symlink_metadata(&f) {
-            return OverlayState::Present { path: f, is_dir: md.is_dir(), size: md.len() };
+            return OverlayState::Present {
+                path: f,
+                is_dir: md.is_dir(),
+                size: md.len(),
+            };
         }
         if self.whiteout_path(root, comps).exists() {
             return OverlayState::Whiteout;
@@ -281,7 +291,12 @@ impl Overlay {
                 Ok(m) => m,
                 Err(_) => continue,
             };
-            adds.push(DirItem { name, is_dir: md.is_dir(), size: md.len(), mtime: Self::mtime_of(&md) });
+            adds.push(DirItem {
+                name,
+                is_dir: md.is_dir(),
+                size: md.len(),
+                mtime: Self::mtime_of(&md),
+            });
         }
         for a in adds {
             if wildcard.map(|w| wildcard_match(w, &a.name)).unwrap_or(true) {
@@ -303,8 +318,7 @@ mod tests {
     /// under one root must not hide the other root's file.
     #[test]
     fn two_roots_same_path_do_not_collide() {
-        let dir = std::env::temp_dir()
-            .join(format!("vfs-overlay-tworoots-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vfs-overlay-tworoots-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let ov = Overlay::new(dir.to_str().unwrap());
         let comps = vec!["data".to_string(), "foo.esp".to_string()];
@@ -392,8 +406,8 @@ mod tests {
     /// the note at the director branch.
     #[test]
     fn a_whiteout_marker_is_dropped_from_a_merged_listing_that_carries_it() {
-        let dir = std::env::temp_dir()
-            .join(format!("vfs-overlay-marker-listing-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("vfs-overlay-marker-listing-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let ov = Overlay::new(dir.to_str().unwrap());
         let comps = vec!["data".to_string(), "gone.esp".to_string()];
@@ -404,9 +418,24 @@ mod tests {
         // layers) *and* our marker, which the director has no reason to hide.
         let marker = vfs_redirect::whiteout_marker("gone.esp");
         let merged = vec![
-            DirItem { name: "gone.esp".into(), is_dir: false, size: 10, mtime: 0 },
-            DirItem { name: marker.clone(), is_dir: false, size: 0, mtime: 0 },
-            DirItem { name: "kept.esp".into(), is_dir: false, size: 20, mtime: 0 },
+            DirItem {
+                name: "gone.esp".into(),
+                is_dir: false,
+                size: 10,
+                mtime: 0,
+            },
+            DirItem {
+                name: marker.clone(),
+                is_dir: false,
+                size: 0,
+                mtime: 0,
+            },
+            DirItem {
+                name: "kept.esp".into(),
+                is_dir: false,
+                size: 20,
+                mtime: 0,
+            },
         ];
 
         let out = ov.apply_to_listing(RootId(0), &["data".to_string()], merged, None);
@@ -438,8 +467,8 @@ mod tests {
     /// (root 0's marker landing somewhere root 1's lookup also checks).
     #[test]
     fn whiteout_under_one_root_is_absent_not_whiteout_under_another() {
-        let dir = std::env::temp_dir()
-            .join(format!("vfs-overlay-wh-noleak-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("vfs-overlay-wh-noleak-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let ov = Overlay::new(dir.to_str().unwrap());
         let comps = vec!["data".to_string(), "solo.esp".to_string()];

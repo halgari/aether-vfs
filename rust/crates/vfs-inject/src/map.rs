@@ -207,7 +207,9 @@ pub fn resolve_imports_ex_with_bases(
                 // The IAT slot holds the resolved address; a function pointer
                 // is exactly what we want to write there.
                 #[allow(clippy::fn_to_numeric_cast_any)]
-                { func as usize as u64 }
+                {
+                    func as usize as u64
+                }
             };
             img[iat_rva..iat_rva + 8].copy_from_slice(&fa.to_le_bytes());
             thunk_rva += 8;
@@ -264,7 +266,10 @@ fn find_remote_module_base(
     Err("remote module not found")
 }
 
-fn rpm_u32(process: windows_sys::Win32::Foundation::HANDLE, addr: u64) -> Result<u32, &'static str> {
+fn rpm_u32(
+    process: windows_sys::Win32::Foundation::HANDLE,
+    addr: u64,
+) -> Result<u32, &'static str> {
     use windows_sys::Win32::System::Diagnostics::Debug::ReadProcessMemory;
     let mut v = 0u32;
     let mut n = 0usize;
@@ -284,7 +289,10 @@ fn rpm_u32(process: windows_sys::Win32::Foundation::HANDLE, addr: u64) -> Result
     Ok(v)
 }
 
-fn rpm_u16(process: windows_sys::Win32::Foundation::HANDLE, addr: u64) -> Result<u16, &'static str> {
+fn rpm_u16(
+    process: windows_sys::Win32::Foundation::HANDLE,
+    addr: u64,
+) -> Result<u16, &'static str> {
     use windows_sys::Win32::System::Diagnostics::Debug::ReadProcessMemory;
     let mut v = 0u16;
     let mut n = 0usize;

@@ -81,7 +81,10 @@ fn a_redirected_handle_reports_its_virtual_name_not_the_backing_one() {
     let f = std::fs::File::open(&vfile).expect("open redirected virtual file");
     let name = object_name(f.as_raw_handle() as HANDLE).to_lowercase();
 
-    assert!(name.contains("mod.esp"), "must report the VIRTUAL name: {name}");
+    assert!(
+        name.contains("mod.esp"),
+        "must report the VIRTUAL name: {name}"
+    );
     assert!(
         !name.contains("backing_blob"),
         "must NOT leak the backing name: {name}"
@@ -111,8 +114,14 @@ fn a_redirected_handle_reports_its_virtual_name_not_the_backing_one() {
                 &mut ret,
             )
         };
-        assert_eq!(st, expect, "len={len}: expected 0x{expect:08x}, got 0x{st:08x}");
-        assert_ne!(ret, 0, "len={len}: ReturnLength must carry the required size");
+        assert_eq!(
+            st, expect,
+            "len={len}: expected 0x{expect:08x}, got 0x{st:08x}"
+        );
+        assert_ne!(
+            ret, 0,
+            "len={len}: ReturnLength must carry the required size"
+        );
         if required == 0 {
             required = ret;
         }
@@ -130,7 +139,10 @@ fn a_redirected_handle_reports_its_virtual_name_not_the_backing_one() {
             &mut ret,
         )
     };
-    assert_eq!(st, STATUS_BUFFER_OVERFLOW, "required-1 must overflow: 0x{st:08x}");
+    assert_eq!(
+        st, STATUS_BUFFER_OVERFLOW,
+        "required-1 must overflow: 0x{st:08x}"
+    );
     assert_eq!(ret, required);
     // And exactly the required size succeeds, with `Buffer` pointing 16 bytes
     // into the caller's own buffer -- what both hosts were measured to do.

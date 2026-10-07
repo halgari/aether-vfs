@@ -52,14 +52,14 @@ pub type NtCreateFileFn = unsafe extern "system" fn(
     *mut HANDLE, // FileHandle
     u32,         // DesiredAccess
     *const ObjectAttributes,
-    *mut c_void, // IoStatusBlock
-    *const i64,  // AllocationSize
-    u32,         // FileAttributes
-    u32,         // ShareAccess
-    u32,         // CreateDisposition
-    u32,         // CreateOptions
+    *mut c_void,   // IoStatusBlock
+    *const i64,    // AllocationSize
+    u32,           // FileAttributes
+    u32,           // ShareAccess
+    u32,           // CreateDisposition
+    u32,           // CreateOptions
     *const c_void, // EaBuffer
-    u32,         // EaLength
+    u32,           // EaLength
 ) -> NTSTATUS;
 
 /// `STATUS_SUCCESS`.
@@ -331,16 +331,16 @@ pub type NtCreateSectionFn = unsafe extern "system" fn(
 
 /// `ntdll!NtMapViewOfSection`.
 pub type NtMapViewOfSectionFn = unsafe extern "system" fn(
-    HANDLE,         // SectionHandle
-    HANDLE,         // ProcessHandle
+    HANDLE,           // SectionHandle
+    HANDLE,           // ProcessHandle
     *mut *mut c_void, // BaseAddress
-    usize,          // ZeroBits
-    usize,          // CommitSize
-    *mut i64,       // SectionOffset
-    *mut usize,     // ViewSize
-    u32,            // InheritDisposition
-    u32,            // AllocationType
-    u32,            // Win32Protect
+    usize,            // ZeroBits
+    usize,            // CommitSize
+    *mut i64,         // SectionOffset
+    *mut usize,       // ViewSize
+    u32,              // InheritDisposition
+    u32,              // AllocationType
+    u32,              // Win32Protect
 ) -> NTSTATUS;
 
 /// `ntdll!NtUnmapViewOfSection`.

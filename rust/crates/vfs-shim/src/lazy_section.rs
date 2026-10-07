@@ -511,9 +511,7 @@ unsafe fn fill_chunk_at(addr: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use windows_sys::Win32::System::Memory::{
-        VirtualQuery, MEMORY_BASIC_INFORMATION, MEM_FREE,
-    };
+    use windows_sys::Win32::System::Memory::{VirtualQuery, MEMORY_BASIC_INFORMATION, MEM_FREE};
 
     /// Serialises the tests that reserve and release virtual address space.
     ///
@@ -648,7 +646,11 @@ mod tests {
         );
 
         hook_unmap(base);
-        assert_eq!(va_state(base), MEM_FREE, "last unmap should reap the region");
+        assert_eq!(
+            va_state(base),
+            MEM_FREE,
+            "last unmap should reap the region"
+        );
     }
 
     #[test]
@@ -688,7 +690,10 @@ mod tests {
         let h = crate::zipserve::register_mapped_image(base, size).expect("register");
 
         let mapped = hook_map(h, 0, 0);
-        assert!(!is_lazy_base(mapped), "eager region must not be demand-paged");
+        assert!(
+            !is_lazy_base(mapped),
+            "eager region must not be demand-paged"
+        );
         hook_unmap(mapped);
         hook_close(h);
 
@@ -721,7 +726,10 @@ mod tests {
     /// own thread and cannot be observed by a sibling.
     #[test]
     fn a_panic_inside_the_veh_does_not_latch_the_reentrancy_flag() {
-        assert!(!IN_VEH.with(|c| c.get()), "test thread started inside the VEH");
+        assert!(
+            !IN_VEH.with(|c| c.get()),
+            "test thread started inside the VEH"
+        );
 
         let outcome = std::panic::catch_unwind(|| {
             let _veh = VehGuard::enter().expect("the flag was already raised");
@@ -751,8 +759,14 @@ mod tests {
         assert!(!IN_VEH.with(|c| c.get()));
         {
             let _outer = VehGuard::enter().expect("first entry");
-            assert!(VehGuard::enter().is_none(), "a re-entrant fault was accepted");
+            assert!(
+                VehGuard::enter().is_none(),
+                "a re-entrant fault was accepted"
+            );
         }
-        assert!(!IN_VEH.with(|c| c.get()), "the guard did not release on drop");
+        assert!(
+            !IN_VEH.with(|c| c.get()),
+            "the guard did not release on drop"
+        );
     }
 }
