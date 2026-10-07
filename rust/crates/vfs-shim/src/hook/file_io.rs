@@ -1,4 +1,5 @@
 //! `NtReadFile`, `NtWriteFile`, `NtLockFile`, `NtUnlockFile`, `NtFlushBuffersFile`.
+#![deny(unsafe_op_in_unsafe_fn)]
 
 use super::{
     TRAMP_FLUSH, TRAMP_LOCK, TRAMP_READ, TRAMP_UNLOCK, TRAMP_WRITE, open_synth, synth_path,
@@ -102,24 +103,29 @@ pub(super) unsafe fn lock_hook_body(
             },
             synth_path(handle).as_deref(),
         );
-        crate::ntbuf::iosb_set(iosb, STATUS_SUCCESS, 0);
+        // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+        unsafe { crate::ntbuf::iosb_set(iosb, STATUS_SUCCESS, 0) };
         if !event.is_null() {
-            windows_sys::Win32::System::Threading::SetEvent(event);
+            // SAFETY: FFI call with valid arguments.
+            unsafe { windows_sys::Win32::System::Threading::SetEvent(event) };
         }
         return STATUS_SUCCESS;
     }
-    tramp(
-        handle,
-        event,
-        apc,
-        apc_ctx,
-        iosb,
-        byte_offset,
-        length,
-        key,
-        fail_immediately,
-        exclusive,
-    )
+    // SAFETY: the original NT function, called with valid NT arguments.
+    unsafe {
+        tramp(
+            handle,
+            event,
+            apc,
+            apc_ctx,
+            iosb,
+            byte_offset,
+            length,
+            key,
+            fail_immediately,
+            exclusive,
+        )
+    }
 }
 
 /// `NtUnlockFile` hook — the release half of [`lock_hook`], and success for
@@ -141,10 +147,12 @@ pub(super) unsafe fn unlock_hook_body(
             return STATUS_INVALID_HANDLE;
         }
         crate::hookstats::note_synthetic_lock("unlock", synth_path(handle).as_deref());
-        crate::ntbuf::iosb_set(iosb, STATUS_SUCCESS, 0);
+        // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+        unsafe { crate::ntbuf::iosb_set(iosb, STATUS_SUCCESS, 0) };
         return STATUS_SUCCESS;
     }
-    tramp(handle, iosb, byte_offset, length, key)
+    // SAFETY: the original NT function, called with valid NT arguments.
+    unsafe { tramp(handle, iosb, byte_offset, length, key) }
 }
 
 /// `NtFlushBuffersFile` hook. Success on a synthetic handle: the director owns
@@ -165,10 +173,12 @@ pub(super) unsafe fn flush_hook_body(handle: HANDLE, iosb: *mut c_void) -> NTSTA
             return STATUS_INVALID_HANDLE;
         }
         crate::hookstats::note_synthetic_lock("flush", synth_path(handle).as_deref());
-        crate::ntbuf::iosb_set(iosb, STATUS_SUCCESS, 0);
+        // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+        unsafe { crate::ntbuf::iosb_set(iosb, STATUS_SUCCESS, 0) };
         return STATUS_SUCCESS;
     }
-    tramp(handle, iosb)
+    // SAFETY: the original NT function, called with valid NT arguments.
+    unsafe { tramp(handle, iosb) }
 }
 
 /// `NtWriteFile` hook. For synthetic (fuse) write handles, forward the game's
@@ -193,7 +203,8 @@ pub(super) unsafe fn write_hook_body(
     };
     if crate::fuse_synth::is_fuse_synth(handle as isize) {
         crate::hookstats::note_read_completion(!apc.is_null(), !event.is_null());
-        let explicit = crate::ntbuf::explicit_offset(byte_offset);
+        // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+        let explicit = unsafe { crate::ntbuf::explicit_offset(byte_offset) };
         if let Some((fh, size, _is_dir, pos, append_only)) =
             crate::fuse_synth::lookup(handle as isize)
         {
@@ -225,7 +236,8 @@ pub(super) unsafe fn write_hook_body(
                 {
                     Ok(n) => n,
                     Err(_) => {
-                        crate::ntbuf::iosb_set(iosb, STATUS_UNSUCCESSFUL, 0);
+                        // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+                        unsafe { crate::ntbuf::iosb_set(iosb, STATUS_UNSUCCESSFUL, 0) };
                         return STATUS_UNSUCCESSFUL;
                     }
                 }
@@ -247,9 +259,11 @@ pub(super) unsafe fn write_hook_body(
             if end > size {
                 crate::fuse_synth::grow_size(handle as isize, end);
             }
-            crate::ntbuf::iosb_set(iosb, STATUS_SUCCESS, n);
+            // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+            unsafe { crate::ntbuf::iosb_set(iosb, STATUS_SUCCESS, n) };
             if !event.is_null() {
-                windows_sys::Win32::System::Threading::SetEvent(event);
+                // SAFETY: FFI call with valid arguments.
+                unsafe { windows_sys::Win32::System::Threading::SetEvent(event) };
             }
             return STATUS_SUCCESS;
         }
@@ -257,17 +271,20 @@ pub(super) unsafe fn write_hook_body(
         // NtWriteFile (mirrors read_hook).
         return STATUS_UNSUCCESSFUL;
     }
-    tramp(
-        handle,
-        event,
-        apc,
-        apc_ctx,
-        iosb,
-        buffer,
-        length,
-        byte_offset,
-        key,
-    )
+    // SAFETY: the original NT function, called with valid NT arguments.
+    unsafe {
+        tramp(
+            handle,
+            event,
+            apc,
+            apc_ctx,
+            iosb,
+            buffer,
+            length,
+            byte_offset,
+            key,
+        )
+    }
 }
 
 /// `NtReadFile` hook. Synthetic (fuse) handles are answered from the director
@@ -291,13 +308,15 @@ pub(super) unsafe fn read_hook_body(
         None => return STATUS_UNSUCCESSFUL,
     };
     if crate::fuse_synth::is_fuse_synth(handle as isize) {
-        let explicit = crate::ntbuf::explicit_offset(byte_offset);
+        // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+        let explicit = unsafe { crate::ntbuf::explicit_offset(byte_offset) };
         if let Some(view) = crate::fuse_synth::lookup_read(handle as isize) {
             let (fh, size, pos) = (view.fh, view.size, view.position);
             let off = explicit.unwrap_or(pos);
             let want = length as usize;
             if off >= size {
-                crate::ntbuf::iosb_set(iosb, STATUS_END_OF_FILE, 0);
+                // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+                unsafe { crate::ntbuf::iosb_set(iosb, STATUS_END_OF_FILE, 0) };
                 return STATUS_END_OF_FILE;
             }
             // Phase 1: fill the game's NtReadFile buffer in place (no intermediate tmp).
@@ -326,7 +345,8 @@ pub(super) unsafe fn read_hook_body(
                 }) {
                     Ok(n) => n,
                     Err(_) => {
-                        crate::ntbuf::iosb_set(iosb, STATUS_UNSUCCESSFUL, 0);
+                        // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+                        unsafe { crate::ntbuf::iosb_set(iosb, STATUS_UNSUCCESSFUL, 0) };
                         return STATUS_UNSUCCESSFUL;
                     }
                 }
@@ -341,24 +361,29 @@ pub(super) unsafe fn read_hook_body(
                 } else {
                     STATUS_SUCCESS
                 };
-                crate::ntbuf::iosb_set(iosb, status, n);
+                // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+                unsafe { crate::ntbuf::iosb_set(iosb, status, n) };
                 if !event.is_null() {
-                    windows_sys::Win32::System::Threading::SetEvent(event);
+                    // SAFETY: FFI call with valid arguments.
+                    unsafe { windows_sys::Win32::System::Threading::SetEvent(event) };
                 }
                 return status;
             }
         }
         return STATUS_UNSUCCESSFUL;
     }
-    tramp(
-        handle,
-        event,
-        apc,
-        apc_ctx,
-        iosb,
-        buffer,
-        length,
-        byte_offset,
-        key,
-    )
+    // SAFETY: the original NT function, called with valid NT arguments.
+    unsafe {
+        tramp(
+            handle,
+            event,
+            apc,
+            apc_ctx,
+            iosb,
+            buffer,
+            length,
+            byte_offset,
+            key,
+        )
+    }
 }
