@@ -35,19 +35,20 @@ use vfs_registry::path::{self, PathError};
 use vfs_registry::Lookup;
 use windows_sys::Win32::Foundation::{HANDLE, NTSTATUS};
 
+use crate::ntbuf::OwnedOa;
 use crate::ntdef::{
     NtCloseFn, NtDuplicateObjectFn, NtEnumerateKeyFn, NtEnumerateValueKeyFn, NtOpenKeyExFn,
     NtQueryKeyFn, NtQueryMultipleValueKeyFn, NtQueryObjectFn, NtQuerySecurityObjectFn,
-    NtQueryValueKeyFn, ObjectAttributes, UnicodeString, DUPLICATE_CLOSE_SOURCE,
-    DUPLICATE_SAME_ACCESS, DUPLICATE_SAME_ATTRIBUTES, KEY_NAME_INFORMATION,
-    OBJECT_BASIC_INFORMATION, OBJECT_HANDLE_FLAG_INFORMATION, OBJECT_TYPE_INFORMATION,
-    OBJ_CASE_INSENSITIVE, REG_CREATED_NEW_KEY, REG_OPENED_EXISTING_KEY, REG_OPTION_BACKUP_RESTORE,
-    REG_OPTION_CREATE_LINK, REG_OPTION_OPEN_LINK, REG_OPTION_VOLATILE, STATUS_ACCESS_DENIED,
-    STATUS_BUFFER_OVERFLOW, STATUS_BUFFER_TOO_SMALL, STATUS_HANDLE_NOT_CLOSABLE,
-    STATUS_INFO_LENGTH_MISMATCH, STATUS_INVALID_BUFFER_SIZE, STATUS_INVALID_HANDLE,
-    STATUS_INVALID_PARAMETER, STATUS_INVALID_SECURITY_DESCR, STATUS_KEY_DELETED,
-    STATUS_NOT_SUPPORTED, STATUS_OBJECT_NAME_INVALID, STATUS_OBJECT_NAME_NOT_FOUND,
-    STATUS_OBJECT_PATH_NOT_FOUND, STATUS_OBJECT_TYPE_MISMATCH, STATUS_SUCCESS, STATUS_UNSUCCESSFUL,
+    NtQueryValueKeyFn, ObjectAttributes, DUPLICATE_CLOSE_SOURCE, DUPLICATE_SAME_ACCESS,
+    DUPLICATE_SAME_ATTRIBUTES, KEY_NAME_INFORMATION, OBJECT_BASIC_INFORMATION,
+    OBJECT_HANDLE_FLAG_INFORMATION, OBJECT_TYPE_INFORMATION, REG_CREATED_NEW_KEY,
+    REG_OPENED_EXISTING_KEY, REG_OPTION_BACKUP_RESTORE, REG_OPTION_CREATE_LINK,
+    REG_OPTION_OPEN_LINK, REG_OPTION_VOLATILE, STATUS_ACCESS_DENIED, STATUS_BUFFER_OVERFLOW,
+    STATUS_BUFFER_TOO_SMALL, STATUS_HANDLE_NOT_CLOSABLE, STATUS_INFO_LENGTH_MISMATCH,
+    STATUS_INVALID_BUFFER_SIZE, STATUS_INVALID_HANDLE, STATUS_INVALID_PARAMETER,
+    STATUS_INVALID_SECURITY_DESCR, STATUS_KEY_DELETED, STATUS_NOT_SUPPORTED,
+    STATUS_OBJECT_NAME_INVALID, STATUS_OBJECT_NAME_NOT_FOUND, STATUS_OBJECT_PATH_NOT_FOUND,
+    STATUS_OBJECT_TYPE_MISMATCH, STATUS_SUCCESS, STATUS_UNSUCCESSFUL,
 };
 
 /// Tag bits of a synthetic key handle: bits 29 and 30, nothing above them.
@@ -460,47 +461,6 @@ pub struct Real {
     pub query_object: Option<NtQueryObjectFn>,
 }
 
-/// An absolute `OBJECT_ATTRIBUTES` the shim builds for its own opens. Boxed: the attributes
-/// point at the string, which points at the buffer.
-struct AbsName {
-    buf: Vec<u16>,
-    us: UnicodeString,
-    oa: ObjectAttributes,
-}
-
-impl AbsName {
-    /// `path` (canonical) as the absolute NT name, with `template`'s attributes, security
-    /// descriptor and QoS when given.
-    fn new(canonical: &str, template: Option<&ObjectAttributes>) -> Box<AbsName> {
-        let buf: Vec<u16> = path::to_nt(canonical, user_sid()).encode_utf16().collect();
-        let bytes = (buf.len() * 2).min(u16::MAX as usize & !1) as u16;
-        let mut b = Box::new(AbsName {
-            buf,
-            us: UnicodeString {
-                length: bytes,
-                maximum_length: bytes,
-                buffer: core::ptr::null_mut(),
-            },
-            oa: ObjectAttributes {
-                length: core::mem::size_of::<ObjectAttributes>() as u32,
-                root_directory: core::ptr::null_mut(),
-                object_name: core::ptr::null(),
-                attributes: OBJ_CASE_INSENSITIVE,
-                security_descriptor: core::ptr::null(),
-                security_qos: core::ptr::null(),
-            },
-        });
-        b.us.buffer = b.buf.as_mut_ptr();
-        b.oa.object_name = &b.us;
-        if let Some(t) = template {
-            b.oa.attributes = t.attributes | OBJ_CASE_INSENSITIVE;
-            b.oa.security_descriptor = t.security_descriptor;
-            b.oa.security_qos = t.security_qos;
-        }
-        b
-    }
-}
-
 /// The name `NtQueryKey(KeyNameInformation)` reports for a real key handle. `Err` is the
 /// failing status (`STATUS_UNSUCCESSFUL` when there is no trampoline or the answer is malformed).
 unsafe fn real_key_name(real: &Real, h: isize) -> Result<String, NTSTATUS> {
@@ -714,11 +674,11 @@ pub(crate) unsafe fn open_private(
     let Some(open) = real.open_ex else {
         return Err(STATUS_UNSUCCESSFUL);
     };
-    let name = AbsName::new(canonical, None);
+    let name = OwnedOa::absolute(None, &path::to_nt(canonical, user_sid()), true);
     let wow64 = access & WOW64_MASK;
     let try_open = |rights: u32| {
         let mut h: HANDLE = core::ptr::null_mut();
-        let st = open(&mut h, rights | wow64, &name.oa, 0);
+        let st = open(&mut h, rights | wow64, name.as_ptr(), 0);
         if st < 0 {
             Err(st)
         } else {
@@ -923,8 +883,12 @@ impl Key<'_> {
         pass: &mut dyn FnMut(*const ObjectAttributes) -> NTSTATUS,
     ) -> NTSTATUS {
         let st = if self.root_synth {
-            let abs = AbsName::new(&self.canonical, Some(&*self.oa));
-            pass(&abs.oa)
+            let abs = OwnedOa::absolute(
+                Some(&*self.oa),
+                &path::to_nt(&self.canonical, user_sid()),
+                true,
+            );
+            pass(abs.as_ptr())
         } else {
             pass(self.oa)
         };
@@ -1431,9 +1395,9 @@ unsafe fn open_real_rights(
     let Some(open) = real.open_ex else {
         return Err(STATUS_UNSUCCESSFUL);
     };
-    let name = AbsName::new(canonical, None);
+    let name = OwnedOa::absolute(None, &path::to_nt(canonical, user_sid()), true);
     let mut h: HANDLE = core::ptr::null_mut();
-    let st = open(&mut h, rights | (wow64 & WOW64_MASK), &name.oa, 0);
+    let st = open(&mut h, rights | (wow64 & WOW64_MASK), name.as_ptr(), 0);
     if st < 0 {
         Err(st)
     } else {

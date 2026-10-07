@@ -689,6 +689,7 @@ use windows_sys::Win32::System::Threading::{
 
 use crate::engine::Engine;
 use crate::inject::{inject_child, re_suspend, self_dll_path};
+use crate::ntbuf::OwnedOa;
 use crate::ntdef::{
     FileBasicInformation, FileEndOfFileInformation, FileFsDeviceInformation,
     FileInternalInformation, FileNetworkOpenInformation, FilePositionInformation,
@@ -3805,26 +3806,11 @@ unsafe fn create_hook_body(
                 outcome_recorded,
                 crate::hookstats::OpenOutcome::FellThroughRedirect,
             );
-            let mut wbuf: Vec<u16> = target_nt.encode_utf16().collect();
-            let byte_len = (wbuf.len() * 2) as u16;
-            let new_us = UnicodeString {
-                length: byte_len,
-                maximum_length: byte_len,
-                buffer: wbuf.as_mut_ptr(),
-            };
-            let oa_ref = &*oa;
-            let new_oa = ObjectAttributes {
-                length: oa_ref.length,
-                root_directory: core::ptr::null_mut(),
-                object_name: &new_us,
-                attributes: oa_ref.attributes,
-                security_descriptor: oa_ref.security_descriptor,
-                security_qos: oa_ref.security_qos,
-            };
+            let new_oa = OwnedOa::absolute(Some(&*oa), &target_nt, false);
             let status = tramp(
                 file_handle,
                 access,
-                &new_oa,
+                new_oa.as_ptr(),
                 iosb,
                 alloc,
                 attrs,
@@ -3834,7 +3820,6 @@ unsafe fn create_hook_body(
                 ea,
                 ealen,
             );
-            drop(wbuf);
             record_identity(file_handle, path, status);
             record_path(file_handle, path, status);
             status
@@ -3947,27 +3932,11 @@ unsafe fn tramp_create_abs(
     abs_path: &str,
 ) -> NTSTATUS {
     let nt = to_nt_path(abs_path);
-    let mut wbuf: Vec<u16> = nt.encode_utf16().collect();
-    wbuf.push(0);
-    let byte_len = ((wbuf.len() - 1) * 2) as u16;
-    let new_us = UnicodeString {
-        length: byte_len,
-        maximum_length: byte_len + 2,
-        buffer: wbuf.as_mut_ptr(),
-    };
-    let oa_ref = &*oa;
-    let new_oa = ObjectAttributes {
-        length: oa_ref.length,
-        root_directory: core::ptr::null_mut(),
-        object_name: &new_us,
-        attributes: oa_ref.attributes,
-        security_descriptor: oa_ref.security_descriptor,
-        security_qos: oa_ref.security_qos,
-    };
+    let new_oa = OwnedOa::absolute(Some(&*oa), &nt, false);
     let status = tramp(
         file_handle,
         access,
-        &new_oa,
+        new_oa.as_ptr(),
         iosb,
         alloc,
         attrs,
@@ -3977,7 +3946,6 @@ unsafe fn tramp_create_abs(
         ea,
         ealen,
     );
-    drop(wbuf);
     status
 }
 
@@ -3994,25 +3962,8 @@ unsafe fn tramp_open_abs(
     abs_path: &str,
 ) -> NTSTATUS {
     let nt = to_nt_path(abs_path);
-    let mut wbuf: Vec<u16> = nt.encode_utf16().collect();
-    wbuf.push(0);
-    let byte_len = ((wbuf.len() - 1) * 2) as u16;
-    let new_us = UnicodeString {
-        length: byte_len,
-        maximum_length: byte_len + 2,
-        buffer: wbuf.as_mut_ptr(),
-    };
-    let oa_ref = &*oa;
-    let new_oa = ObjectAttributes {
-        length: oa_ref.length,
-        root_directory: core::ptr::null_mut(),
-        object_name: &new_us,
-        attributes: oa_ref.attributes,
-        security_descriptor: oa_ref.security_descriptor,
-        security_qos: oa_ref.security_qos,
-    };
-    let status = tramp(file_handle, access, &new_oa, iosb, share, opts);
-    drop(wbuf);
+    let new_oa = OwnedOa::absolute(Some(&*oa), &nt, false);
+    let status = tramp(file_handle, access, new_oa.as_ptr(), iosb, share, opts);
     status
 }
 
@@ -4086,24 +4037,8 @@ unsafe fn open_hook_body(
                 outcome_recorded,
                 crate::hookstats::OpenOutcome::FellThroughRedirect,
             );
-            let mut wbuf: Vec<u16> = target_nt.encode_utf16().collect();
-            let byte_len = (wbuf.len() * 2) as u16;
-            let new_us = UnicodeString {
-                length: byte_len,
-                maximum_length: byte_len,
-                buffer: wbuf.as_mut_ptr(),
-            };
-            let oa_ref = &*oa;
-            let new_oa = ObjectAttributes {
-                length: oa_ref.length,
-                root_directory: core::ptr::null_mut(),
-                object_name: &new_us,
-                attributes: oa_ref.attributes,
-                security_descriptor: oa_ref.security_descriptor,
-                security_qos: oa_ref.security_qos,
-            };
-            let status = tramp(file_handle, access, &new_oa, iosb, share, opts);
-            drop(wbuf);
+            let new_oa = OwnedOa::absolute(Some(&*oa), &target_nt, false);
+            let status = tramp(file_handle, access, new_oa.as_ptr(), iosb, share, opts);
             record_identity(file_handle, path, status);
             record_path(file_handle, path, status);
             status
@@ -4698,25 +4633,8 @@ unsafe fn tramp_delete_abs(
     abs_path: &str,
 ) -> NTSTATUS {
     let nt = to_nt_path(abs_path);
-    let mut wbuf: Vec<u16> = nt.encode_utf16().collect();
-    wbuf.push(0);
-    let byte_len = ((wbuf.len() - 1) * 2) as u16;
-    let new_us = UnicodeString {
-        length: byte_len,
-        maximum_length: byte_len + 2,
-        buffer: wbuf.as_mut_ptr(),
-    };
-    let oa_ref = &*oa;
-    let new_oa = ObjectAttributes {
-        length: oa_ref.length,
-        root_directory: core::ptr::null_mut(),
-        object_name: &new_us,
-        attributes: oa_ref.attributes,
-        security_descriptor: oa_ref.security_descriptor,
-        security_qos: oa_ref.security_qos,
-    };
-    let status = tramp(&new_oa);
-    drop(wbuf);
+    let new_oa = OwnedOa::absolute(Some(&*oa), &nt, false);
+    let status = tramp(new_oa.as_ptr());
     status
 }
 
