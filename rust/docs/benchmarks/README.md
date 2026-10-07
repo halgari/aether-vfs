@@ -23,7 +23,7 @@ Architecture context: [../architecture.md](../architecture.md) §5.
 
 ```powershell
 # vfs-fuse-bench was deleted with vfs-launch; the live benchmark is ring-bench:
-cargo run -p vfs-ring-harness --bin ring-bench --release
+cargo run -p vfs-bench --bin ring-bench --release
 ```
 
 The block-cache figures were produced by `spike-node/cache-cost`, a throwaway

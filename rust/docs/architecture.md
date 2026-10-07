@@ -726,7 +726,7 @@ observer before concluding the process is idle.
 | `vfs-shim` / `vfs-shim-dll` | NT detours, FUSE client, synthetic handles, sections |
 | `vfs-payload` | `no_std` pre-init hook payload |
 | `vfs-inject` | injection, PE parsing, process creation |
-| `vfs-fixture-*`, `vfs-ring-harness` | test fixtures |
+| `vfs-fixture-*`, `vfs-bench` | test fixtures |
 
 Dependency direction is enforced by the split: pure crates never learn about the
 OS, and the zip provider never learns about the host.
