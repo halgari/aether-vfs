@@ -1,4 +1,5 @@
-//! Ring opcode dispatch against the director kernel (the FUSE-style RPC vocabulary; no `/dev/fuse` involved).
+//! Ring opcode dispatch against the director kernel (the FUSE-style RPC
+//! vocabulary; no `/dev/fuse` involved).
 
 use vfs_protocol::{
     decode_close_req, decode_mkdir_req, decode_open_req, decode_path_req, decode_read_req,

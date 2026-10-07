@@ -1,3 +1,5 @@
+> Historical: measured against crates that have since been removed (`vfs-server`, `vfs-fuse-bench`); numbers are kept as a record, not current guidance.
+
 # Tier A Optimizations — Benchmark Deltas
 
 **Host:** WIN11-RUST  

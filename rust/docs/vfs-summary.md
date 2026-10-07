@@ -125,7 +125,7 @@ Principles:
 - Shim under managed root uses **RPC**, not local zip maps, when FUSE is live.  
 - Hosts configure and **launch**; they rarely stream game data themselves.
 
-**Current launch path (`vfs-launch`)** uses Generation B for content: `Session::mount_zip` + `serve` + `launch`.
+**Launch path:** `vfs-embed`'s `Session` (the former `vfs-launch` CLI is gone) uses Generation B for content: `Session::mount_zip` + `serve` + `launch`.
 
 ---
 
@@ -310,7 +310,7 @@ When FUSE is not live, legacy Engine/snapshot/zipserve paths may still apply (tr
 ### 8.2 FuseClient
 
 - Connects via env: section name, map size (`VFS_RING_BYTES` = **full mapping**), arena length, events.  
-- Large fragments: bulk + pipeline (`submit_many`).  
+- Large fragments: bulk + pipeline (`submit_many_held`; `submit_many` was removed).  
 - Small fragments: inline ring payload.  
 
 ### 8.3 Dual-layer inject (why two DLLs)
@@ -379,7 +379,6 @@ panic handler, and excluded from the workspace for exactly this reason — uses
 | **vfs-inject** | CreateProcess, inject, hollow, PE tools |
 | **vfs-payload** | Early no_std stubs |
 | **vfs-shim** / **vfs-shim-dll** | Hooks + injectable DLL |
-| **vfs-launch** | Skyrim CLI host |
 
 ### 10.2 Legacy / transitional
 
@@ -388,7 +387,6 @@ panic handler, and excluded from the workspace for exactly this reason — uses
 | **vfs-core** | Pure merge tree, Source disk/zip-window |
 | **vfs-shared** | Flattened snapshot |
 | **vfs-redirect** | Decision core for snapshot Engine |
-| **vfs-server** | Legacy tree Server + OpenTable (benches/e2e) |
 
 ### 10.3 Dependency rationale (why not one crate)
 
@@ -416,7 +414,7 @@ C:\GameLayers\
   vfs-state\        # fuse.cfg, shim.cfg, ready.flag
 ```
 
-`vfs-launch` steps:
+The former `vfs-launch` (deleted) did:
 
 1. Discover numbered `*.zip`.  
 2. Wipe residual payload files under runtime.  
