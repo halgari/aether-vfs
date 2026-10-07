@@ -21,6 +21,7 @@ pub mod launch;
 pub mod layout;
 pub mod nvapi;
 pub mod prefix;
+mod process;
 #[cfg(feature = "acquire")]
 pub mod release;
 pub mod runtime;

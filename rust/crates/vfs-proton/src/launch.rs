@@ -558,7 +558,7 @@ pub fn spawn(l: &WineLaunch) -> Result<std::process::Child, LaunchError> {
     for stale in stale_env(&env) {
         cmd.env_remove(stale);
     }
-    crate::prefix::spawn_retrying_busy(&mut cmd)
+    crate::process::spawn_retrying_busy(&mut cmd)
         .map_err(|e| LaunchError::Spawn(format!("{prog}: {e}")))
 }
 
