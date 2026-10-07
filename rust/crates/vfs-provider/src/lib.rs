@@ -5,6 +5,7 @@
 
 mod caps;
 pub mod conformance;
+mod handle_table;
 mod layout;
 mod model;
 mod path;
@@ -13,6 +14,7 @@ mod status;
 
 pub use caps::{Access, Capabilities, CaseMatch};
 pub use conformance::{assert_conformance, write_fixture_tree, RwMemFixture, FIXTURE_FILES};
+pub use handle_table::HandleTable;
 pub use layout::{
     copy_up_name, is_overlay_marker, overlay_layer_dir, whiteout_name, COPY_UP_PREFIX,
     WHITEOUT_PREFIX,
