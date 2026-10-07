@@ -457,7 +457,7 @@ mod tests {
     use super::*;
 
     fn open() -> (tempfile::TempDir, Index) {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = vfs_testkit::tempdir().unwrap();
         let index = Index::open(&dir.path().join("index.redb"), 1 << 20).unwrap();
         (dir, index)
     }

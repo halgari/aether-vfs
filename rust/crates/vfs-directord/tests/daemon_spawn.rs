@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 #[test]
 fn an_auto_spawned_daemon_that_cannot_open_its_storage_reports_why() {
-    let t = tempfile::tempdir().unwrap();
+    let t = vfs_testkit::tempdir().unwrap();
     let storage_dir = t.path().join("storage");
     // Held by this process for the whole test: the spawned daemon's open
     // fails with the store's lock error.
@@ -49,7 +49,7 @@ fn an_auto_spawned_daemon_that_cannot_open_its_storage_reports_why() {
 #[test]
 fn storage_log_events_reach_the_daemon_log() {
     use vfs_embed::{VPath, OPEN_CREATE, OPEN_WRITE};
-    let t = tempfile::tempdir().unwrap();
+    let t = vfs_testkit::tempdir().unwrap();
     let storage_dir = t.path().join("storage");
     {
         let s = vfs_embed::Storage::open(&storage_dir, vfs_embed::StorageConfig::default())

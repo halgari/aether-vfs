@@ -8,7 +8,7 @@ pub(super) fn killed_copy(
     d: &std::path::Path,
     name: &str,
 ) -> (Arc<Storage>, Arc<dyn Provider>, tempfile::TempDir) {
-    let killed = tempfile::tempdir().unwrap();
+    let killed = vfs_testkit::tempdir().unwrap();
     snapshot_as_killed(d, killed.path()).unwrap();
     let k = Storage::open(killed.path(), cfg()).unwrap();
     let kp = k.layer(name).unwrap();
@@ -179,7 +179,7 @@ fn a_failed_grow_commit_keeps_the_closed_tail() {
     #[cfg(not(windows))]
     {
         s.store.flush().unwrap();
-        let killed = tempfile::tempdir().unwrap();
+        let killed = vfs_testkit::tempdir().unwrap();
         snapshot_as_killed(d.path(), killed.path()).unwrap();
         let k = Storage::open(killed.path(), cfg()).unwrap();
         let r = k.last_reconcile();
@@ -313,7 +313,7 @@ fn closed_file_is_durable_across_storage_reopen() {
     // make a live copy fail.
     #[cfg(not(windows))]
     {
-        let killed = tempfile::tempdir().unwrap();
+        let killed = vfs_testkit::tempdir().unwrap();
         snapshot_as_killed(d.path(), killed.path()).unwrap();
         let k = Storage::open(killed.path(), cfg()).unwrap();
         let kp = k.layer("saves").unwrap();
@@ -429,7 +429,7 @@ pub(super) fn scratch_storage(d: &std::path::Path) -> Arc<Storage> {
 /// the rule, as does any other directory of the scratch layer.
 #[test]
 fn a_scratch_file_open_across_a_durable_point_makes_none_at_close() {
-    let d = tempfile::tempdir().unwrap();
+    let d = vfs_testkit::tempdir().unwrap();
     let s = scratch_storage(d.path());
     let c = s.layer("content").unwrap();
     let w = s.layer("write").unwrap();
@@ -493,7 +493,7 @@ fn a_scratch_file_open_across_a_durable_point_makes_none_at_close() {
 #[test]
 fn a_killed_scratch_rewrite_leaves_its_final_name_absent_or_whole() {
     for sync_after_rename in [false, true] {
-        let d = tempfile::tempdir().unwrap();
+        let d = vfs_testkit::tempdir().unwrap();
         let s = scratch_storage(d.path());
         let c = s.layer("content").unwrap();
         c.mkdir(at("tmp")).unwrap();

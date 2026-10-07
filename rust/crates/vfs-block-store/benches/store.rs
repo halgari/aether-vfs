@@ -47,7 +47,7 @@ fn stat_scan(c: &mut Criterion) {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(500_000);
-    let dir = tempfile::tempdir().unwrap();
+    let dir = vfs_testkit::tempdir().unwrap();
     let store = open(dir.path());
     for i in 0..files {
         store
@@ -76,7 +76,7 @@ fn stat_scan(c: &mut Criterion) {
 }
 
 fn reads(c: &mut Criterion) {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = vfs_testkit::tempdir().unwrap();
     let store = open(dir.path());
     let blocks = 4096u64; // 256 MiB
     store.set_len(b"big", blocks * BS as u64).unwrap();
@@ -103,7 +103,7 @@ fn reads(c: &mut Criterion) {
 }
 
 fn writes(c: &mut Criterion) {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = vfs_testkit::tempdir().unwrap();
     let store = open(dir.path());
     let size = 16 * BS * 16; // 16 MiB
     let mut g = c.benchmark_group("write");
@@ -142,7 +142,7 @@ fn compaction(c: &mut Criterion) {
     g.bench_function("256mib_half_garbage", |b| {
         b.iter_batched(
             || {
-                let dir = tempfile::tempdir().unwrap();
+                let dir = vfs_testkit::tempdir().unwrap();
                 let store = BlockStore::open(
                     dir.path(),
                     StoreConfig {

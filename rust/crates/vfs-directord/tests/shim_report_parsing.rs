@@ -51,7 +51,7 @@ fn unrouted_director_opens_parse_out_of_the_fall_through_map() {
 /// reconciles instead of reporting a phantom bypass.
 #[test]
 fn unrouted_director_opens_count_toward_the_directors_total() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = vfs_testkit::tempdir().expect("tempdir");
     let report = dir.path().join("shim-stats.log");
     std::fs::write(
         &report,
@@ -72,7 +72,7 @@ fn unrouted_director_opens_count_toward_the_directors_total() {
 /// open still fails, whatever the unrouted count is.
 #[test]
 fn an_unaccounted_open_still_fails_even_with_unrouted_opens_present() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = vfs_testkit::tempdir().expect("tempdir");
     let report = dir.path().join("shim-stats.log");
     std::fs::write(
         &report,
@@ -132,7 +132,7 @@ fn empty_text_parses_as_zero_not_an_error() {
 
 #[test]
 fn assert_reconciled_panics_on_drift_with_a_named_message() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = vfs_testkit::tempdir().expect("tempdir");
     let report = dir.path().join("shim-stats.log");
     std::fs::write(
         &report,
@@ -157,7 +157,7 @@ fn render_path_row(path: &str, count: u64) -> String {
 
 #[test]
 fn classified_paths_collects_across_every_outcome_bucket() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = vfs_testkit::tempdir().expect("tempdir");
     let report = dir.path().join("shim-stats.log");
     let text = format!(
         "{OUTCOMES_HEADER}{}{}{}{}",
@@ -178,7 +178,7 @@ fn classified_paths_collects_across_every_outcome_bucket() {
 
 #[test]
 fn classified_paths_reports_truncation_rather_than_silently_dropping_it() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = vfs_testkit::tempdir().expect("tempdir");
     let report = dir.path().join("shim-stats.log");
     let text = format!(
         "{OUTCOMES_HEADER}{}{}      ... and 5 more\n",
@@ -193,7 +193,7 @@ fn classified_paths_reports_truncation_rather_than_silently_dropping_it() {
 
 #[test]
 fn classified_paths_empty_for_a_missing_report() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = vfs_testkit::tempdir().expect("tempdir");
     let report = dir.path().join("never-written.log");
     let (paths, truncated) = classified_paths(&report);
     assert!(paths.is_empty());
@@ -251,7 +251,7 @@ fn missing_readdir_section_parses_as_empty_not_an_error() {
 
 #[test]
 fn assert_reconciled_tolerates_a_missing_file() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = vfs_testkit::tempdir().expect("tempdir");
     let report = dir.path().join("never-written.log");
     // 0 routed, 0 opens_ok: reconciles trivially even though the file
     // was never created (the short-lived-process case).

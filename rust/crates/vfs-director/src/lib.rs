@@ -50,7 +50,7 @@ mod tests {
 
     #[test]
     fn disk_provider_open_read() {
-        let dir = std::env::temp_dir().join(format!("vfs-dir-disk-{}", std::process::id()));
+        let dir = vfs_testkit::scratch_path("vfs-dir-disk");
         let _ = std::fs::create_dir_all(&dir);
         let file = dir.join("hello.txt");
         {
@@ -78,7 +78,7 @@ mod tests {
     // kind of thing that makes a test count silently miscounted by one.
     #[test]
     fn bare_director_unmount_drops_visibility() {
-        let dir = std::env::temp_dir().join(format!("vfs-clear-{}", std::process::id()));
+        let dir = vfs_testkit::scratch_path("vfs-clear");
         let _ = std::fs::create_dir_all(&dir);
         std::fs::write(dir.join("x.txt"), b"x").unwrap();
         let d = Director::new();

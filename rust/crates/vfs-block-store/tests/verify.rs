@@ -26,7 +26,7 @@ fn populated(dir: &std::path::Path) {
 
 #[test]
 fn verify_passes_after_mixed_operations() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = vfs_testkit::tempdir().unwrap();
     populated(dir.path());
     let report = open(dir.path()).verify().unwrap();
     assert!(report.is_ok(), "{:#?}", report.problems);
@@ -37,7 +37,7 @@ fn verify_passes_after_mixed_operations() {
 
 #[test]
 fn verify_reports_corrupt_records() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = vfs_testkit::tempdir().unwrap();
     populated(dir.path());
     let pack = dir.path().join("packs").join("00000001.pack");
     let mut bytes = std::fs::read(&pack).unwrap();
@@ -54,7 +54,7 @@ fn verify_reports_corrupt_records() {
 
 #[test]
 fn verify_reports_missing_pack_files() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = vfs_testkit::tempdir().unwrap();
     populated(dir.path());
     let store = open(dir.path());
     let victim = store

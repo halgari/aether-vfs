@@ -188,7 +188,7 @@ proptest! {
 
     #[test]
     fn store_matches_model(ops in prop::collection::vec(op(), 1..40)) {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = vfs_testkit::tempdir().unwrap();
         let mut store = Some(open(dir.path()));
         let mut model = HashMap::new();
         for op in &ops {

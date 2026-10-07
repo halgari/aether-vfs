@@ -19,4 +19,5 @@ vfs-provider = { path = "../vfs-provider" }
 vfs-core = { path = "../vfs-core" }
 
 [dev-dependencies]
+vfs-testkit = { path = "../vfs-testkit" }
 vfs-provider = { path = "../vfs-provider", features = ["conformance"] }

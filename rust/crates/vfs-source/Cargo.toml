@@ -39,4 +39,5 @@ tonic-prost-build = "0.14"
 protoc-bin-vendored = "3"
 
 [dev-dependencies]
+vfs-testkit = { path = "../vfs-testkit" }
 vfs-provider = { path = "../vfs-provider", features = ["conformance"] }

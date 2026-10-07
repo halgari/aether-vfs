@@ -25,7 +25,7 @@ use vfs_embed::{DiskProvider, RootSources};
 // host directory), so the helper is gated with them.
 #[cfg(not(unix))]
 fn dir(tag: &str, files: &[(&str, &[u8])]) -> std::path::PathBuf {
-    let p = std::env::temp_dir().join(format!("vfs-embed-{}-{tag}", std::process::id()));
+    let p = vfs_testkit::scratch_path(&format!("vfs-embed-{tag}"));
     let _ = std::fs::remove_dir_all(&p);
     std::fs::create_dir_all(&p).unwrap();
     for (name, bytes) in files {

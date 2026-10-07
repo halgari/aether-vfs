@@ -53,3 +53,6 @@ path = "src/bin/ring-bench.rs"
 [[bin]]
 name = "skyrim-live"
 path = "src/bin/skyrim-live.rs"
+
+[dev-dependencies]
+vfs-testkit = { path = "../vfs-testkit" }

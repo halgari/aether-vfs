@@ -122,7 +122,7 @@ fn check_mixed_records(store: &BlockStore, id: &[u8]) {
 
 #[test]
 fn bulk_writes_go_through_the_engine_and_read_back() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = vfs_testkit::tempdir().unwrap();
     let fake = Arc::new(Fake::default());
     let store = BlockStore::open_with_engine(
         dir.path(),
@@ -165,7 +165,7 @@ fn bulk_writes_go_through_the_engine_and_read_back() {
 
 #[test]
 fn concurrent_bulk_writers_share_batches() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = vfs_testkit::tempdir().unwrap();
     let fake = Arc::new(Fake::default());
     let cfg = GpuConfig {
         batch_deadline: Duration::from_millis(50),
@@ -204,7 +204,7 @@ fn concurrent_bulk_writers_share_batches() {
 
 #[test]
 fn an_unavailable_gpu_falls_back_to_cpu_zstd() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = vfs_testkit::tempdir().unwrap();
     let fake = Arc::new(Fake::default());
     fake.fail_open.store(true, Ordering::SeqCst);
     let store = BlockStore::open_with_engine(
@@ -232,7 +232,7 @@ fn an_unavailable_gpu_falls_back_to_cpu_zstd() {
 
 #[test]
 fn a_batch_failure_mid_write_loses_nothing() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = vfs_testkit::tempdir().unwrap();
     let fake = Arc::new(Fake::default());
     fake.fail_batch.store(2, Ordering::SeqCst);
     let store = BlockStore::open_with_engine(
@@ -253,7 +253,7 @@ fn a_batch_failure_mid_write_loses_nothing() {
 
 #[test]
 fn close_stops_the_gpu_service_and_later_opens_read_everything() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = vfs_testkit::tempdir().unwrap();
     let fake = Arc::new(Fake::default());
     let d = mixed(5);
     {
@@ -293,7 +293,7 @@ fn real(level: GpuLevel) -> StoreConfig {
 #[ignore = "needs a GPU"]
 fn real_gpu_frames_decode_through_the_read_path() {
     for level in GpuLevel::ALL {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = vfs_testkit::tempdir().unwrap();
         let store = BlockStore::open(dir.path(), real(level)).unwrap();
         let d = mixed(11);
         put_bulk(&store, b"m", &d);
@@ -320,7 +320,7 @@ fn real_gpu_frames_decode_through_the_read_path() {
 #[test]
 #[ignore = "needs a GPU"]
 fn real_gpu_batches_many_writers_together() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = vfs_testkit::tempdir().unwrap();
     let store = BlockStore::open(dir.path(), real(GpuLevel::Lvl9s12seg)).unwrap();
     let files: Vec<Vec<u8>> = (0..32).map(|i| dds_like(500 + i, 64 * BS + 77)).collect();
     for (i, d) in files.iter().enumerate() {

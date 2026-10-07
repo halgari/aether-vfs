@@ -43,7 +43,7 @@ const FILE: &str = "a.esp";
 const BYTES: &[u8] = b"the non-ascii-cased mod's real bytes";
 
 fn scratch(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("vfs-fold-{tag}-{}", std::process::id()));
+    let dir = vfs_testkit::scratch_path(&format!("vfs-fold-{tag}"));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir

@@ -134,7 +134,7 @@ async fn a_remote_source_is_served_from_the_store_on_the_second_pass() {
     });
 
     // The daemon, with storage in a temp dir.
-    let store_dir = tempfile::tempdir().unwrap();
+    let store_dir = vfs_testkit::tempdir().unwrap();
     let storage = Storage::open(store_dir.path(), StorageConfig::default()).unwrap();
     let registry = SessionRegistry::with_storage(Arc::clone(&storage));
     let daemon_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

@@ -100,12 +100,12 @@ async fn profile_api_reads_a_managed_root_ini_through_the_director() {
     let virtual_ini = format!("[Display]\r\nsTest={PREFS_VIRTUAL}\r\niTest=42\r\n");
     let disk_ini = format!("[Display]\r\nsTest={PREFS_DISK}\r\niTest=7\r\n");
 
-    let content_dir = tempfile::tempdir().expect("tempdir");
+    let content_dir = vfs_testkit::tempdir().expect("tempdir");
     std::fs::write(content_dir.path().join("prefs.ini"), virtual_ini.as_bytes()).unwrap();
 
-    let out_dir = tempfile::tempdir().expect("out tempdir");
+    let out_dir = vfs_testkit::tempdir().expect("out tempdir");
     let out_file = out_dir.path().join("prefs-out.tsv");
-    let stats_dir = tempfile::tempdir().expect("stats tempdir");
+    let stats_dir = vfs_testkit::tempdir().expect("stats tempdir");
     let stats_log = stats_dir.path().join("shim-stats.log");
 
     let fixture = locate_artifact("vfs-fixture-prefs.exe");
@@ -447,11 +447,11 @@ async fn profile_api_writes_a_managed_root_ini_through_the_director() {
     let virtual_ini = format!("[Display]\r\nsTest={PREFS_VIRTUAL}\r\niTest=42\r\n");
     let disk_ini = format!("[Display]\r\nsTest={PREFS_DISK}\r\niTest=7\r\n");
 
-    let content_dir = tempfile::tempdir().expect("tempdir");
+    let content_dir = vfs_testkit::tempdir().expect("tempdir");
     let backing = content_dir.path().join("prefs.ini");
     std::fs::write(&backing, virtual_ini.as_bytes()).unwrap();
 
-    let out_dir = tempfile::tempdir().expect("out tempdir");
+    let out_dir = vfs_testkit::tempdir().expect("out tempdir");
     let out_file = out_dir.path().join("prefs-write-out.tsv");
 
     let fixture = locate_artifact("vfs-fixture-prefs.exe");

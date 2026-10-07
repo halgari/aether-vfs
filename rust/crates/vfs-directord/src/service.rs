@@ -490,7 +490,7 @@ mod tests {
             (0, 0, 0, 0)
         );
 
-        let dir = tempfile::tempdir().unwrap();
+        let dir = vfs_testkit::tempdir().unwrap();
         let storage =
             vfs_embed::Storage::open(dir.path(), vfs_embed::StorageConfig::default()).unwrap();
         let reg = SessionRegistry::with_storage(Arc::clone(&storage));

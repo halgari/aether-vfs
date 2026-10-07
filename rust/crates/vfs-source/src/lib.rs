@@ -81,7 +81,7 @@ mod tests {
 
     #[test]
     fn builds_disk_provider() {
-        let dir = std::env::temp_dir().join(format!("vfs-src-{}", std::process::id()));
+        let dir = vfs_testkit::scratch_path("vfs-src");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("f.txt"), b"hi").unwrap();
         let p = build_provider(&SourceSpec::Disk {
@@ -98,7 +98,7 @@ mod tests {
 
     #[test]
     fn disk_conformance() {
-        let dir = std::env::temp_dir().join(format!("vfs-conf-{}", std::process::id()));
+        let dir = vfs_testkit::scratch_path("vfs-conf");
         vfs_provider::write_fixture_tree(&dir);
         let p: Arc<dyn Provider> = Arc::new(DiskProvider::new(&dir));
         vfs_provider::assert_conformance(p);
@@ -107,7 +107,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn remote_provider_conformance_and_capabilities() {
-        let dir = std::env::temp_dir().join(format!("vfs-rconf-{}", std::process::id()));
+        let dir = vfs_testkit::scratch_path("vfs-rconf");
         vfs_provider::write_fixture_tree(&dir);
         let p: Arc<dyn Provider> = Arc::new(DiskProvider::new(&dir));
         let svc = ProviderSourceService::new(p);
@@ -171,7 +171,7 @@ mod tests {
     #[test]
     fn builds_zip_provider() {
         use std::io::Write;
-        let dir = std::env::temp_dir().join(format!("vfs-zip-src-{}", std::process::id()));
+        let dir = vfs_testkit::scratch_path("vfs-zip-src");
         let _ = std::fs::create_dir_all(&dir);
         // Minimal Stored zip with entry "f.txt" = "hi"
         let content = b"hi";

@@ -595,7 +595,7 @@ layer = 20
 
     #[test]
     fn load_detects_extension() {
-        let dir = std::env::temp_dir().join(format!("vfs-cfg-{}", std::process::id()));
+        let dir = vfs_testkit::scratch_path("vfs-cfg");
         let _ = std::fs::create_dir_all(&dir);
         let toml_path = dir.join("s.toml");
         std::fs::write(
@@ -690,7 +690,7 @@ write_layer = true
 
     #[test]
     fn an_old_config_with_a_cache_block_still_loads() {
-        let path = std::env::temp_dir().join(format!("vfs-control-cache-{}.toml", std::process::id()));
+        let path = vfs_testkit::scratch_root().join(format!("vfs-control-cache-{}.toml", std::process::id()));
         std::fs::write(
             &path,
             "[cache]\nblock_size = \"64K\"\n\n[[source]]\ntype = \"disk\"\npath = \"C:/x\"\n",

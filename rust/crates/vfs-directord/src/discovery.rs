@@ -58,7 +58,7 @@ mod tests {
 
     #[test]
     fn roundtrip_discovery_file() {
-        let dir = std::env::temp_dir().join(format!("vfs-disc-{}", std::process::id()));
+        let dir = vfs_testkit::scratch_path("vfs-disc");
         let path = dir.join("discovery.json");
         let d = Discovery {
             endpoint: "127.0.0.1:7000".into(),

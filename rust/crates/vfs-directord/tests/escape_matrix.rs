@@ -273,10 +273,10 @@ async fn escape_matrix_positive_and_negative_canary() {
     // the negative canary (written only to session.root below) is a real
     // file under the managed root that this provider genuinely does not
     // have, rather than something this test would have to fake.
-    let content_dir = tempfile::tempdir().expect("tempdir");
-    let stats_dir = tempfile::tempdir().expect("stats tempdir");
+    let content_dir = vfs_testkit::tempdir().expect("tempdir");
+    let stats_dir = vfs_testkit::tempdir().expect("stats tempdir");
     let stats_log = stats_dir.path().join("shim-stats.log");
-    let out_dir = tempfile::tempdir().expect("out tempdir");
+    let out_dir = vfs_testkit::tempdir().expect("out tempdir");
     let out_file = out_dir.path().join("escape-out.tsv");
 
     let fixture = locate_artifact("vfs-fixture-escape.exe");
@@ -345,7 +345,7 @@ async fn escape_matrix_positive_and_negative_canary() {
     // an isolated vector-7 run consistently failed to classify until this
     // moved out of the fixture). Points at the shared `Data` directory both
     // canaries live in, so one junction covers both.
-    let vector7_link = std::env::temp_dir().join(format!("vfs-escape-junction-e2e-{}", std::process::id()));
+    let vector7_link = vfs_testkit::scratch_path("vfs-escape-junction-e2e");
     let _ = std::fs::remove_dir(&vector7_link);
     let vector7_link_ready = std::process::Command::new("cmd")
         .args([
@@ -637,7 +637,7 @@ fn accounted_for_on_real_disk(name: &str, canary: &str) -> bool {
 /// (never-injected) harness process. See `VFS_ESCAPE_VECTOR7_LINK_DIR` in
 /// `vfs-env` for why vector 7's junction must pre-date the fixture launch.
 fn make_escape_junction(tag: &str, target: &Path) -> (PathBuf, Option<String>) {
-    let link = std::env::temp_dir().join(format!("vfs-escape-junction-{tag}-{}", std::process::id()));
+    let link = vfs_testkit::scratch_path(&format!("vfs-escape-junction-{tag}"));
     let _ = std::fs::remove_dir(&link);
     let ready = std::process::Command::new("cmd")
         .args(["/C", "mklink", "/J", &link.to_string_lossy(), &target.to_string_lossy()])
@@ -721,10 +721,10 @@ async fn escape_matrix_write_access_positive_and_negative_canary() {
     });
     tokio::time::sleep(Duration::from_millis(20)).await;
 
-    let content_dir = tempfile::tempdir().expect("tempdir");
-    let stats_dir = tempfile::tempdir().expect("stats tempdir");
+    let content_dir = vfs_testkit::tempdir().expect("tempdir");
+    let stats_dir = vfs_testkit::tempdir().expect("stats tempdir");
     let stats_log = stats_dir.path().join("shim-stats.log");
-    let out_dir = tempfile::tempdir().expect("out tempdir");
+    let out_dir = vfs_testkit::tempdir().expect("out tempdir");
     let out_file = out_dir.path().join("escape-write-out.tsv");
 
     let fixture = locate_artifact("vfs-fixture-escape.exe");
@@ -1063,11 +1063,11 @@ async fn escape_matrix_holds_against_a_second_root() {
     // Root 1's own host directory — the "Documents\My Games\Skyrim" shape —
     // and its own backing content dir, deliberately separate so the negative
     // canary is a real file under root 1 that root 1's provider does not have.
-    let docs_root = tempfile::tempdir().expect("docs root tempdir");
-    let docs_content = tempfile::tempdir().expect("docs content tempdir");
-    let stats_dir = tempfile::tempdir().expect("stats tempdir");
+    let docs_root = vfs_testkit::tempdir().expect("docs root tempdir");
+    let docs_content = vfs_testkit::tempdir().expect("docs content tempdir");
+    let stats_dir = vfs_testkit::tempdir().expect("stats tempdir");
     let stats_log = stats_dir.path().join("shim-stats.log");
-    let out_dir = tempfile::tempdir().expect("out tempdir");
+    let out_dir = vfs_testkit::tempdir().expect("out tempdir");
     let out_file = out_dir.path().join("escape-root1-out.tsv");
 
     let fixture = locate_artifact("vfs-fixture-escape.exe");
@@ -1086,7 +1086,7 @@ async fn escape_matrix_holds_against_a_second_root() {
     // Root 0 still gets a provider: a session whose game directory serves
     // nothing is not the shape being tested, and leaving it unmounted would
     // let a root-0 regression hide here.
-    let game_content = tempfile::tempdir().expect("game content tempdir");
+    let game_content = vfs_testkit::tempdir().expect("game content tempdir");
     client
         .add_source(AddSourceReq {
             session_id: session.id.clone(),
@@ -1147,7 +1147,7 @@ async fn escape_matrix_holds_against_a_second_root() {
     // own directory, which is the part that would break if junction aliases
     // were resolved against root 0's path alone.
     let vector7_link =
-        std::env::temp_dir().join(format!("vfs-escape-junction-root1-{}", std::process::id()));
+        vfs_testkit::scratch_path("vfs-escape-junction-root1");
     let _ = std::fs::remove_dir(&vector7_link);
     let vector7_link_ready = std::process::Command::new("cmd")
         .args([
@@ -1303,10 +1303,10 @@ async fn metadata_queries_are_sealed_for_canonicaliser_only_spellings() {
     // The DiskProvider's backing store — deliberately NOT session.root, same
     // shape as the escape matrix test's own negative canary: a real file
     // under the managed root that this provider genuinely does not have.
-    let content_dir = tempfile::tempdir().expect("tempdir");
-    let stats_dir = tempfile::tempdir().expect("stats tempdir");
+    let content_dir = vfs_testkit::tempdir().expect("tempdir");
+    let stats_dir = vfs_testkit::tempdir().expect("stats tempdir");
     let stats_log = stats_dir.path().join("shim-stats.log");
-    let out_dir = tempfile::tempdir().expect("out tempdir");
+    let out_dir = vfs_testkit::tempdir().expect("out tempdir");
     let out_file = out_dir.path().join("metadata-gap-out.tsv");
 
     let fixture = locate_artifact("vfs-fixture-escape.exe");

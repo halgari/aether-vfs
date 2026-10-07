@@ -5,7 +5,7 @@ use vfs_block_store::{Error, ReadResult};
 
 #[test]
 fn write_then_read_whole_file() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = vfs_testkit::tempdir().unwrap();
     let store = open(dir.path());
     let data = random_bytes(1, 3 * BS + 100);
     store.set_len(b"a", data.len() as u64).unwrap();
@@ -15,7 +15,7 @@ fn write_then_read_whole_file() {
 
 #[test]
 fn sparse_file_reports_missing_ranges() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = vfs_testkit::tempdir().unwrap();
     let store = open(dir.path());
     let len = 4 * BS + 10;
     store.set_len(b"s", len as u64).unwrap();
@@ -40,7 +40,7 @@ fn sparse_file_reports_missing_ranges() {
 
 #[test]
 fn partial_and_clamped_reads() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = vfs_testkit::tempdir().unwrap();
     let store = open(dir.path());
     let data = pattern_bytes(7, 2 * BS + 5);
     store.set_len(b"p", data.len() as u64).unwrap();
@@ -65,7 +65,7 @@ fn partial_and_clamped_reads() {
 
 #[test]
 fn reads_across_manifest_segments() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = vfs_testkit::tempdir().unwrap();
     let store = open(dir.path());
     let data = pattern_bytes(8, 4100 * BS);
     store.set_len(b"big", data.len() as u64).unwrap();
@@ -78,7 +78,7 @@ fn reads_across_manifest_segments() {
 
 #[test]
 fn data_survives_reopen_and_appending_resumes() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = vfs_testkit::tempdir().unwrap();
     let data = pattern_bytes(15, 5 * BS);
     {
         let store = open(dir.path());
@@ -102,7 +102,7 @@ fn data_survives_reopen_and_appending_resumes() {
 
 #[test]
 fn corrupt_block_heals_to_missing() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = vfs_testkit::tempdir().unwrap();
     let data = random_bytes(17, 2 * BS);
     {
         let store = open(dir.path());
@@ -133,7 +133,7 @@ fn corrupt_block_heals_to_missing() {
 
 #[test]
 fn concurrent_readers_and_writers() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = vfs_testkit::tempdir().unwrap();
     let store = open(dir.path());
     std::thread::scope(|s| {
         for t in 0..4u64 {
@@ -153,7 +153,7 @@ fn concurrent_readers_and_writers() {
 
 #[test]
 fn corrupt_shared_block_counts_one_heal() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = vfs_testkit::tempdir().unwrap();
     let b = random_bytes(21, BS);
     let data = [b.clone(), b].concat();
     {

@@ -31,7 +31,7 @@ pub(crate) fn temp_storage() -> (Arc<Storage>, tempfile::TempDir) {
 }
 
 pub(crate) fn temp_storage_with(cfg: StorageConfig) -> (Arc<Storage>, tempfile::TempDir) {
-    let d = tempfile::tempdir().unwrap();
+    let d = vfs_testkit::tempdir().unwrap();
     (Storage::open(d.path(), cfg).unwrap(), d)
 }
 
@@ -330,7 +330,7 @@ fn multi_block_file_with_short_reads_round_trips() {
 
 #[test]
 fn only_stored_blocks_count_against_the_budget() {
-    let d = tempfile::tempdir().unwrap();
+    let d = vfs_testkit::tempdir().unwrap();
     let src = slow(MapSource::with(&[("big.bin", pattern(10 * BS, 5))]));
     {
         let s = Storage::open(d.path(), small_cfg()).unwrap();
@@ -460,7 +460,7 @@ fn store_serves_after_the_ram_tier_is_off() {
 
 #[test]
 fn survives_reopen() {
-    let d = tempfile::tempdir().unwrap();
+    let d = vfs_testkit::tempdir().unwrap();
     let src = slow_fixture();
     {
         let s = Storage::open(d.path(), small_cfg()).unwrap();

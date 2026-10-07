@@ -47,7 +47,7 @@ fn staged_launch_artifacts_resolve_through_the_provider_graph() {
     // just like the zip layer in production. Its bytes are deliberately
     // different from the staged copy below so a later assertion can tell
     // which one actually answered.
-    let content_dir = tempfile::tempdir().unwrap();
+    let content_dir = vfs_testkit::tempdir().unwrap();
     std::fs::write(content_dir.path().join("SkyrimSE.exe"), bare_pe(b"REAL-CONTENT")).unwrap();
 
     let reg = SessionRegistry::new();
@@ -186,7 +186,7 @@ fn staged_launch_artifacts_resolve_through_the_provider_graph() {
 #[cfg(windows)]
 #[test]
 fn production_launch_stages_a_relative_image_before_create_process() {
-    let content_dir = tempfile::tempdir().unwrap();
+    let content_dir = vfs_testkit::tempdir().unwrap();
     let content_exe = content_dir.path().join("game.exe");
     std::fs::write(&content_exe, bare_pe(b"CONTENT")).unwrap();
 
@@ -248,7 +248,7 @@ fn production_launch_stages_a_relative_image_before_create_process() {
 /// real file the session's content never claims to serve.
 #[test]
 fn production_launch_leaves_an_absolute_image_untouched() {
-    let outside = tempfile::tempdir().unwrap();
+    let outside = vfs_testkit::tempdir().unwrap();
     let exe = outside.path().join("already-staged.exe");
     std::fs::write(&exe, bare_pe(b"PRESTAGED")).unwrap();
     assert!(Path::new(&exe).is_absolute());

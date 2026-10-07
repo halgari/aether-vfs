@@ -91,10 +91,10 @@ async fn directory_enumeration_under_a_managed_root_hides_an_unserved_real_file(
     // Same geometry as the read matrix: the provider's backing store is a
     // separate directory, so a file written only onto `session.root` is a
     // real file under the managed root that no provider serves.
-    let content_dir = tempfile::tempdir().expect("tempdir");
-    let stats_dir = tempfile::tempdir().expect("stats tempdir");
+    let content_dir = vfs_testkit::tempdir().expect("tempdir");
+    let stats_dir = vfs_testkit::tempdir().expect("stats tempdir");
     let stats_log = stats_dir.path().join("shim-stats.log");
-    let out_dir = tempfile::tempdir().expect("out tempdir");
+    let out_dir = vfs_testkit::tempdir().expect("out tempdir");
     let out_file = out_dir.path().join("escape-enum-out.tsv");
 
     let fixture = locate_artifact("vfs-fixture-escape.exe");

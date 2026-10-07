@@ -529,7 +529,7 @@ mod tests {
     /// generation an open reports.
     #[test]
     fn open_info_reports_a_mutable_provider_and_the_mount_generation() {
-        let dir = std::env::temp_dir().join(format!("vfs-dirgen-{}", std::process::id()));
+        let dir = vfs_testkit::scratch_path("vfs-dirgen");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("f"), b"disk").unwrap();
@@ -588,7 +588,7 @@ mod tests {
 
     #[test]
     fn write_then_read_through_the_director_round_trips() {
-        let dir = std::env::temp_dir().join(format!("vfs-dirw-{}", std::process::id()));
+        let dir = vfs_testkit::scratch_path("vfs-dirw");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let d = Director::new();
@@ -611,7 +611,7 @@ mod tests {
 
     #[test]
     fn append_handles_land_at_end_of_file() {
-        let dir = std::env::temp_dir().join(format!("vfs-dira-{}", std::process::id()));
+        let dir = vfs_testkit::scratch_path("vfs-dira");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("log.txt"), b"one").unwrap();
@@ -630,7 +630,7 @@ mod tests {
 
     #[test]
     fn set_len_clamps_the_append_cursor_so_a_later_append_lands_at_the_new_end() {
-        let dir = std::env::temp_dir().join(format!("vfs-dirsetlen-{}", std::process::id()));
+        let dir = vfs_testkit::scratch_path("vfs-dirsetlen");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("log.txt"), b"0123456789").unwrap();
@@ -665,7 +665,7 @@ mod tests {
         // through and landing in the layer beneath — falling through risks a
         // write silently landing in an unintended (possibly immutable)
         // layer.
-        let dir = std::env::temp_dir().join(format!("vfs-dirshadow-{}", std::process::id()));
+        let dir = vfs_testkit::scratch_path("vfs-dirshadow");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let graph = vfs_compose::MountGraph::new(vec![
@@ -688,7 +688,7 @@ mod tests {
 
     #[test]
     fn unmount_drops_visibility() {
-        let dir = std::env::temp_dir().join(format!("vfs-unmount-{}", std::process::id()));
+        let dir = vfs_testkit::scratch_path("vfs-unmount");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("x.txt"), b"x").unwrap();

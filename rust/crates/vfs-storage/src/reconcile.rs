@@ -439,7 +439,7 @@ use crate::ids::{cache_file_id, classify_store_id, layer_file_id, new_guid, Stor
 
     #[test]
     fn a_catalog_row_without_store_data_becomes_empty() {
-        let d = tempfile::tempdir().unwrap();
+        let d = vfs_testkit::tempdir().unwrap();
         let s = Storage::open(d.path(), cfg()).unwrap();
         let lid = s.catalog.create_layer("l").unwrap();
         let guid = new_guid();
@@ -475,7 +475,7 @@ use crate::ids::{cache_file_id, classify_store_id, layer_file_id, new_guid, Stor
 
     #[test]
     fn store_orphans_are_deleted() {
-        let d = tempfile::tempdir().unwrap();
+        let d = vfs_testkit::tempdir().unwrap();
         let s = Storage::open(d.path(), cfg()).unwrap();
         // Referenced: a layer file and a cache file.
         let p = s.layer("l").unwrap();
@@ -515,7 +515,7 @@ use crate::ids::{cache_file_id, classify_store_id, layer_file_id, new_guid, Stor
 
     #[test]
     fn cache_rows_without_store_data_are_dropped_from_the_budget() {
-        let d = tempfile::tempdir().unwrap();
+        let d = vfs_testkit::tempdir().unwrap();
         let s = Storage::open(d.path(), cfg()).unwrap();
         let (lost, kept) = ([1u8; 16], [2u8; 16]);
         s.store.set_len(&cache_file_id(&kept), 300).unwrap();
@@ -557,7 +557,7 @@ use crate::ids::{cache_file_id, classify_store_id, layer_file_id, new_guid, Stor
     /// landed) is dropped with its store file.
     #[test]
     fn zero_byte_cache_rows_are_dropped_with_their_files() {
-        let d = tempfile::tempdir().unwrap();
+        let d = vfs_testkit::tempdir().unwrap();
         let s = Storage::open(d.path(), cfg()).unwrap();
         let h = [5u8; 16];
         s.catalog
@@ -581,7 +581,7 @@ use crate::ids::{cache_file_id, classify_store_id, layer_file_id, new_guid, Stor
 
     #[test]
     fn closed_file_survives_reopen_without_close() {
-        let d = tempfile::tempdir().unwrap();
+        let d = vfs_testkit::tempdir().unwrap();
         let s = Storage::open(d.path(), cfg_every_close()).unwrap();
         let p = s.layer("saves").unwrap();
         let body: Vec<u8> = (0..(5 * BS + 17)).map(|i| (i % 251) as u8).collect();
@@ -590,7 +590,7 @@ use crate::ids::{cache_file_id, classify_store_id, layer_file_id, new_guid, Stor
         // Killed between the close and any later flush point.
         #[cfg(not(windows))]
         {
-            let killed = tempfile::tempdir().unwrap();
+            let killed = vfs_testkit::tempdir().unwrap();
             crate::test_util::snapshot_as_killed(d.path(), killed.path()).unwrap();
             let k = Storage::open(killed.path(), cfg()).unwrap();
             assert_eq!(*k.last_reconcile(), Default::default());
@@ -614,7 +614,7 @@ use crate::ids::{cache_file_id, classify_store_id, layer_file_id, new_guid, Stor
     #[cfg(not(windows))]
     #[test]
     fn a_kill_mid_write_reopens_consistent() {
-        let d = tempfile::tempdir().unwrap();
+        let d = vfs_testkit::tempdir().unwrap();
         let s = Storage::open(d.path(), cfg()).unwrap();
         let p = s.layer("l").unwrap();
         write_file(&p, "done.bin", b"done");
@@ -625,7 +625,7 @@ use crate::ids::{cache_file_id, classify_store_id, layer_file_id, new_guid, Stor
         p.write_at(h, 0, &vec![7u8; 9 * BS as usize]).unwrap();
         s.store.flush().unwrap(); // the store half reached disk, the catalog did not
 
-        let killed = tempfile::tempdir().unwrap();
+        let killed = vfs_testkit::tempdir().unwrap();
         crate::test_util::snapshot_as_killed(d.path(), killed.path()).unwrap();
         let k = Storage::open(killed.path(), cfg()).unwrap();
         assert_consistent(&k);
@@ -663,7 +663,7 @@ use crate::ids::{cache_file_id, classify_store_id, layer_file_id, new_guid, Stor
     /// window `FileCell::commit` documents).
     #[test]
     fn missing_blocks_from_the_durable_length_on_are_zero_filled() {
-        let d = tempfile::tempdir().unwrap();
+        let d = vfs_testkit::tempdir().unwrap();
         let s = Storage::open(d.path(), cfg()).unwrap();
         let p = s.layer("l").unwrap();
         let body = vec![0x5Au8; 2 * BS as usize + 50];
@@ -702,7 +702,7 @@ use crate::ids::{cache_file_id, classify_store_id, layer_file_id, new_guid, Stor
     /// reports it again rather than filling it.
     #[test]
     fn missing_blocks_below_the_durable_length_are_corruption() {
-        let d = tempfile::tempdir().unwrap();
+        let d = vfs_testkit::tempdir().unwrap();
         let s = Storage::open(d.path(), cfg()).unwrap();
         let p = s.layer("l").unwrap();
         let len = 5 * BS + 100;
@@ -758,7 +758,7 @@ use crate::ids::{cache_file_id, classify_store_id, layer_file_id, new_guid, Stor
     /// boundary below the hole and fill it with zeros.
     #[test]
     fn a_lost_tail_below_a_longer_row_stays_reported() {
-        let d = tempfile::tempdir().unwrap();
+        let d = vfs_testkit::tempdir().unwrap();
         let s = Storage::open(d.path(), cfg()).unwrap();
         let p = s.layer("l").unwrap();
         let len = 5 * BS + 100;
@@ -791,7 +791,7 @@ use crate::ids::{cache_file_id, classify_store_id, layer_file_id, new_guid, Stor
     /// deletes nothing. Restoring the catalog brings everything back.
     #[test]
     fn a_missing_catalog_with_layer_data_refuses_to_open() {
-        let d = tempfile::tempdir().unwrap();
+        let d = vfs_testkit::tempdir().unwrap();
         let s = Storage::open(d.path(), cfg()).unwrap();
         let p = s.layer("saves").unwrap();
         write_file(&p, "a.ess", b"precious");
@@ -823,7 +823,7 @@ use crate::ids::{cache_file_id, classify_store_id, layer_file_id, new_guid, Stor
     /// like any other and are deleted.
     #[test]
     fn a_missing_catalog_with_only_cache_data_opens() {
-        let d = tempfile::tempdir().unwrap();
+        let d = vfs_testkit::tempdir().unwrap();
         let s = Storage::open(d.path(), cfg()).unwrap();
         s.store.set_len(&cache_file_id(&[4u8; 16]), 10).unwrap();
         s.close().unwrap();
@@ -839,10 +839,10 @@ use crate::ids::{cache_file_id, classify_store_id, layer_file_id, new_guid, Stor
     #[cfg(not(windows))]
     #[test]
     fn a_new_layer_is_durable_before_its_data() {
-        let d = tempfile::tempdir().unwrap();
+        let d = vfs_testkit::tempdir().unwrap();
         let s = Storage::open(d.path(), cfg()).unwrap();
         let p = s.layer("fresh").unwrap();
-        let killed = tempfile::tempdir().unwrap();
+        let killed = vfs_testkit::tempdir().unwrap();
         crate::test_util::snapshot_as_killed(d.path(), killed.path()).unwrap();
         let k = Storage::open(killed.path(), cfg()).unwrap();
         assert!(k.catalog.layer_id("fresh").unwrap().is_some());
@@ -854,7 +854,7 @@ use crate::ids::{cache_file_id, classify_store_id, layer_file_id, new_guid, Stor
     /// and the next open repairs it.
     #[test]
     fn a_failed_repair_does_not_stop_the_store_opening() {
-        let d = tempfile::tempdir().unwrap();
+        let d = vfs_testkit::tempdir().unwrap();
         let s = Storage::open(d.path(), cfg()).unwrap();
         let p = s.layer("l").unwrap();
         write_file(&p, "grown.bin", &vec![1u8; 2 * BS as usize]);
@@ -923,7 +923,7 @@ use crate::ids::{cache_file_id, classify_store_id, layer_file_id, new_guid, Stor
     /// durable, the row update not) takes the store's length.
     #[test]
     fn a_row_length_is_set_to_the_stores() {
-        let d = tempfile::tempdir().unwrap();
+        let d = vfs_testkit::tempdir().unwrap();
         let s = Storage::open(d.path(), cfg()).unwrap();
         let p = s.layer("l").unwrap();
         let body: Vec<u8> = (0..(2 * BS + 9)).map(|i| (i % 7) as u8).collect();
@@ -956,7 +956,7 @@ use crate::ids::{cache_file_id, classify_store_id, layer_file_id, new_guid, Stor
     /// durability gate, as under `OnEveryClose`.
     #[test]
     fn a_deferred_durable_point_waits_for_in_flight_commits() {
-        let d = tempfile::tempdir().unwrap();
+        let d = vfs_testkit::tempdir().unwrap();
         let s = Storage::open(d.path(), cfg()).unwrap();
         let p = s.layer("l").unwrap();
         write_file(&p, "f", b"old");
@@ -992,7 +992,7 @@ use crate::ids::{cache_file_id, classify_store_id, layer_file_id, new_guid, Stor
     /// no row can land between its store flush and its catalog commit.
     #[test]
     fn a_durable_point_waits_for_in_flight_commits() {
-        let d = tempfile::tempdir().unwrap();
+        let d = vfs_testkit::tempdir().unwrap();
         let s = Storage::open(d.path(), cfg_every_close()).unwrap();
         let p = s.layer("l").unwrap();
         let (h, _, _) = p.open(at("f"), OPEN_WRITE | OPEN_CREATE).unwrap();

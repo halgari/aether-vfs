@@ -284,7 +284,7 @@ mod tests {
 
     #[test]
     fn failed_retired_row_removal_keeps_the_rest_of_the_queue() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = vfs_testkit::tempdir().unwrap();
         let store = BlockStore::open(dir.path(), test_config()).unwrap();
         let ids = [100u32, 101, 102];
         store

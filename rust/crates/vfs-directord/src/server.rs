@@ -153,7 +153,7 @@ mod tests {
     /// discovery file naming this process is removed.
     #[tokio::test(flavor = "multi_thread")]
     async fn shutdown_drains_the_registry_and_removes_the_discovery_file() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = vfs_testkit::tempdir().unwrap();
         let discovery = dir.path().join("discovery.json");
         let registry = SessionRegistry::new();
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
@@ -195,7 +195,7 @@ mod tests {
     /// its layer providers) are gone, so the directory is free again.
     #[tokio::test(flavor = "multi_thread")]
     async fn shutdown_closes_the_storage_after_the_drain() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = vfs_testkit::tempdir().unwrap();
         let store_dir = dir.path().join("storage");
         let discovery = dir.path().join("discovery.json");
         let registry = SessionRegistry::with_storage(

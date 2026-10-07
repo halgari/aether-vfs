@@ -177,7 +177,7 @@ mod tests {
 
     fn temp_path(tag: &str) -> std::path::PathBuf {
         let pid = std::process::id();
-        std::env::temp_dir().join(format!("vfs-unix-filemap-{pid}-{tag}.bin"))
+        vfs_testkit::scratch_root().join(format!("vfs-unix-filemap-{pid}-{tag}.bin"))
     }
 
     #[test]

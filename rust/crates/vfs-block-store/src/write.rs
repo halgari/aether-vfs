@@ -373,7 +373,7 @@ mod tests {
 
     #[test]
     fn retries_when_a_dedup_hit_is_freed_before_the_commit() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = vfs_testkit::tempdir().unwrap();
         let store = BlockStore::open(dir.path(), test_config()).unwrap();
         let d = random_bytes(1, 2 * BS);
         put(&store, b"x", &d).unwrap();
@@ -399,7 +399,7 @@ mod tests {
 
     #[test]
     fn retries_when_a_new_record_pack_is_retired_before_the_commit() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = vfs_testkit::tempdir().unwrap();
         let store = BlockStore::open(dir.path(), test_config()).unwrap();
         let n = random_bytes(2, BS);
         let z = random_bytes(3, 20 * BS);
@@ -430,7 +430,7 @@ mod tests {
 
     #[test]
     fn put_files_creates_and_replaces_files_in_one_commit() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = vfs_testkit::tempdir().unwrap();
         let store = BlockStore::open(dir.path(), test_config()).unwrap();
         let bs = store.cfg.block_size as usize;
         let a = random_bytes(1, 3 * bs + 17);
@@ -473,7 +473,7 @@ mod tests {
     /// that is still referenced.
     #[test]
     fn put_files_keeps_a_block_another_file_of_the_batch_drops() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = vfs_testkit::tempdir().unwrap();
         let store = BlockStore::open(dir.path(), test_config()).unwrap();
         let bs = store.cfg.block_size as usize;
         let shared = random_bytes(1, bs);
@@ -503,7 +503,7 @@ mod tests {
 
     #[test]
     fn pack_accepts_records_only_for_live_packs() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = vfs_testkit::tempdir().unwrap();
         let index = Index::open(&dir.path().join("i.redb"), 1 << 20).unwrap();
         index
             .update(false, |t| {

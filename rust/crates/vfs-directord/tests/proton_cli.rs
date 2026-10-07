@@ -222,7 +222,7 @@ fn up_then_exec(save_layer: SaveLayer) {
     let vfs_home =
         PathBuf::from(std::env::var("VFS_HOME").expect("set VFS_HOME to the GE-Proton home"));
 
-    let t = tempfile::tempdir().unwrap();
+    let t = vfs_testkit::tempdir().unwrap();
     let t = t.path();
     let bin_dir = Path::new(vfs).parent().unwrap();
     let fixture_src = bin_dir.join("vfs-fixture-read.exe");

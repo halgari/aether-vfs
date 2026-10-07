@@ -28,7 +28,7 @@ async fn apply_session_config_health_and_list() {
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let mut client = connect(&format!("{addr}")).await.unwrap();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = vfs_testkit::tempdir().unwrap();
     std::fs::write(dir.path().join("a.txt"), b"x").unwrap();
 
     let cfg = SessionConfig {
@@ -141,7 +141,7 @@ async fn a_failed_apply_leaves_no_session_and_a_live_name_is_not_reused() {
     tokio::time::sleep(Duration::from_millis(20)).await;
     let mut client = connect(&format!("{addr}")).await.unwrap();
 
-    let content = tempfile::tempdir().unwrap();
+    let content = vfs_testkit::tempdir().unwrap();
     let good = SessionConfig {
         session: vfs_control::SessionMeta { name: Some("half".into()) },
         roots: vec![vfs_control::RootEntry {
@@ -250,8 +250,8 @@ async fn a_configs_declared_root_paths_reach_the_live_session() {
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let mut client = connect(&format!("{addr}")).await.unwrap();
-    let game = tempfile::tempdir().unwrap();
-    let docs = tempfile::tempdir().unwrap();
+    let game = vfs_testkit::tempdir().unwrap();
+    let docs = vfs_testkit::tempdir().unwrap();
     std::fs::write(game.path().join("a.txt"), b"g").unwrap();
     std::fs::write(docs.path().join("a.txt"), b"d").unwrap();
     // Each root's location: where the program sees it. On Windows that is a

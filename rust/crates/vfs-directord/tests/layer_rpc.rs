@@ -52,7 +52,7 @@ async fn layer_names(
 
 #[tokio::test(flavor = "multi_thread")]
 async fn layer_rpcs_round_trip_through_a_session() {
-    let store_dir = tempfile::tempdir().unwrap();
+    let store_dir = vfs_testkit::tempdir().unwrap();
     let storage = Storage::open(store_dir.path(), StorageConfig::default()).unwrap();
     let registry = SessionRegistry::with_storage(Arc::clone(&storage));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -75,7 +75,7 @@ async fn layer_rpcs_round_trip_through_a_session() {
         .await
         .unwrap()
         .into_inner();
-    let content = tempfile::tempdir().unwrap();
+    let content = vfs_testkit::tempdir().unwrap();
     std::fs::write(content.path().join("base.txt"), b"base").unwrap();
     client
         .add_source(AddSourceReq {
@@ -119,7 +119,7 @@ async fn layer_rpcs_round_trip_through_a_session() {
         .unwrap();
 
     // Export while the session is live: the written file is there.
-    let out = tempfile::tempdir().unwrap();
+    let out = vfs_testkit::tempdir().unwrap();
     let export_dir = out.path().join("export");
     let n = client
         .export_layer(LayerPathReq {

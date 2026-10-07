@@ -509,7 +509,7 @@ mod tests {
     /// Whether the file is there after a reopen.
     fn survives(end: impl FnOnce(Arc<Storage>, Arc<dyn vfs_provider::Provider>)) -> bool {
         use vfs_provider::{VPath, OPEN_CREATE, OPEN_WRITE};
-        let dir = tempfile::tempdir().unwrap();
+        let dir = vfs_testkit::tempdir().unwrap();
         let s = Storage::open(dir.path(), StorageConfig::default()).unwrap();
         let p = s.layer("l").unwrap();
         let (h, _, _) = p
@@ -550,7 +550,7 @@ mod tests {
 
     #[test]
     fn storage_opens_twice_in_sequence_but_not_concurrently() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = vfs_testkit::tempdir().unwrap();
         let s = Storage::open(dir.path(), StorageConfig::default()).unwrap();
         let e = Storage::open(dir.path(), StorageConfig::default())
             .err()
@@ -563,7 +563,7 @@ mod tests {
 
     #[test]
     fn catalog_rows_survive_close_and_reopen() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = vfs_testkit::tempdir().unwrap();
         let s = Storage::open(dir.path(), StorageConfig::default()).unwrap();
         let id = s.catalog.create_layer("prof").unwrap();
         assert_eq!(s.block_size(), 64 * 1024);
@@ -575,7 +575,7 @@ mod tests {
 
     #[test]
     fn close_with_another_reference_flushes_and_keeps_the_lock() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = vfs_testkit::tempdir().unwrap();
         let s = Storage::open(dir.path(), StorageConfig::default()).unwrap();
         let other = Arc::clone(&s);
         assert_eq!(s.close().unwrap(), CloseOutcome::StillShared { refs: 2 });
@@ -616,7 +616,7 @@ mod tests {
 
     #[test]
     fn a_clean_close_skips_reconciliation_at_the_next_open() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = vfs_testkit::tempdir().unwrap();
         let first = Storage::open(dir.path(), StorageConfig::default()).unwrap();
         assert!(
             !first.last_reconcile().skipped_after_clean_close,
@@ -654,7 +654,7 @@ mod tests {
     /// removed the mark durably before anything else.
     #[test]
     fn a_crash_reconciles_even_after_a_clean_open() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = vfs_testkit::tempdir().unwrap();
         closed_store_with_a_file(dir.path());
         let s = Storage::open(dir.path(), StorageConfig::default()).unwrap();
         assert!(s.last_reconcile().skipped_after_clean_close);
@@ -673,7 +673,7 @@ mod tests {
                 .unwrap();
             p.write_at(h, 0, &[7u8; 100_000]).unwrap();
             s.store.flush().unwrap();
-            let killed = tempfile::tempdir().unwrap();
+            let killed = vfs_testkit::tempdir().unwrap();
             crate::test_util::snapshot_as_killed(dir.path(), killed.path()).unwrap();
             p.close(h).unwrap();
             drop(p);
@@ -699,7 +699,7 @@ mod tests {
     /// reconciles, and its clean close then lets the next open skip.
     #[test]
     fn a_store_without_the_mark_reconciles() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = vfs_testkit::tempdir().unwrap();
         closed_store_with_a_file(dir.path());
         {
             let c = Catalog::open(&dir.path().join("catalog.redb")).unwrap();
@@ -719,7 +719,7 @@ mod tests {
     /// reconciles.
     #[test]
     fn a_mark_that_does_not_match_the_store_reconciles() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = vfs_testkit::tempdir().unwrap();
         closed_store_with_a_file(dir.path());
         let cat = dir.path().join("catalog.redb");
         let old_catalog = dir.path().join("catalog.old");
@@ -748,7 +748,7 @@ mod tests {
     /// A catalog mark with a token other than the store's reconciles.
     #[test]
     fn a_mismatched_token_reconciles() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = vfs_testkit::tempdir().unwrap();
         closed_store_with_a_file(dir.path());
         {
             let c = Catalog::open(&dir.path().join("catalog.redb")).unwrap();
@@ -769,7 +769,7 @@ mod tests {
     #[test]
     fn a_session_by_an_older_build_reconciles() {
         for via_drop in [false, true] {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = vfs_testkit::tempdir().unwrap();
             closed_store_with_a_file(dir.path());
             let orphan = crate::ids::layer_file_id(&crate::ids::new_guid());
             {
@@ -806,7 +806,7 @@ mod tests {
     #[test]
     fn a_panic_under_the_gate_leaves_no_mark() {
         for exclusive in [false, true] {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = vfs_testkit::tempdir().unwrap();
             closed_store_with_a_file(dir.path());
             let s = Storage::open(dir.path(), StorageConfig::default()).unwrap();
             let orphan = plant_orphan(&s); // what the half-done pair left
@@ -837,7 +837,7 @@ mod tests {
     #[test]
     fn a_failed_delete_leaves_no_mark() {
         for whole_layer in [false, true] {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = vfs_testkit::tempdir().unwrap();
             closed_store_with_a_file(dir.path());
             let s = Storage::open(dir.path(), StorageConfig::default()).unwrap();
             s.put_files("gone", &[("x.bin", b"doomed")]).unwrap();
@@ -874,10 +874,10 @@ mod tests {
     #[cfg(not(windows))]
     #[test]
     fn a_kill_between_the_store_shutdown_and_the_mark_reconciles() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = vfs_testkit::tempdir().unwrap();
         closed_store_with_a_file(dir.path());
         let s = Storage::open(dir.path(), StorageConfig::default()).unwrap();
-        let killed = tempfile::tempdir().unwrap();
+        let killed = vfs_testkit::tempdir().unwrap();
         let (from, to) = (dir.path().to_owned(), killed.path().to_owned());
         *lock(&s.before_mark_hook) = Some(Box::new(move |_: &Storage| {
             crate::test_util::snapshot_as_killed(&from, &to).unwrap();
@@ -896,7 +896,7 @@ mod tests {
     /// with the catalog's mark back in place.
     #[test]
     fn an_open_that_fails_midway_makes_the_next_reconcile() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = vfs_testkit::tempdir().unwrap();
         closed_store_with_a_file(dir.path());
         let cat = dir.path().join("catalog.redb");
         let aside = dir.path().join("catalog.aside");
@@ -913,7 +913,7 @@ mod tests {
     /// even right after a clean close.
     #[test]
     fn a_missing_catalog_after_a_clean_close_still_refuses() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = vfs_testkit::tempdir().unwrap();
         closed_store_with_a_file(dir.path());
         std::fs::remove_file(dir.path().join("catalog.redb")).unwrap();
         let e = Storage::open(dir.path(), StorageConfig::default())

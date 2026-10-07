@@ -20,3 +20,6 @@ vfs-ipc = { path = "../vfs-ipc" }
 # crate's graph and off the Windows build entirely.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[dev-dependencies]
+vfs-testkit = { path = "../vfs-testkit" }

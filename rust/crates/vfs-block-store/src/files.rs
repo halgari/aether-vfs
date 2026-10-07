@@ -179,7 +179,7 @@ mod tests {
     const SEG_BYTES: u64 = BLOCKS_PER_SEGMENT * BS as u64;
 
     fn open() -> (tempfile::TempDir, Index) {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = vfs_testkit::tempdir().unwrap();
         let index = Index::open(&dir.path().join("i.redb"), 1 << 20).unwrap();
         (dir, index)
     }

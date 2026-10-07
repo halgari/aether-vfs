@@ -70,6 +70,7 @@ vfs-proton = { path = "../vfs-proton", default-features = false }
 vfs-ipc = { path = "../vfs-ipc" }
 
 [dev-dependencies]
+vfs-testkit = { path = "../vfs-testkit" }
 # `vfs-zip` is optional above (the `zip` feature); tests use `ZipProvider`
 # whether or not that feature is on, so it is unconditional here. `vfs-shim`
 # is NOT repeated — it is a `cfg(windows)` dependency above, and the one test

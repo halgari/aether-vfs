@@ -17,7 +17,7 @@ fn live_bytes(store: &BlockStore) -> u64 {
 
 #[test]
 fn write_errors() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = vfs_testkit::tempdir().unwrap();
     let store = open(dir.path());
     assert!(matches!(
         store.write_blocks(b"nope", 0, &[0u8; BS]),
@@ -41,7 +41,7 @@ fn write_errors() {
 
 #[test]
 fn sparse_writes_show_in_cached_ranges() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = vfs_testkit::tempdir().unwrap();
     let store = open(dir.path());
     let len = 4 * BS as u64 + 10;
     store.set_len(b"s", len).unwrap();
@@ -58,7 +58,7 @@ fn sparse_writes_show_in_cached_ranges() {
 
 #[test]
 fn dedup_within_and_across_files() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = vfs_testkit::tempdir().unwrap();
     let store = open(dir.path());
     let block = random_bytes(9, BS);
     let data = [block.clone(), block.clone(), block].concat();
@@ -71,7 +71,7 @@ fn dedup_within_and_across_files() {
 
 #[test]
 fn compressible_blocks_are_stored_compressed() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = vfs_testkit::tempdir().unwrap();
     let store = open(dir.path());
     store.set_len(b"c", 4 * BS as u64).unwrap();
     store
@@ -86,7 +86,7 @@ fn compressible_blocks_are_stored_compressed() {
 
 #[test]
 fn overwrite_frees_the_old_block() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = vfs_testkit::tempdir().unwrap();
     let store = open(dir.path());
     store.set_len(b"f", BS as u64).unwrap();
     store.write_blocks(b"f", 0, &random_bytes(10, BS)).unwrap();
@@ -99,7 +99,7 @@ fn overwrite_frees_the_old_block() {
 
 #[test]
 fn delete_and_shrink_free_unshared_blocks_only() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = vfs_testkit::tempdir().unwrap();
     let store = open(dir.path());
     let shared = random_bytes(12, BS);
     store.set_len(b"a", 3 * BS as u64).unwrap();
@@ -122,7 +122,7 @@ fn delete_and_shrink_free_unshared_blocks_only() {
 
 #[test]
 fn large_write_spans_transactions_segments_and_packs() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = vfs_testkit::tempdir().unwrap();
     let store = open(dir.path());
     // 4100 blocks: crosses a manifest segment (4096 blocks) and many 64 KiB packs.
     let len = 4100 * BS as u64;
@@ -143,7 +143,7 @@ fn large_write_spans_transactions_segments_and_packs() {
 
 #[test]
 fn concurrent_writers() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = vfs_testkit::tempdir().unwrap();
     let store = open(dir.path());
     std::thread::scope(|s| {
         for t in 0..4u64 {

@@ -668,7 +668,7 @@ mod tests {
 
     #[test]
     fn layers_are_named_unique_and_persistent() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = vfs_testkit::tempdir().unwrap();
         let id = {
             let c = Catalog::open(&dir.path().join("c.redb")).unwrap();
             let id = c.create_layer("prof").unwrap();
@@ -689,7 +689,7 @@ mod tests {
 
     #[test]
     fn children_are_direct_only_and_case_preserving() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = vfs_testkit::tempdir().unwrap();
         let c = Catalog::open(&dir.path().join("c.redb")).unwrap();
         let l = c.create_layer("p").unwrap();
         let file = |name: &str| EntryRec {
@@ -724,7 +724,7 @@ mod tests {
 
     #[test]
     fn rename_moves_a_subtree() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = vfs_testkit::tempdir().unwrap();
         let c = Catalog::open(&dir.path().join("c.redb")).unwrap();
         let l = c.create_layer("p").unwrap();
         let dirr = |name: &str| EntryRec {
@@ -777,7 +777,7 @@ mod tests {
     /// stop early on it nor count it.
     #[test]
     fn children_ignore_a_sibling_sharing_the_prefix() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = vfs_testkit::tempdir().unwrap();
         let c = open(&dir);
         let l = c.create_layer("p").unwrap();
         c.put(l, "saves", &dirr("saves")).unwrap();
@@ -797,7 +797,7 @@ mod tests {
 
     #[test]
     fn lookups_fold_their_argument_and_layers_are_separate() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = vfs_testkit::tempdir().unwrap();
         let c = open(&dir);
         let a = c.create_layer("a").unwrap();
         let b = c.create_layer("b").unwrap();
@@ -820,7 +820,7 @@ mod tests {
     /// re-created.
     #[test]
     fn remove_refuses_a_directory_with_children() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = vfs_testkit::tempdir().unwrap();
         let c = open(&dir);
         let l = c.create_layer("p").unwrap();
         c.put(l, "d", &dirr("d")).unwrap();
@@ -844,7 +844,7 @@ mod tests {
     /// only its direct children (the scan skips each child's subtree).
     #[test]
     fn children_skip_deep_subtrees() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = vfs_testkit::tempdir().unwrap();
         let c = open(&dir);
         let l = c.create_layer("p").unwrap();
         c.put(l, "root", &dirr("root")).unwrap();
@@ -885,7 +885,7 @@ mod tests {
 
     #[test]
     fn entry_records_round_trip() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = vfs_testkit::tempdir().unwrap();
         let c = open(&dir);
         let l = c.create_layer("p").unwrap();
         let rec = EntryRec {
@@ -904,7 +904,7 @@ mod tests {
 
     #[test]
     fn drop_layer_returns_file_guids_and_removes_only_that_layer() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = vfs_testkit::tempdir().unwrap();
         let c = open(&dir);
         let a = c.create_layer("a").unwrap();
         let b = c.create_layer("b").unwrap();
@@ -929,7 +929,7 @@ mod tests {
 
     #[test]
     fn rename_moves_a_subtree_onto_an_empty_directory() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = vfs_testkit::tempdir().unwrap();
         let c = open(&dir);
         let l = c.create_layer("p").unwrap();
         c.put(l, "a", &dirr("a")).unwrap();
@@ -956,7 +956,7 @@ mod tests {
     /// caller can delete its store data without a racy get-then-rename.
     #[test]
     fn rename_over_a_file_returns_its_guid() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = vfs_testkit::tempdir().unwrap();
         let c = open(&dir);
         let l = c.create_layer("p").unwrap();
         c.put(l, "new.ess", &file("new.ess", 1)).unwrap();
@@ -972,7 +972,7 @@ mod tests {
 
     #[test]
     fn rename_refuses_a_destination_directory_with_children() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = vfs_testkit::tempdir().unwrap();
         let c = open(&dir);
         let l = c.create_layer("p").unwrap();
         c.put(l, "a", &dirr("a")).unwrap();
@@ -999,7 +999,7 @@ mod tests {
 
     #[test]
     fn a_case_only_rename_keeps_the_subtree() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = vfs_testkit::tempdir().unwrap();
         let c = open(&dir);
         let l = c.create_layer("p").unwrap();
         c.put(l, "a", &dirr("a")).unwrap();
@@ -1011,7 +1011,7 @@ mod tests {
 
     #[test]
     fn rename_refuses_a_missing_source_and_its_own_subtree() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = vfs_testkit::tempdir().unwrap();
         let c = open(&dir);
         let l = c.create_layer("p").unwrap();
         c.put(l, "a", &dirr("a")).unwrap();
@@ -1033,7 +1033,7 @@ mod tests {
 
     #[test]
     fn cache_rows_round_trip_and_persist() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = vfs_testkit::tempdir().unwrap();
         let c = open(&dir);
         let r = |m, b| CacheRec {
             last_access_min: m,

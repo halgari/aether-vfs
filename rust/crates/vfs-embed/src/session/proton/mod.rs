@@ -1138,7 +1138,7 @@ mod tests {
     fn check_root_location_applies_the_link_rule() {
         Session::check_root_location(r"C:\Games\Fixture").unwrap();
         Session::check_root_location("c:/users/steamuser/Saves").unwrap();
-        for bad in [r"D:\Games", "/tmp/host-dir", r"C:\", r"C:\a\..\b", "Games"] {
+        for bad in [r"D:\Games", "/srv/host-dir", r"C:\", r"C:\a\..\b", "Games"] {
             let e = Session::check_root_location(bad).unwrap_err();
             assert!(
                 e.contains("bad root location") && e.contains(bad),
