@@ -188,6 +188,67 @@ unsafe fn setinfo_source_path(handle: HANDLE) -> Option<(String, bool)> {
 /// `FileCompletionInformation` — binds a handle to an I/O completion port.
 const FILE_COMPLETION_INFORMATION: u32 = 30;
 
+/// A delete or rename through `handle`, whose path is `nt`, answered by the director: `OP_DELETE`,
+/// or `OP_RENAME` when the target lands under the same root. `None` when `nt` is under no root, so
+/// the caller decides; otherwise the caller's answer, success or `STATUS_UNSUCCESSFUL`.
+///
+/// One function for both kinds of handle, so a synthetic handle and a real one under a root get
+/// the same answer. A rename whose target is outside the root, or under a *different* root, is
+/// refused rather than guessed at: the wire carries one root for both sides and the provider
+/// contract has no cross-root move. Refused means `STATUS_UNSUCCESSFUL`, never the trampoline.
+///
+/// # Safety
+/// `info`/`length`/`iosb` are the caller's `NtSetInformationFile` arguments.
+unsafe fn director_delete_or_rename(
+    handle: HANDLE,
+    nt: &str,
+    is_delete: bool,
+    iosb: *mut c_void,
+    info: *mut c_void,
+    length: u32,
+) -> Option<NTSTATUS> {
+    let c = crate::director::global()?;
+    let (root, src) = c.route(nt)?;
+    c.names_changed(root, &src);
+    crate::read_cache::invalidate_path(root.0, &src);
+    let ok = if is_delete {
+        c.delete(root, &src).is_ok()
+    } else {
+        // The destination is a name being created, so it goes as the caller spelled it — which
+        // is also how a rename that changes only the letter case says what the new case is. See
+        // `FuseClient::vpath_as_spelled`.
+        // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+        let target = unsafe { parse_rename_target(info, length) };
+        match target.as_deref().and_then(|t| c.route_as_spelled(t)) {
+            Some((dst_root, dst)) if dst_root == root => {
+                c.names_changed(root, &vfs_core::fold(&dst));
+                crate::read_cache::invalidate_path(root.0, &vfs_core::fold(&dst));
+                let renamed = c.rename(root, &src, &dst).is_ok();
+                if renamed {
+                    // The handle follows the file: what it is finally named, and its id, are the
+                    // new path's from here on. (`set_abs_path` is a no-op on a real handle.)
+                    if let Some(t) = target {
+                        let nt = to_nt_path(&t);
+                        if let Ok(mut table) = HANDLES.lock() {
+                            table.set_under_root(handle as isize, nt.clone());
+                        }
+                        crate::synth_file::set_abs_path(handle as isize, nt);
+                    }
+                }
+                renamed
+            }
+            _ => false,
+        }
+    };
+    if ok {
+        // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+        unsafe { crate::ntbuf::iosb_set(iosb, STATUS_SUCCESS, 0) };
+        Some(STATUS_SUCCESS)
+    } else {
+        Some(STATUS_UNSUCCESSFUL)
+    }
+}
+
 /// `NtSetInformationFile` hook. For director FUSE (pure-ring) virtual handles it
 /// routes truncate (`FileEndOfFileInformation`), delete, and rename to the director
 /// overlay over the ring. For legacy local-overlay handles it converts a delete
@@ -262,58 +323,18 @@ pub(super) unsafe fn setinfo_hook_body(
         let is_delete = unsafe { is_delete_request(info, length, class) };
         let is_rename = matches!(class, FILE_RENAME_INFORMATION | FILE_RENAME_INFORMATION_EX);
         if is_delete || is_rename {
-            let nt = under_root_path(handle as isize);
-            if let (Some(nt), Some(c)) = (nt, crate::director::global()) {
-                if let Some((root, src)) = c.route(&nt) {
-                    c.names_changed(root, &src);
-                    crate::read_cache::invalidate_path(root.0, &src);
-                    let ok = if is_delete {
-                        c.delete(root, &src).is_ok()
-                    } else {
-                        // The destination is a name being created, so it goes
-                        // as the caller spelled it — which is also how a
-                        // rename that changes only the letter case says what
-                        // the new case is. See `FuseClient::vpath_as_spelled`.
-                        // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
-                        let target = unsafe { parse_rename_target(info, length) };
-                        match target.as_deref().and_then(|t| c.route_as_spelled(t)) {
-                            // A rename whose target lands under a *different* root is refused rather than
-                            // guessed at: the wire carries one root for both sides and the provider contract
-                            // has no cross-root move. It does not fall through: `ok = false`, then
-                            // `STATUS_UNSUCCESSFUL` below, and the engine branch fails closed the same way.
-                            Some((dst_root, dst)) if dst_root == root => {
-                                c.names_changed(root, &vfs_core::fold(&dst));
-                                crate::read_cache::invalidate_path(root.0, &vfs_core::fold(&dst));
-                                let renamed = c.rename(root, &src, &dst).is_ok();
-                                if renamed {
-                                    // The handle follows the file: what it is
-                                    // finally named, and its id, are the new
-                                    // path's from here on.
-                                    if let Some(t) = target {
-                                        let nt = to_nt_path(&t);
-                                        if let Ok(mut table) = HANDLES.lock() {
-                                            table.set_under_root(handle as isize, nt.clone());
-                                        }
-                                        crate::synth_file::set_abs_path(handle as isize, nt);
-                                    }
-                                }
-                                renamed
-                            }
-                            _ => false,
-                        }
-                    };
-                    if ok {
-                        // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
-                        unsafe { crate::ntbuf::iosb_set(iosb, STATUS_SUCCESS, 0) };
-                        return STATUS_SUCCESS;
-                    }
-                    return STATUS_UNSUCCESSFUL;
+            if let Some(nt) = under_root_path(handle as isize) {
+                // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+                if let Some(st) =
+                    unsafe { director_delete_or_rename(handle, &nt, is_delete, iosb, info, length) }
+                {
+                    return st;
                 }
-                // is_delete/is_rename matched the class but the handle's path
-                // or vpath could not be resolved — falls through to the soft
-                // no-op below rather than a hard failure. Still worth logging:
-                // it means a delete/rename was silently swallowed.
             }
+            // is_delete/is_rename matched the class but the handle's path
+            // or vpath could not be resolved — falls through to the soft
+            // no-op below rather than a hard failure. Still worth logging:
+            // it means a delete/rename was silently swallowed.
         }
         // Everything else lands here: a class we deliberately never act on
         // (or a delete/rename we recognized but could not route). Silent
@@ -343,6 +364,16 @@ pub(super) unsafe fn setinfo_hook_body(
             .is_some_and(|(_, os_consulted)| *os_consulted)
             .then(vfs_redirect::UncachedScope::enter);
         let nt = source.map(|(p, _)| p);
+        // A real handle under a root is the director's, exactly as a synthetic one is and as
+        // `delete_hook` already treats the same path.
+        if let Some(nt) = nt.as_deref() {
+            // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+            if let Some(st) =
+                unsafe { director_delete_or_rename(handle, nt, is_delete, iosb, info, length) }
+            {
+                return st;
+            }
+        }
         if let (Some(nt), Some(engine)) = (nt, ENGINE.get()) {
             let handled = if is_delete {
                 engine.whiteout(&nt)
