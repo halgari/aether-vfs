@@ -61,7 +61,7 @@
 //! against [`CacheConfig::max_bytes`] **before** it starts, evicting the
 //! least recently used units of any file to make room; when nothing can be
 //! evicted (everything is mid-fetch) the read is simply served uncached.
-//! Lock order: registry → file → LRU index / retired diagnostics; neither of
+//! Lock order: file table → file → LRU index / retired diagnostics; neither of
 //! those is ever held while a file lock is taken.
 //!
 //! # What a caller must do
@@ -101,7 +101,7 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 
-struct Registry {
+struct FileTable {
     by_name: HashMap<Name, Arc<Entry>>,
     /// Size past which the next registration sweeps out unused entries.
     sweep_at: usize,
@@ -125,7 +125,7 @@ enum Got {
 /// The cache. One per process in the shim; see the module docs.
 pub struct ReadCache {
     cfg: CacheConfig,
-    files: Mutex<Registry>,
+    files: Mutex<FileTable>,
     /// Ready units by the tick they were filed under, oldest first: the
     /// process-wide LRU. A unit read since it was filed carries a newer
     /// tick of its own and is re-filed when it reaches the front, rather
@@ -135,7 +135,7 @@ pub struct ReadCache {
     used: AtomicUsize,
     tick: AtomicU64,
     counters: Counters,
-    /// Diagnostics of files swept out of the registry, so the per-file
+    /// Diagnostics of files swept out of the file table, so the per-file
     /// table covers the whole run.
     retired: Mutex<HashMap<Name, FileDiag>>,
 }
@@ -158,7 +158,7 @@ impl ReadCache {
         );
         ReadCache {
             cfg,
-            files: Mutex::new(Registry {
+            files: Mutex::new(FileTable {
                 by_name: HashMap::new(),
                 sweep_at: SWEEP_MIN,
             }),
@@ -255,7 +255,7 @@ impl ReadCache {
     /// blocks, and they are not poisoned (a poisoned entry is what stops a
     /// changed file being cached again). What they did is kept in
     /// `retired` for the per-file table.
-    fn sweep(&self, reg: &mut Registry) {
+    fn sweep(&self, reg: &mut FileTable) {
         let mut gone: Vec<(Name, FileDiag)> = Vec::new();
         reg.by_name.retain(|name, e| {
             if Arc::strong_count(e) > 1 {
@@ -289,7 +289,7 @@ impl ReadCache {
     }
 
     /// The `n` files with the most small reads offered to the cache, busiest
-    /// first: live ones and ones already swept out. Holds the registry for
+    /// first: live ones and ones already swept out. Holds the file table for
     /// one pass over it (and each file only if it is free), so it is for a
     /// periodic report, not a hot path.
     pub fn top_files(&self, n: usize) -> Vec<FileReport> {
