@@ -42,7 +42,9 @@ pub fn build(layers: Vec<Layer>) -> Result<VfsTree, BuildError> {
     let mut tree = VfsTree {
         nodes: vec![Node {
             name: String::new(),
-            entry: NodeEntry::Dir(DirNode { children: BTreeMap::new() }),
+            entry: NodeEntry::Dir(DirNode {
+                children: BTreeMap::new(),
+            }),
         }],
     };
     for layer in &layers {
@@ -91,8 +93,16 @@ impl VfsTree {
         let norm = normalize_vpath(vpath).ok()?;
         let id = self.find(&norm)?;
         match &self.nodes[id as usize].entry {
-            NodeEntry::Dir(_) => Some(TreeStat { kind: EntryKind::Dir, size: 0, mtime: 0 }),
-            NodeEntry::File(f) => Some(TreeStat { kind: EntryKind::File, size: f.size, mtime: f.mtime }),
+            NodeEntry::Dir(_) => Some(TreeStat {
+                kind: EntryKind::Dir,
+                size: 0,
+                mtime: 0,
+            }),
+            NodeEntry::File(f) => Some(TreeStat {
+                kind: EntryKind::File,
+                size: f.size,
+                mtime: f.mtime,
+            }),
             NodeEntry::Tombstone => None,
         }
     }
@@ -167,7 +177,10 @@ impl VfsTree {
     /// Push a fresh node, return its index.
     fn push(&mut self, name: &str, entry: NodeEntry) -> u32 {
         let id = self.nodes.len() as u32;
-        self.nodes.push(Node { name: name.to_string(), entry });
+        self.nodes.push(Node {
+            name: name.to_string(),
+            entry,
+        });
         id
     }
 
@@ -197,13 +210,19 @@ impl VfsTree {
                         // Replace any non-dir (file or tombstone) with an empty dir;
                         // name takes this layer's casing.
                         self.nodes[id as usize].name = comp.to_string();
-                        self.nodes[id as usize].entry =
-                            NodeEntry::Dir(DirNode { children: BTreeMap::new() });
+                        self.nodes[id as usize].entry = NodeEntry::Dir(DirNode {
+                            children: BTreeMap::new(),
+                        });
                     }
                     cur = id;
                 }
                 None => {
-                    let id = self.push(comp, NodeEntry::Dir(DirNode { children: BTreeMap::new() }));
+                    let id = self.push(
+                        comp,
+                        NodeEntry::Dir(DirNode {
+                            children: BTreeMap::new(),
+                        }),
+                    );
                     self.set_child(cur, key, id);
                     cur = id;
                 }
@@ -339,13 +358,28 @@ mod tests {
     use super::*;
 
     fn file(vpath: &str, source: &str, size: u64, mtime: i64) -> InputEntry {
-        InputEntry { vpath: vpath.into(), kind: EntryKind::File, source: source.into(), size, mtime }
+        InputEntry {
+            vpath: vpath.into(),
+            kind: EntryKind::File,
+            source: source.into(),
+            size,
+            mtime,
+        }
     }
     fn tomb(vpath: &str) -> InputEntry {
-        InputEntry { vpath: vpath.into(), kind: EntryKind::Tombstone, source: "".into(), size: 0, mtime: 0 }
+        InputEntry {
+            vpath: vpath.into(),
+            kind: EntryKind::Tombstone,
+            source: "".into(),
+            size: 0,
+            mtime: 0,
+        }
     }
     fn layer(id: u32, entries: Vec<InputEntry>) -> Layer {
-        Layer { id: LayerId(id), entries }
+        Layer {
+            id: LayerId(id),
+            entries,
+        }
     }
 
     #[test]
@@ -356,7 +390,12 @@ mod tests {
         ])
         .unwrap();
         match t.resolve("data/a.esp") {
-            Resolution::File { source, size, layer, .. } => {
+            Resolution::File {
+                source,
+                size,
+                layer,
+                ..
+            } => {
                 assert_eq!(source, SourceId::from("L1/a"));
                 assert_eq!(size, 2);
                 assert_eq!(layer, LayerId(1));
@@ -440,7 +479,13 @@ mod tests {
     fn cache_key_present_on_resolved_file() {
         let t = build(vec![layer(0, vec![file("a", "s", 7, 8)])]).unwrap();
         match t.resolve("a") {
-            Resolution::File { cache_key, source, size, mtime, .. } => {
+            Resolution::File {
+                cache_key,
+                source,
+                size,
+                mtime,
+                ..
+            } => {
                 assert_eq!(cache_key, compute_cache_key(&source, size, mtime));
             }
             other => panic!("expected file, got {other:?}"),
@@ -453,7 +498,11 @@ mod tests {
         let t = build(vec![layer(0, vec![file("data/a.esp", "s", 123, 456)])]).unwrap();
         assert_eq!(
             t.getattr("data/a.esp"),
-            Some(TreeStat { kind: EntryKind::File, size: 123, mtime: 456 })
+            Some(TreeStat {
+                kind: EntryKind::File,
+                size: 123,
+                mtime: 456
+            })
         );
     }
 
@@ -463,7 +512,11 @@ mod tests {
         let t = build(vec![layer(0, vec![file("data/a.esp", "s", 1, 1)])]).unwrap();
         assert_eq!(
             t.getattr("data"),
-            Some(TreeStat { kind: EntryKind::Dir, size: 0, mtime: 0 })
+            Some(TreeStat {
+                kind: EntryKind::Dir,
+                size: 0,
+                mtime: 0
+            })
         );
     }
 
@@ -476,18 +529,32 @@ mod tests {
     #[test]
     fn readdir_merges_and_sorts_case_insensitively() {
         let t = build(vec![
-            layer(0, vec![file("d/Zebra.esp", "s", 1, 1), file("d/apple.esp", "s", 1, 1)]),
+            layer(
+                0,
+                vec![
+                    file("d/Zebra.esp", "s", 1, 1),
+                    file("d/apple.esp", "s", 1, 1),
+                ],
+            ),
             layer(1, vec![file("d/Mango.esp", "s", 1, 1)]),
         ])
         .unwrap();
-        let names: Vec<String> = t.readdir("d", None).unwrap().into_iter().map(|e| e.name).collect();
+        let names: Vec<String> = t
+            .readdir("d", None)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
         assert_eq!(names, vec!["apple.esp", "Mango.esp", "Zebra.esp"]);
     }
 
     #[test]
     fn readdir_lists_tombstones() {
         let t = build(vec![
-            layer(0, vec![file("d/a.esp", "s", 1, 1), file("d/b.esp", "s", 1, 1)]),
+            layer(
+                0,
+                vec![file("d/a.esp", "s", 1, 1), file("d/b.esp", "s", 1, 1)],
+            ),
             layer(1, vec![tomb("d/a.esp")]),
         ])
         .unwrap();
@@ -502,11 +569,19 @@ mod tests {
     fn readdir_applies_wildcard_filter() {
         let t = build(vec![layer(
             0,
-            vec![file("d/a.esp", "s", 1, 1), file("d/b.txt", "s", 1, 1), file("d/c.esp", "s", 1, 1)],
+            vec![
+                file("d/a.esp", "s", 1, 1),
+                file("d/b.txt", "s", 1, 1),
+                file("d/c.esp", "s", 1, 1),
+            ],
         )])
         .unwrap();
-        let names: Vec<String> =
-            t.readdir("d", Some("*.esp")).unwrap().into_iter().map(|e| e.name).collect();
+        let names: Vec<String> = t
+            .readdir("d", Some("*.esp"))
+            .unwrap()
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
         assert_eq!(names, vec!["a.esp", "c.esp"]);
     }
 
@@ -514,7 +589,10 @@ mod tests {
     fn readdir_on_file_is_not_a_directory() {
         use crate::model::VfsError;
         let t = build(vec![layer(0, vec![file("d/a.esp", "s", 1, 1)])]).unwrap();
-        assert_eq!(t.readdir("d/a.esp", None).unwrap_err(), VfsError::NotADirectory);
+        assert_eq!(
+            t.readdir("d/a.esp", None).unwrap_err(),
+            VfsError::NotADirectory
+        );
     }
 
     #[test]
@@ -527,10 +605,13 @@ mod tests {
     #[test]
     fn walk_postorder_visits_children_before_parents_with_folded_names() {
         use crate::tree::WalkNodeKind;
-        let t = build(vec![layer(0, vec![
-            file("Data/A.esp", "src/a", 10, 1),
-            file("Data/sub/c.txt", "src/c", 30, 3),
-        ])])
+        let t = build(vec![layer(
+            0,
+            vec![
+                file("Data/A.esp", "src/a", 10, 1),
+                file("Data/sub/c.txt", "src/c", 30, 3),
+            ],
+        )])
         .unwrap();
 
         let mut order: Vec<String> = Vec::new();

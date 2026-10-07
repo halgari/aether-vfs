@@ -12,8 +12,7 @@
 use std::sync::Arc;
 
 use vfs_embed::{
-    rejected_writes, reset_rejected_writes, InlineProvider, LaunchOpts, RootId, Session,
-    OPEN_WRITE,
+    rejected_writes, reset_rejected_writes, InlineProvider, LaunchOpts, RootId, Session, OPEN_WRITE,
 };
 // Named only by the two `#[cfg(windows)]` tests below — the ones that need a
 // live ring — so the import is gated with them.
@@ -58,7 +57,10 @@ fn read_whole(session: &Session, root: RootId, rel: &str) -> Vec<u8> {
 #[cfg(windows)]
 #[test]
 fn a_two_root_session_composes_writes_and_reads_back_through_vfs_embed_alone() {
-    let base = dir("base", &[("shared.txt", b"BASE"), ("only-base.txt", b"KEEP")]);
+    let base = dir(
+        "base",
+        &[("shared.txt", b"BASE"), ("only-base.txt", b"KEEP")],
+    );
     let mods = dir("mods", &[("shared.txt", b"MOD-WINS")]);
     let tools = dir("tools", &[("t.exe", b"TOOL")]);
     let upper0 = dir("upper0", &[]);
@@ -117,11 +119,23 @@ fn a_two_root_session_composes_writes_and_reads_back_through_vfs_embed_alone() {
 
     // Reads: the layer stack merges (later layer wins per entry, lower-layer
     // exclusives survive) and the prefixed sibling keeps its own subtree.
-    assert_eq!(read_whole(&session, RootId::DEFAULT, "shared.txt"), b"MOD-WINS");
-    assert_eq!(read_whole(&session, RootId::DEFAULT, "only-base.txt"), b"KEEP");
-    assert_eq!(read_whole(&session, RootId::DEFAULT, "Tools/t.exe"), b"TOOL");
+    assert_eq!(
+        read_whole(&session, RootId::DEFAULT, "shared.txt"),
+        b"MOD-WINS"
+    );
+    assert_eq!(
+        read_whole(&session, RootId::DEFAULT, "only-base.txt"),
+        b"KEEP"
+    );
+    assert_eq!(
+        read_whole(&session, RootId::DEFAULT, "Tools/t.exe"),
+        b"TOOL"
+    );
     // Same relative name, different root, different bytes.
-    assert_eq!(read_whole(&session, RootId(1), "Skyrim.ini"), b"ORIGINAL-INI");
+    assert_eq!(
+        read_whole(&session, RootId(1), "Skyrim.ini"),
+        b"ORIGINAL-INI"
+    );
 
     // The write. An in-place edit of content only a *source* holds is the
     // case a sibling mount cannot serve — it has to copy up into the write
@@ -137,7 +151,10 @@ fn a_two_root_session_composes_writes_and_reads_back_through_vfs_embed_alone() {
     }
 
     // Read back through the director — the same graph the child process sees.
-    assert_eq!(read_whole(&session, RootId(1), "Skyrim.ini"), b"EDITED-INI!!");
+    assert_eq!(
+        read_whole(&session, RootId(1), "Skyrim.ini"),
+        b"EDITED-INI!!"
+    );
     assert_eq!(
         std::fs::read(upper1.join("Skyrim.ini")).ok(),
         Some(b"EDITED-INI!!".to_vec()),
@@ -222,7 +239,9 @@ fn a_refused_write_is_reported_through_the_embed_api() {
     assert_eq!(err, vfs_embed::ST_READ_ONLY);
 
     assert!(
-        rejected_writes().iter().any(|(p, n)| p.contains("locked.esp") && *n >= 1),
+        rejected_writes()
+            .iter()
+            .any(|(p, n)| p.contains("locked.esp") && *n >= 1),
         "the refusal must be discoverable through vfs_embed: {:?}",
         rejected_writes()
     );
@@ -233,7 +252,6 @@ fn a_refused_write_is_reported_through_the_embed_api() {
             .any(|(p, _)| p.contains("locked.esp")),
         "the same table, reachable from the session"
     );
-
 }
 
 /// `LaunchOpts` is part of the surface, not something a host has to reach into
@@ -299,16 +317,26 @@ fn declaring_root_zero_on_unix_sets_its_location_not_the_managed_root() {
     let host_root = session.virtual_root().to_path_buf();
     session.declare_root(0, r"C:\Games\Fixture");
     assert_eq!(session.root_locations()[0].location, r"C:\Games\Fixture");
-    assert_eq!(session.virtual_root(), host_root.as_path(), "the host backing dir is unchanged");
+    assert_eq!(
+        session.virtual_root(),
+        host_root.as_path(),
+        "the host backing dir is unchanged"
+    );
     assert!(session.declared_roots().is_empty());
 
     session.declare_root(1, r"C:\users\steamuser\Saves");
     session.declare_root(0, r"C:\Games\Other");
-    let locs: Vec<(u32, String)> =
-        session.root_locations().into_iter().map(|r| (r.id, r.location)).collect();
+    let locs: Vec<(u32, String)> = session
+        .root_locations()
+        .into_iter()
+        .map(|r| (r.id, r.location))
+        .collect();
     assert_eq!(
         locs,
-        [(0, r"C:\Games\Other".to_string()), (1, r"C:\users\steamuser\Saves".to_string())]
+        [
+            (0, r"C:\Games\Other".to_string()),
+            (1, r"C:\users\steamuser\Saves".to_string())
+        ]
     );
 }
 

@@ -122,20 +122,16 @@ mod tests {
             "{:?}",
             start.elapsed()
         );
-        assert!(
-            run_bounded(
-                &mut std::process::Command::new("true"),
-                Duration::from_secs(10)
-            )
-            .unwrap()
-        );
+        assert!(run_bounded(
+            &mut std::process::Command::new("true"),
+            Duration::from_secs(10)
+        )
+        .unwrap());
         // A failing exit status still counts as finished.
-        assert!(
-            run_bounded(
-                &mut std::process::Command::new("false"),
-                Duration::from_secs(10)
-            )
-            .unwrap()
-        );
+        assert!(run_bounded(
+            &mut std::process::Command::new("false"),
+            Duration::from_secs(10)
+        )
+        .unwrap());
     }
 }

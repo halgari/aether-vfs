@@ -211,7 +211,10 @@ mod tests {
     #[test]
     fn write_access_mask_is_the_three_write_bits() {
         assert_eq!(WRITE_ACCESS, 0x4000_0006);
-        assert_eq!(WRITE_ACCESS, FILE_WRITE_DATA | FILE_APPEND_DATA | GENERIC_WRITE);
+        assert_eq!(
+            WRITE_ACCESS,
+            FILE_WRITE_DATA | FILE_APPEND_DATA | GENERIC_WRITE
+        );
         assert_eq!(WRITE_ACCESS & GENERIC_ALL, 0);
     }
 

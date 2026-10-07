@@ -16,7 +16,7 @@ mod tests;
 mod value;
 
 pub use key::{write_key_info, write_subkey_info};
-pub use value::{KEY_VALUE_ENTRY_SIZE, write_multiple_values, write_value_info};
+pub use value::{write_multiple_values, write_value_info, KEY_VALUE_ENTRY_SIZE};
 
 pub const STATUS_SUCCESS: i32 = 0;
 pub const STATUS_BUFFER_OVERFLOW: i32 = 0x8000_0005_u32 as i32;

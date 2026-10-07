@@ -73,7 +73,8 @@ impl EventNotifier {
 fn spin_budget() -> Duration {
     static US: OnceLock<u64> = OnceLock::new();
     Duration::from_micros(*US.get_or_init(|| {
-        vfs_env::text(vfs_env::RING_SPIN_US).ok_or(())
+        vfs_env::text(vfs_env::RING_SPIN_US)
+            .ok_or(())
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(400)
@@ -115,7 +116,9 @@ impl Notifier for EventNotifier {
     fn wait_server(&self) {
         let budget = spin_budget();
         let hot = !budget.is_zero()
-            && SRV_ACTIVE.with(|c| c.get()).is_some_and(|t| t.elapsed() < budget);
+            && SRV_ACTIVE
+                .with(|c| c.get())
+                .is_some_and(|t| t.elapsed() < budget);
         if hot {
             // Return promptly so the caller re-checks the ring atomics.
             for _ in 0..64 {
@@ -200,7 +203,11 @@ mod spin_tests {
     fn spin_budget_defaults_to_covering_rpc_service_time() {
         // Measured RPC service is 20-209 us; the budget must exceed it or the
         // hybrid degrades to the sleep it replaces.
-        assert!(spin_budget() >= Duration::from_micros(209), "{:?}", spin_budget());
+        assert!(
+            spin_budget() >= Duration::from_micros(209),
+            "{:?}",
+            spin_budget()
+        );
     }
 
     #[test]
@@ -217,6 +224,9 @@ mod spin_tests {
             None => false,
         });
         assert!(!expired);
-        assert!(SPIN_UNTIL.with(|c| c.get()).is_none(), "budget must latch off");
+        assert!(
+            SPIN_UNTIL.with(|c| c.get()).is_none(),
+            "budget must latch off"
+        );
     }
 }

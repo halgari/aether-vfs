@@ -124,7 +124,11 @@ impl FileMapping {
         // crashes whoever still holds the mapping.
         #[allow(unsafe_code)]
         let seg = unsafe { SharedSeg::from_raw(ptr, size) };
-        Ok(Self { ptr, len: size, seg })
+        Ok(Self {
+            ptr,
+            len: size,
+            seg,
+        })
     }
 
     /// The mapped region as a `SharedSeg`.

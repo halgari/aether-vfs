@@ -9,16 +9,17 @@ use std::time::{Duration, Instant};
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::System::Diagnostics::Debug::{ReadProcessMemory, WriteProcessMemory};
 use windows_sys::Win32::System::LibraryLoader::{
-    GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
     GetModuleFileNameW, GetModuleHandleExW, GetModuleHandleW, GetProcAddress,
+    GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
 };
-use windows_sys::Win32::System::Memory::{MEM_COMMIT, MEM_RESERVE, PAGE_READWRITE, VirtualAllocEx};
+use windows_sys::Win32::System::Memory::{VirtualAllocEx, MEM_COMMIT, MEM_RESERVE, PAGE_READWRITE};
 use windows_sys::Win32::System::Threading::{
-    CreateEventW, CreateRemoteThread, GetCurrentProcessId, GetExitCodeThread, IsWow64Process2, LPTHREAD_START_ROUTINE, ResumeThread,
-    SetEvent, SuspendThread, WaitForMultipleObjects, WaitForSingleObject,
+    CreateEventW, CreateRemoteThread, GetCurrentProcessId, GetExitCodeThread, IsWow64Process2,
+    ResumeThread, SetEvent, SuspendThread, WaitForMultipleObjects, WaitForSingleObject,
+    LPTHREAD_START_ROUTINE,
 };
 
-use vfs_inject::{PreinitRedirect, arm_preinit_payload_ex};
+use vfs_inject::{arm_preinit_payload_ex, PreinitRedirect};
 
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -429,5 +430,3 @@ pub(crate) fn re_suspend(thread: HANDLE) {
         let _ = SuspendThread(thread);
     }
 }
-
-

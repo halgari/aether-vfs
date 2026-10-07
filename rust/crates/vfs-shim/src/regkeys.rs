@@ -32,26 +32,26 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use vfs_protocol::{ST_BAD_REQUEST, ST_EXISTS};
-use vfs_registry::Lookup;
 use vfs_registry::path::{self, PathError};
+use vfs_registry::Lookup;
 use windows_sys::Win32::Foundation::{HANDLE, NTSTATUS};
 
 use crate::ntbuf::OwnedOa;
 use crate::ntdef::{
-    DUPLICATE_CLOSE_SOURCE, DUPLICATE_SAME_ACCESS, DUPLICATE_SAME_ATTRIBUTES, KEY_NAME_INFORMATION,
     NtCloseFn, NtDuplicateObjectFn, NtEnumerateKeyFn, NtEnumerateValueKeyFn, NtOpenKeyExFn,
     NtQueryKeyFn, NtQueryMultipleValueKeyFn, NtQueryObjectFn, NtQuerySecurityObjectFn,
-    NtQueryValueKeyFn, OBJECT_BASIC_INFORMATION, OBJECT_HANDLE_FLAG_INFORMATION,
-    OBJECT_TYPE_INFORMATION, ObjectAttributes, REG_CREATED_NEW_KEY, REG_OPENED_EXISTING_KEY,
-    REG_OPTION_BACKUP_RESTORE, REG_OPTION_CREATE_LINK, REG_OPTION_OPEN_LINK, REG_OPTION_VOLATILE,
-    STATUS_ACCESS_DENIED, STATUS_ACCESS_VIOLATION, STATUS_BUFFER_OVERFLOW, STATUS_BUFFER_TOO_SMALL,
-    STATUS_HANDLE_NOT_CLOSABLE, STATUS_INFO_LENGTH_MISMATCH, STATUS_INVALID_BUFFER_SIZE,
-    STATUS_INVALID_HANDLE, STATUS_INVALID_PARAMETER, STATUS_INVALID_SECURITY_DESCR,
-    STATUS_KEY_DELETED, STATUS_NOT_SUPPORTED, STATUS_OBJECT_NAME_INVALID,
-    STATUS_OBJECT_NAME_NOT_FOUND, STATUS_OBJECT_PATH_NOT_FOUND, STATUS_OBJECT_TYPE_MISMATCH,
-    STATUS_SUCCESS, STATUS_UNSUCCESSFUL,
+    NtQueryValueKeyFn, ObjectAttributes, DUPLICATE_CLOSE_SOURCE, DUPLICATE_SAME_ACCESS,
+    DUPLICATE_SAME_ATTRIBUTES, KEY_NAME_INFORMATION, OBJECT_BASIC_INFORMATION,
+    OBJECT_HANDLE_FLAG_INFORMATION, OBJECT_TYPE_INFORMATION, REG_CREATED_NEW_KEY,
+    REG_OPENED_EXISTING_KEY, REG_OPTION_BACKUP_RESTORE, REG_OPTION_CREATE_LINK,
+    REG_OPTION_OPEN_LINK, REG_OPTION_VOLATILE, STATUS_ACCESS_DENIED, STATUS_ACCESS_VIOLATION,
+    STATUS_BUFFER_OVERFLOW, STATUS_BUFFER_TOO_SMALL, STATUS_HANDLE_NOT_CLOSABLE,
+    STATUS_INFO_LENGTH_MISMATCH, STATUS_INVALID_BUFFER_SIZE, STATUS_INVALID_HANDLE,
+    STATUS_INVALID_PARAMETER, STATUS_INVALID_SECURITY_DESCR, STATUS_KEY_DELETED,
+    STATUS_NOT_SUPPORTED, STATUS_OBJECT_NAME_INVALID, STATUS_OBJECT_NAME_NOT_FOUND,
+    STATUS_OBJECT_PATH_NOT_FOUND, STATUS_OBJECT_TYPE_MISMATCH, STATUS_SUCCESS, STATUS_UNSUCCESSFUL,
 };
-use crate::sync::{CloseLock, lock_for_close};
+use crate::sync::{lock_for_close, CloseLock};
 
 /// Slot bits below the tag (shifted left by 2, so handles stay multiples of 4 as kernel handles
 /// are): 2^27 slots, reused once they wrap (a live handle's slot is skipped).
@@ -352,7 +352,7 @@ pub(crate) fn user_sid() -> Option<&'static str> {
 fn read_user_sid() -> Option<String> {
     use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::Security::{
-        GetLengthSid, GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser,
+        GetLengthSid, GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER,
     };
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
     // SAFETY: plain token queries into owned buffers; the SID pointer points into `buf`, and its
@@ -791,7 +791,11 @@ pub(crate) unsafe fn open_private(
     let try_open = |rights: u32| {
         let mut h: HANDLE = core::ptr::null_mut();
         let st = open(&mut h, rights | wow64, name.as_ptr(), 0);
-        if st < 0 { Err(st) } else { Ok(h as isize) }
+        if st < 0 {
+            Err(st)
+        } else {
+            Ok(h as isize)
+        }
     };
     match try_open(KEY_READ) {
         Err(STATUS_ACCESS_DENIED) => {
@@ -1508,7 +1512,11 @@ unsafe fn open_real_rights(
     let name = OwnedOa::absolute(None, &path::to_nt(canonical, user_sid()), true)?;
     let mut h: HANDLE = core::ptr::null_mut();
     let st = open(&mut h, rights | (wow64 & WOW64_MASK), name.as_ptr(), 0);
-    if st < 0 { Err(st) } else { Ok(h as isize) }
+    if st < 0 {
+        Err(st)
+    } else {
+        Ok(h as isize)
+    }
 }
 
 /// `NtQuerySecurityObject` on a synthetic key handle (spec 3.6): the descriptor of the real key,

@@ -22,14 +22,14 @@ use std::ops::Deref;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use fakedirector::Fake;
-use reg::{Paths, UnicodeString, open_abs, reg_create_class, wide};
+use reg::{open_abs, reg_create_class, wide, Paths, UnicodeString};
 use vfs_registry::layout::{self, KeyInfoClass, ValueEntry, ValueInfoClass, Written};
 use vfs_registry::{KeyView, Value};
 use vfs_shim::{is_synthetic_key_handle, regclient, registry_enum_states};
 use windows_sys::Win32::Foundation::FILETIME;
 use windows_sys::Win32::System::Registry::{
-    HKEY, HKEY_CURRENT_USER, KEY_READ, RegCloseKey, RegOpenKeyExW, RegQueryInfoKeyW,
-    RegQueryValueExW, RegSetValueExW,
+    RegCloseKey, RegOpenKeyExW, RegQueryInfoKeyW, RegQueryValueExW, RegSetValueExW, HKEY,
+    HKEY_CURRENT_USER, KEY_READ,
 };
 
 static LOCK: Mutex<()> = Mutex::new(());

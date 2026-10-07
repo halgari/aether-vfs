@@ -1,9 +1,9 @@
 //! `NtClose`.
 #![deny(unsafe_op_in_unsafe_fn)]
 
-use super::{HANDLES, TRAMP_CLOSE, reg_real};
+use super::{reg_real, HANDLES, TRAMP_CLOSE};
 use crate::ntdef::{STATUS_SUCCESS, STATUS_UNSUCCESSFUL};
-use crate::sync::{CloseLock, lock_for_close};
+use crate::sync::{lock_for_close, CloseLock};
 use windows_sys::Win32::Foundation::{HANDLE, NTSTATUS};
 
 /// Drop the handle's whole record from [`HANDLES`], non-blocking (`lock_for_close`).

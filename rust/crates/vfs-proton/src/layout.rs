@@ -37,7 +37,9 @@ impl Root {
             return Ok(Root::at(PathBuf::from(xdg).join("aether-vfs")));
         }
         if let Ok(home) = std::env::var("HOME") {
-            return Ok(Root::at(PathBuf::from(home).join(".local/share/aether-vfs")));
+            return Ok(Root::at(
+                PathBuf::from(home).join(".local/share/aether-vfs"),
+            ));
         }
         if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
             return Ok(Root::at(PathBuf::from(local_app_data).join("aether-vfs")));

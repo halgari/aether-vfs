@@ -3,8 +3,8 @@
 use crate::error::{Error, Result};
 use crate::index::Tables;
 use crate::manifest::{
-    BLOCKS_PER_SEGMENT, MISSING, block_count, block_len, decode_ids, encode_segment, file_len,
-    segment_count, slots_in_segment,
+    block_count, block_len, decode_ids, encode_segment, file_len, segment_count, slots_in_segment,
+    BLOCKS_PER_SEGMENT, MISSING,
 };
 
 fn missing_segment(file_id: &[u8], seg: u32) -> Error {
@@ -278,12 +278,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(removed, ids[..4099].to_vec());
-        assert!(
-            index
-                .update(false, |t| remove(t, b"big", BS))
-                .unwrap()
-                .is_none()
-        );
+        assert!(index
+            .update(false, |t| remove(t, b"big", BS))
+            .unwrap()
+            .is_none());
     }
 
     #[test]

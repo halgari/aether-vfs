@@ -86,20 +86,18 @@ pub use config::{
     CacheConfig, DEFAULT_BLOCK, DEFAULT_BLOCKS_PER_FILE, DEFAULT_COLD_HITS_PER_MISS,
     DEFAULT_MAX_BYTES, DEFAULT_MAX_RUN, DEFAULT_THRESHOLD,
 };
-pub use file::FileRef;
-pub use stats::{CacheStats, FileDiag, FileReport};
 use config::{
     COLD_AFTER_FAILED_FETCHES, COLD_AFTER_MISSES, COLD_MAX_READS, COLD_READS, PRESSURE_MEMORY,
     RETIRED_DIAGS,
 };
+pub use file::FileRef;
 use file::{Entry, Flight, Name, Slot, SlotKind, State, Version};
 use stats::{bump, Counters};
-
+pub use stats::{CacheStats, FileDiag, FileReport};
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
-
 
 struct FileTable {
     by_name: HashMap<Name, Arc<Entry>>,

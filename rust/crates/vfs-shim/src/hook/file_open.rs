@@ -2,13 +2,13 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 use super::{
-    HANDLES, ShimIoGuard, TRAMP_CREATE, TRAMP_OPEN, allow_disk_fallthrough, fuse_root_directory,
-    in_hook_reenter, object_name_str, path_is_ours, path_of_tracked, record_path, reset_handle,
-    reset_key, tag_under_root, to_nt_path,
+    allow_disk_fallthrough, fuse_root_directory, in_hook_reenter, object_name_str, path_is_ours,
+    path_of_tracked, record_path, reset_handle, reset_key, tag_under_root, to_nt_path, ShimIoGuard,
+    HANDLES, TRAMP_CREATE, TRAMP_OPEN,
 };
 use crate::ntbuf::OwnedOa;
 use crate::ntdef::{
-    FILE_CREATED, FILE_DELETE_ON_CLOSE, FILE_DIRECTORY_FILE, ObjectAttributes,
+    ObjectAttributes, FILE_CREATED, FILE_DELETE_ON_CLOSE, FILE_DIRECTORY_FILE,
     STATUS_ACCESS_DENIED, STATUS_FILE_IS_A_DIRECTORY, STATUS_OBJECT_NAME_COLLISION,
     STATUS_OBJECT_NAME_NOT_FOUND, STATUS_OBJECT_PATH_NOT_FOUND, STATUS_SUCCESS,
     STATUS_UNSUCCESSFUL,

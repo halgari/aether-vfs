@@ -12,12 +12,12 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
 use vfs_ipc::ring::{self, Geom};
-use vfs_ipc::{RingClient, RingServer, SpinNotifier};
 #[cfg(unix)]
 use vfs_ipc::AdaptiveNotifier;
 use vfs_ipc::{DataArena, DEFAULT_WORKER_COUNT};
 #[cfg(windows)]
 use vfs_ipc::{Notifier, DEFAULT_PAYLOAD_CAP};
+use vfs_ipc::{RingClient, RingServer, SpinNotifier};
 #[cfg(windows)]
 use vfs_win::{EventNotifier, SharedMapping};
 
@@ -189,7 +189,6 @@ impl IpcServe {
             client_ev_name: client_ev_name.clone(),
         });
 
-
         let workers = clamp_workers(workers);
         // Published before any client can attach: a client bounds its reads
         // below this, so that a worker is always left for a request that is
@@ -323,7 +322,9 @@ impl IpcServe {
         let mut joins = Vec::with_capacity(workers);
         for _ in 0..workers {
             let inner2 = inner.clone();
-            joins.push(thread::spawn(move || worker_loop(&inner2, AdaptiveNotifier)));
+            joins.push(thread::spawn(move || {
+                worker_loop(&inner2, AdaptiveNotifier)
+            }));
         }
 
         Ok(IpcServe {

@@ -50,7 +50,6 @@ struct State {
     opens_err: u64,
 }
 
-
 static STATE: OnceLock<Mutex<State>> = OnceLock::new();
 
 /// Epoch for "since launch" reporting (call once after CreateProcess resumes).
@@ -307,9 +306,7 @@ pub fn snapshot_report(top_n: usize) -> String {
         .iter()
         .filter(|(_, st)| st.errors > 0 || st.not_found > 0)
         .collect();
-    errs.sort_by(|a, b| {
-        (b.1.errors + b.1.not_found).cmp(&(a.1.errors + a.1.not_found))
-    });
+    errs.sort_by(|a, b| (b.1.errors + b.1.not_found).cmp(&(a.1.errors + a.1.not_found)));
     if !errs.is_empty() {
         out.push_str(&format!(
             "  --- top failures (err/nf), showing {} of {} ---\n",

@@ -35,9 +35,9 @@
 
 use crate::fakedirector;
 
-use fakedirector::{ARENA_LEN, Fake, PAYLOAD_CAP, ReadStyle, pattern};
+use fakedirector::{pattern, Fake, ReadStyle, ARENA_LEN, PAYLOAD_CAP};
 use std::io::Write;
-use vfs_shim::{HookGuard, install};
+use vfs_shim::{install, HookGuard};
 
 /// Bytes only the director has.
 const PROVIDER: &[u8] = b"the provider graph's bytes, which only the director can hand over";

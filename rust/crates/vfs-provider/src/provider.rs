@@ -116,7 +116,10 @@ mod tests {
         assert_eq!(p.write_at(0, 0, b"x"), Err(ST_NOT_SUPPORTED));
         assert_eq!(p.mkdir(VPath::at_default("d")), Err(ST_NOT_SUPPORTED));
         assert_eq!(p.read_next(0, &mut [0u8; 4]), Err(ST_NOT_SUPPORTED));
-        assert_eq!(p.set_attr(VPath::at_default("f"), SetAttr::default()), Err(ST_NOT_SUPPORTED));
+        assert_eq!(
+            p.set_attr(VPath::at_default("f"), SetAttr::default()),
+            Err(ST_NOT_SUPPORTED)
+        );
     }
 
     /// The default answer for a handle is the provider's own declaration.

@@ -37,7 +37,9 @@ fn ring_round_trip_over_real_section() {
 
         // Client (this thread): submit a request over the real shared section.
         let client = RingClient::new(seg, SpinNotifier).unwrap();
-        let resp = client.submit(OP_GETATTR, 0, b"hello-shared-memory").unwrap();
+        let resp = client
+            .submit(OP_GETATTR, 0, b"hello-shared-memory")
+            .unwrap();
         assert_eq!(resp.status, 0);
         assert_eq!(resp.payload, b"hello-shared-memory");
 

@@ -9,7 +9,7 @@ use std::time::Duration;
 use vfs_director::ipc::IpcServe;
 
 use super::stage::ResolvedImage;
-use super::{LaunchOpts, Session, check_image};
+use super::{check_image, LaunchOpts, Session};
 
 /// Serializes **every** process-global env mutation this crate performs —
 /// [`Session::serve`]'s as well as [`Session::launch`]'s.
@@ -38,8 +38,7 @@ static LAUNCH_ENV_LOCK: Mutex<()> = Mutex::new(());
 /// How long the injector waits for the shim to report ready when neither
 /// [`LaunchOpts::ready_timeout`] nor `VFS_READY_TIMEOUT_SECS` says: the default
 /// `vfs-injector.exe` itself uses.
-const DEFAULT_READY_TIMEOUT: Duration =
-    Duration::from_secs(vfs_env::DEFAULT_READY_TIMEOUT_SECS);
+const DEFAULT_READY_TIMEOUT: Duration = Duration::from_secs(vfs_env::DEFAULT_READY_TIMEOUT_SECS);
 
 impl Session {
     /// The declared roots beyond root 0, as `apply_env_roots` wants them.
@@ -284,11 +283,9 @@ impl Session {
 
         // Children the shim killed because it could not inject them, one
         // `<image> <reason>` line each, beside the ready file.
-        let refused = std::fs::read_to_string(format!(
-            "{ready_path_s}{}",
-            vfs_env::CHILD_REFUSED_SUFFIX
-        ))
-        .unwrap_or_default();
+        let refused =
+            std::fs::read_to_string(format!("{ready_path_s}{}", vfs_env::CHILD_REFUSED_SUFFIX))
+                .unwrap_or_default();
         exit.map_err(|e| {
             let mut msg = format!("launch: {e:?}");
             for line in refused.lines().filter(|l| !l.trim().is_empty()) {

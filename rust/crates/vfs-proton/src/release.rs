@@ -172,9 +172,10 @@ mod tests {
     use super::*;
 
     fn fixture() -> String {
-        std::fs::read_to_string(
-            concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/releases.json"),
-        )
+        std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/releases.json"
+        ))
         .unwrap()
     }
 
@@ -209,7 +210,10 @@ mod tests {
 
     #[test]
     fn malformed_json_is_an_error_not_a_panic() {
-        assert!(matches!(parse_releases("not json"), Err(ResolveError::Json(_))));
+        assert!(matches!(
+            parse_releases("not json"),
+            Err(ResolveError::Json(_))
+        ));
         assert!(matches!(parse_releases("{}"), Err(ResolveError::Json(_))));
     }
 }

@@ -4,11 +4,11 @@ use std::cell::RefCell;
 use std::io;
 use std::sync::atomic::Ordering;
 
-use crate::codec::{HEADER_LEN, RecordHeader, decode_payload};
+use crate::codec::{decode_payload, RecordHeader, HEADER_LEN};
 use crate::error::{Error, Result};
 use crate::index::BlockLoc;
-use crate::manifest::{BLOCKS_PER_SEGMENT, MISSING, file_len, slot};
-use crate::store::{BlockStore, ReadResult, push_range};
+use crate::manifest::{file_len, slot, BLOCKS_PER_SEGMENT, MISSING};
+use crate::store::{push_range, BlockStore, ReadResult};
 
 thread_local! {
     static RECORD_BUF: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };

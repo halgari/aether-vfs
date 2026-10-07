@@ -46,8 +46,8 @@ use std::sync::RwLock;
 use vfs_block_store::{BlockStore, CompactOptions};
 
 use crate::catalog::Catalog;
-use crate::layer_io::RUN_BLOCKS;
 use crate::ids::{cache_file_id, classify_store_id, layer_file_id, StoreIdKind};
+use crate::layer_io::RUN_BLOCKS;
 use crate::storage::{Storage, StorageError};
 
 /// What reconciliation at [`Storage::open`] repaired.
@@ -368,7 +368,7 @@ mod tests {
 
     use crate::catalog::{CacheRec, EntryRec};
     use crate::config::{Durability, StorageConfig};
-use crate::ids::{cache_file_id, classify_store_id, layer_file_id, new_guid, StoreIdKind};
+    use crate::ids::{cache_file_id, classify_store_id, layer_file_id, new_guid, StoreIdKind};
     use crate::storage::Storage;
 
     const BS: u64 = 4096;

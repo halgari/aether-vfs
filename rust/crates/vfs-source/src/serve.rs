@@ -267,7 +267,10 @@ mod tests {
     #[tokio::test]
     async fn rejects_a_bare_dotdot_component() {
         let resp = svc()
-            .get_attr(Request::new(GetAttrReq { path: "..".into(), root: 0 }))
+            .get_attr(Request::new(GetAttrReq {
+                path: "..".into(),
+                root: 0,
+            }))
             .await
             .unwrap()
             .into_inner();
@@ -277,7 +280,10 @@ mod tests {
     #[tokio::test]
     async fn rejects_a_leading_slash() {
         let resp = svc()
-            .read_dir(Request::new(ReadDirReq { path: "/etc".into(), root: 0 }))
+            .read_dir(Request::new(ReadDirReq {
+                path: "/etc".into(),
+                root: 0,
+            }))
             .await
             .unwrap()
             .into_inner();
@@ -301,7 +307,10 @@ mod tests {
     #[tokio::test]
     async fn rejects_a_colon() {
         let resp = svc()
-            .get_attr(Request::new(GetAttrReq { path: "C:/Windows".into(), root: 0 }))
+            .get_attr(Request::new(GetAttrReq {
+                path: "C:/Windows".into(),
+                root: 0,
+            }))
             .await
             .unwrap()
             .into_inner();
@@ -311,7 +320,10 @@ mod tests {
     #[tokio::test]
     async fn accepts_a_legitimate_nested_path() {
         let resp = svc()
-            .get_attr(Request::new(GetAttrReq { path: "sub/b.txt".into(), root: 0 }))
+            .get_attr(Request::new(GetAttrReq {
+                path: "sub/b.txt".into(),
+                root: 0,
+            }))
             .await
             .unwrap()
             .into_inner();
@@ -326,7 +338,10 @@ mod tests {
         // longer segment name (a legitimate filename) must reach the
         // provider unmolested.
         let resp = svc()
-            .get_attr(Request::new(GetAttrReq { path: "..foo".into(), root: 0 }))
+            .get_attr(Request::new(GetAttrReq {
+                path: "..foo".into(),
+                root: 0,
+            }))
             .await
             .unwrap()
             .into_inner();

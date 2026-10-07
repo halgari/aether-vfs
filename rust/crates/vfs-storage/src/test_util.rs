@@ -57,7 +57,10 @@ impl CrashImage {
         let parent = dir.parent().filter(|p| !p.as_os_str().is_empty());
         let image = tempfile::tempdir_in(parent.unwrap_or(std::path::Path::new(".")))?;
         snapshot_as_killed(dir, image.path())?;
-        Ok(CrashImage { dir: dir.to_path_buf(), image })
+        Ok(CrashImage {
+            dir: dir.to_path_buf(),
+            image,
+        })
     }
 }
 

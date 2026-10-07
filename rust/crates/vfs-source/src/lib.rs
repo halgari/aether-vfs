@@ -58,8 +58,7 @@ pub fn build_provider(spec: &SourceSpec) -> Result<Arc<dyn Provider>, BuildError
         )),
         SourceSpec::Http { .. } => Err(BuildError::Unsupported("http source (later milestone)")),
         SourceSpec::Remote { endpoint } => {
-            let p = RemoteProvider::connect_blocking(endpoint)
-                .map_err(BuildError::Open)?;
+            let p = RemoteProvider::connect_blocking(endpoint).map_err(BuildError::Open)?;
             Ok(Arc::new(p))
         }
         SourceSpec::Memory { files } => {
@@ -127,7 +126,10 @@ mod tests {
 
         // Capabilities must survive the round trip, not be defaulted locally.
         assert_eq!(remote.capabilities().access, vfs_provider::Access::Read);
-        assert!(!remote.capabilities().immutable, "disk is mutable, and the wire must say so");
+        assert!(
+            !remote.capabilities().immutable,
+            "disk is mutable, and the wire must say so"
+        );
 
         // The service wraps a ReadWrite DiskProvider, but the Stage-1 wire
         // contract has no write RPCs — so what crosses the wire must be Read.
@@ -163,7 +165,9 @@ mod tests {
     #[test]
     fn http_still_unsupported() {
         assert!(matches!(
-            build_provider(&SourceSpec::Http { url: "http://x".into() }),
+            build_provider(&SourceSpec::Http {
+                url: "http://x".into()
+            }),
             Err(BuildError::Unsupported(_))
         ));
     }
@@ -223,7 +227,10 @@ mod tests {
         buf.extend_from_slice(&cd_start.to_le_bytes());
         buf.extend_from_slice(&0u16.to_le_bytes());
         let zip_path = dir.join("t.zip");
-        std::fs::File::create(&zip_path).unwrap().write_all(&buf).unwrap();
+        std::fs::File::create(&zip_path)
+            .unwrap()
+            .write_all(&buf)
+            .unwrap();
 
         let p = build_provider(&SourceSpec::Zip {
             path: zip_path.to_string_lossy().into_owned(),
@@ -242,6 +249,8 @@ mod tests {
         let err = build_provider(&SourceSpec::Layer { name: "p".into() })
             .err()
             .expect("layer has no standalone provider");
-        assert!(err.to_string().contains("a layer source needs the daemon's storage"));
+        assert!(err
+            .to_string()
+            .contains("a layer source needs the daemon's storage"));
     }
 }

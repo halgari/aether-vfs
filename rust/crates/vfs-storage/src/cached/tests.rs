@@ -669,18 +669,37 @@ fn concurrent_misses_fetch_once() {
 #[test]
 fn unit_blocks_rounds_the_hint_up_to_whole_blocks_and_clamps_it() {
     assert_eq!(unit_blocks(None, 4096), 1);
-    assert_eq!(unit_blocks(Some(1000), 4096), 1, "a hint below a block is one block");
+    assert_eq!(
+        unit_blocks(Some(1000), 4096),
+        1,
+        "a hint below a block is one block"
+    );
     assert_eq!(unit_blocks(Some(4096), 4096), 1);
     assert_eq!(unit_blocks(Some(4 * 4096), 4096), 4);
-    assert_eq!(unit_blocks(Some(4 * 4096 + 1), 4096), 5, "rounded up, never down");
-    assert_eq!(unit_blocks(Some(4 << 20), 64 << 10), 64, "a 4 MiB frame over 64 KiB blocks");
-    assert_eq!(unit_blocks(Some(u32::MAX), 64 << 10), 1024, "clamped to 64 MiB");
+    assert_eq!(
+        unit_blocks(Some(4 * 4096 + 1), 4096),
+        5,
+        "rounded up, never down"
+    );
+    assert_eq!(
+        unit_blocks(Some(4 << 20), 64 << 10),
+        64,
+        "a 4 MiB frame over 64 KiB blocks"
+    );
+    assert_eq!(
+        unit_blocks(Some(u32::MAX), 64 << 10),
+        1024,
+        "clamped to 64 MiB"
+    );
 }
 
 #[test]
 fn conformance_through_a_hinted_cache() {
     let (s, _d) = temp_storage();
-    let src = hinted(Arc::new(vfs_provider::conformance::MemFixture::new()), 4 * BS);
+    let src = hinted(
+        Arc::new(vfs_provider::conformance::MemFixture::new()),
+        4 * BS,
+    );
     vfs_provider::assert_conformance(s.cached(src, key()));
 }
 
@@ -715,8 +734,15 @@ fn a_miss_fetches_the_whole_preferred_unit_in_one_source_read() {
     let mut tail = [0u8; 100];
     assert_eq!(p.read_at(h, 10 * BS as u64, &mut tail).unwrap(), 100);
     assert_eq!(tail[..], body[10 * BS..]);
-    assert_eq!(src.reads(), 3, "the tail unit: blocks 8, 9 and the short 10");
-    assert_eq!(s.cache_stats().cached_logical_bytes, 8 * BS as u64 + 2 * BS as u64 + 100);
+    assert_eq!(
+        src.reads(),
+        3,
+        "the tail unit: blocks 8, 9 and the short 10"
+    );
+    assert_eq!(
+        s.cache_stats().cached_logical_bytes,
+        8 * BS as u64 + 2 * BS as u64 + 100
+    );
     p.close(h).unwrap();
     assert_eq!(read_all(&p, "f"), body);
     assert_eq!(src.reads(), 3, "the whole file is cached");
@@ -795,7 +821,11 @@ fn concurrent_misses_on_one_unit_fetch_once() {
         let (i, got) = t.join().unwrap();
         assert_eq!(got, body[i * BS..(i + 1) * BS]);
     }
-    assert_eq!(src.reads(), 1, "one source fetch for eight blocks of one unit");
+    assert_eq!(
+        src.reads(),
+        1,
+        "one source fetch for eight blocks of one unit"
+    );
     assert_eq!(s.cache_stats().misses, READERS as u64);
 }
 
@@ -860,7 +890,11 @@ fn concurrent_misses_with_different_units_never_cross_wires() {
     let got_x = tx.join().unwrap();
     let got_y = ty.join().unwrap();
     assert_eq!(got_x[..], body[5 * BS..6 * BS], "X got its own block 5");
-    assert_eq!(got_y[..], body[BS..2 * BS], "Y got its own block 1, not X's block 4");
+    assert_eq!(
+        got_y[..],
+        body[BS..2 * BS],
+        "Y got its own block 1, not X's block 4"
+    );
     assert_eq!(src_x.reads(), 1);
     assert_eq!(src_y.reads(), 1);
 }
@@ -872,7 +906,10 @@ fn cached_coverage_reports_what_the_cache_holds_of_a_file() {
     let src = slow(MapSource::with(&[("f", body.clone())]));
     let p = s.cached(src.clone(), key());
     let at = VPath::at_default("f");
-    assert!(s.cached_coverage(&*src, &key(), at).unwrap().is_empty(), "nothing yet");
+    assert!(
+        s.cached_coverage(&*src, &key(), at).unwrap().is_empty(),
+        "nothing yet"
+    );
 
     let (h, _, _) = p.open(at, OPEN_READ).unwrap();
     p.read_at(h, BS as u64 + 1, &mut [0u8; 4]).unwrap();
@@ -889,9 +926,20 @@ fn cached_coverage_reports_what_the_cache_holds_of_a_file() {
         "merged into one range, the short tail block included"
     );
     let reads = src.reads();
-    assert!(s.cached_coverage(&*src, &SourceKey("other".into()), at).unwrap().is_empty());
-    assert!(s.cached_coverage(&*src, &key(), VPath::at_default("missing")).unwrap().is_empty());
-    assert!(s.cached_coverage(&*src, &key(), VPath::at_default("")).unwrap().is_empty(), "a directory");
+    assert!(s
+        .cached_coverage(&*src, &SourceKey("other".into()), at)
+        .unwrap()
+        .is_empty());
+    assert!(s
+        .cached_coverage(&*src, &key(), VPath::at_default("missing"))
+        .unwrap()
+        .is_empty());
+    assert!(
+        s.cached_coverage(&*src, &key(), VPath::at_default(""))
+            .unwrap()
+            .is_empty(),
+        "a directory"
+    );
     assert_eq!(src.reads(), reads, "coverage never reads the source");
 }
 

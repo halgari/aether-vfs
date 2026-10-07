@@ -6,7 +6,7 @@ use crate::codec::decode_payload;
 use crate::error::Result;
 use crate::index::{BlockLoc, PackState};
 use crate::manifest::{
-    MISSING, block_count, decode_ids, file_len, segment_count, slots_in_segment,
+    block_count, decode_ids, file_len, segment_count, slots_in_segment, MISSING,
 };
 use crate::pack::pack_path;
 use crate::store::BlockStore;

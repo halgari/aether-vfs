@@ -9,11 +9,11 @@
 //! Handles start at 1 and are never reused within a table.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 
+use crate::status::{lock_or_status, ST_BAD_FH};
 use crate::Handle;
-use crate::status::{ST_BAD_FH, lock_or_status};
 
 /// Open-handle state of type `T`, keyed by the handle the provider issued.
 ///

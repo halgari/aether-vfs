@@ -1,10 +1,22 @@
 use vfs_core::{build, EntryKind, InputEntry, Layer, LayerId, Resolution, SourceId};
 
 fn file(vpath: &str, source: &str, size: u64, mtime: i64) -> InputEntry {
-    InputEntry { vpath: vpath.into(), kind: EntryKind::File, source: source.into(), size, mtime }
+    InputEntry {
+        vpath: vpath.into(),
+        kind: EntryKind::File,
+        source: source.into(),
+        size,
+        mtime,
+    }
 }
 fn tomb(vpath: &str) -> InputEntry {
-    InputEntry { vpath: vpath.into(), kind: EntryKind::Tombstone, source: "".into(), size: 0, mtime: 0 }
+    InputEntry {
+        vpath: vpath.into(),
+        kind: EntryKind::Tombstone,
+        source: "".into(),
+        size: 0,
+        mtime: 0,
+    }
 }
 
 #[test]
@@ -34,7 +46,12 @@ fn end_to_end_modded_game_view() {
 
     // Mod1 overrides the base texture.
     match tree.resolve("Data/textures/rock.dds") {
-        Resolution::File { source, size, layer, .. } => {
+        Resolution::File {
+            source,
+            size,
+            layer,
+            ..
+        } => {
             assert_eq!(source, SourceId::from("mod1/rock.dds"));
             assert_eq!(size, 80);
             assert_eq!(layer, LayerId(1));
@@ -47,12 +64,19 @@ fn end_to_end_modded_game_view() {
 
     // Merged Data listing is sorted case-insensitively and includes the tombstone
     // entry (a later merge transform subtracts denied names).
-    let names: Vec<String> =
-        tree.readdir("Data", None).unwrap().into_iter().map(|e| e.name).collect();
+    let names: Vec<String> = tree
+        .readdir("Data", None)
+        .unwrap()
+        .into_iter()
+        .map(|e| e.name)
+        .collect();
     assert_eq!(names, vec!["MyMod.esp", "Skyrim.esm", "textures"]);
 
     // The new mod file resolves.
-    assert!(matches!(tree.resolve("Data/MyMod.esp"), Resolution::File { .. }));
+    assert!(matches!(
+        tree.resolve("Data/MyMod.esp"),
+        Resolution::File { .. }
+    ));
 
     // A directory reports as a dir via getattr.
     assert_eq!(tree.getattr("Data/textures").unwrap().kind, EntryKind::Dir);

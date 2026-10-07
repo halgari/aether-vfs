@@ -23,7 +23,7 @@
 use crate::fakedirector;
 
 use fakedirector::Fake;
-use vfs_shim::{OpenOutcome, install, outcome_count};
+use vfs_shim::{install, outcome_count, OpenOutcome};
 
 /// `ERROR_GEN_FAILURE` — `STATUS_UNSUCCESSFUL`.
 const ERROR_GEN_FAILURE: i32 = 31;

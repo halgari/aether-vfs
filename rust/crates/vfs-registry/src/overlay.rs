@@ -612,10 +612,9 @@ mod tests {
             p
         };
         let mut o = Overlay::new();
-        assert!(
-            o.create_key(&chain(MAX_WRITE_DEPTH), false, false, 1)
-                .is_ok()
-        );
+        assert!(o
+            .create_key(&chain(MAX_WRITE_DEPTH), false, false, 1)
+            .is_ok());
         let deep = chain(MAX_WRITE_DEPTH + 1);
         assert_eq!(o.create_key(&deep, false, false, 2), Err(RegError::TooDeep));
         assert_eq!(

@@ -11,8 +11,8 @@
 use std::collections::HashMap;
 
 use vfs_provider::{
-    HandleTable, bad_request, not_a_dir, not_found, Capabilities, DirEntry, Handle,
-    Provider, Stat, VPath, KIND_DIR, KIND_FILE, OPEN_WRITE,
+    bad_request, not_a_dir, not_found, Capabilities, DirEntry, Handle, HandleTable, Provider, Stat,
+    VPath, KIND_DIR, KIND_FILE, OPEN_WRITE,
 };
 
 use crate::casefold::{fold_components, fold_strip_prefix};

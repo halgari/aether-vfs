@@ -10,10 +10,10 @@ mod links;
 mod wineserver;
 
 pub use init::{
-    PROTON_GRAPHICS_OVERRIDES, PROTON_INIT_LOG, PROTON_INIT_TIMEOUT, PrefixInit, ensure,
-    ensure_with, prefix_dir,
+    ensure, ensure_with, prefix_dir, PrefixInit, PROTON_GRAPHICS_OVERRIDES, PROTON_INIT_LOG,
+    PROTON_INIT_TIMEOUT,
 };
-pub use links::{LINK_MANIFEST, parse_location};
+pub use links::{parse_location, LINK_MANIFEST};
 pub use wineserver::WINESERVER_STOP_TIMEOUT;
 
 use std::io;

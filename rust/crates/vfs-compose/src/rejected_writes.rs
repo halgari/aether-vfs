@@ -42,7 +42,9 @@ pub fn rejected_writes() -> Vec<(String, u64)> {
     let Ok(t) = table().lock() else {
         return Vec::new();
     };
-    t.iter().map(|(path, count)| (path.clone(), *count)).collect()
+    t.iter()
+        .map(|(path, count)| (path.clone(), *count))
+        .collect()
 }
 
 /// Clear rejected-write tracking (tests; also useful before a fresh probe).

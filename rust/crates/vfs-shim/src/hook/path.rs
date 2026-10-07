@@ -273,8 +273,8 @@ pub(super) fn to_nt_path(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hook::HANDLES;
     use crate::hook::test_support::{oa_named, us_raw};
+    use crate::hook::HANDLES;
     use crate::ntdef::STATUS_OBJECT_NAME_INVALID;
 
     /// An `ObjectName` the file hooks cannot decode is left to the real syscall: an odd `Length`

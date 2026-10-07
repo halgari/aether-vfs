@@ -55,15 +55,15 @@ use std::time::Duration;
 use vfs_registry::Lookup;
 use windows_sys::Win32::Foundation::{HANDLE, NTSTATUS};
 
-use crate::hookstats::{RegNotify, note_reg_notify};
+use crate::hookstats::{note_reg_notify, RegNotify};
 use crate::ntdef::{
     STATUS_ACCESS_DENIED, STATUS_INSUFFICIENT_RESOURCES, STATUS_INVALID_HANDLE, STATUS_KEY_DELETED,
-    STATUS_NOT_SUPPORTED, STATUS_NOTIFY_CLEANUP, STATUS_NOTIFY_ENUM_DIR, STATUS_PENDING,
+    STATUS_NOTIFY_CLEANUP, STATUS_NOTIFY_ENUM_DIR, STATUS_NOT_SUPPORTED, STATUS_PENDING,
     STATUS_SUCCESS, STATUS_UNSUCCESSFUL,
 };
 use crate::regclient;
-use crate::regkeys::{self, KEY_NOTIFY, Real};
-use crate::sync::{CloseLock, lock_for_close};
+use crate::regkeys::{self, Real, KEY_NOTIFY};
+use crate::sync::{lock_for_close, CloseLock};
 
 /// How often the notifier asks the director (ruling R1).
 pub(crate) const POLL: Duration = Duration::from_millis(250);
@@ -306,7 +306,11 @@ unsafe fn duplicate(real: &Real, h: isize, access: u32, options: u32) -> Result<
         0,
         options,
     );
-    if st < 0 { Err(st) } else { Ok(out as isize) }
+    if st < 0 {
+        Err(st)
+    } else {
+        Ok(out as isize)
+    }
 }
 
 /// Whether this thread holds the loader lock (`PEB->LoaderLock`). A synchronous wait there
@@ -345,7 +349,7 @@ fn holds_loader_lock() -> bool {
 
 /// A synchronous notification: block until the waiter completes, and answer its status.
 unsafe fn wait_sync(real: &Real, h: isize, path: String, a: &Args, since: Option<u64>) -> NTSTATUS {
-    use windows_sys::Win32::System::Threading::{CreateEventW, INFINITE, WaitForSingleObject};
+    use windows_sys::Win32::System::Threading::{CreateEventW, WaitForSingleObject, INFINITE};
     if holds_loader_lock() {
         return STATUS_POSSIBLE_DEADLOCK;
     }

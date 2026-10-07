@@ -42,7 +42,9 @@ fn reads_match_at_every_offset_and_size() {
     s.mount("", Arc::new(DiskProvider::new(&dir))).unwrap();
     let k = s.kernel();
 
-    let (fh, size, _) = k.open(RootId::DEFAULT, "blob.bin", vfs_protocol::OPEN_READ).unwrap();
+    let (fh, size, _) = k
+        .open(RootId::DEFAULT, "blob.bin", vfs_protocol::OPEN_READ)
+        .unwrap();
     assert_eq!(size as usize, data.len());
 
     for &chunk in &[1usize, 7, 4096, 65_535, 65_536, 65_537, 1 << 20] {
@@ -75,7 +77,9 @@ fn sequential_whole_file_read_is_byte_exact() {
     let s = Session::new();
     s.mount("", Arc::new(DiskProvider::new(&dir))).unwrap();
     let k = s.kernel();
-    let (fh, size, _) = k.open(RootId::DEFAULT, "master.esm", vfs_protocol::OPEN_READ).unwrap();
+    let (fh, size, _) = k
+        .open(RootId::DEFAULT, "master.esm", vfs_protocol::OPEN_READ)
+        .unwrap();
 
     let mut got = Vec::with_capacity(size as usize);
     let mut off = 0u64;
@@ -113,7 +117,9 @@ fn overlay_shadows_base_without_mixing() {
     s.mount("", Arc::new(DiskProvider::new(&over))).unwrap();
     let k = s.kernel();
 
-    let (fh, size, _) = k.open(RootId::DEFAULT, "shared.bin", vfs_protocol::OPEN_READ).unwrap();
+    let (fh, size, _) = k
+        .open(RootId::DEFAULT, "shared.bin", vfs_protocol::OPEN_READ)
+        .unwrap();
     assert_eq!(size as usize, over_data.len(), "overlay size must win");
     let mut buf = vec![0u8; over_data.len()];
     let mut off = 0usize;
@@ -125,7 +131,10 @@ fn overlay_shadows_base_without_mixing() {
         off += n;
     }
     let _ = k.close(fh);
-    assert_eq!(buf, over_data, "overlay content must not be mixed with base");
+    assert_eq!(
+        buf, over_data,
+        "overlay content must not be mixed with base"
+    );
     let _ = std::fs::remove_dir_all(&base);
     let _ = std::fs::remove_dir_all(&over);
 }
@@ -151,10 +160,8 @@ fn real_archive_matches_native_extract() {
             return;
         }
     };
-    let stripped = vfs_compose::SubdirProvider::new(
-        Arc::new(backend),
-        "Skyrim Special Edition".to_string(),
-    );
+    let stripped =
+        vfs_compose::SubdirProvider::new(Arc::new(backend), "Skyrim Special Edition".to_string());
     let s = Session::new();
     s.mount("", Arc::new(stripped)).unwrap();
     let k = s.kernel();
@@ -167,7 +174,9 @@ fn real_archive_matches_native_extract() {
             continue;
         }
         let want = std::fs::read(&disk).expect("read native");
-        let (fh, size, _) = k.open(RootId::DEFAULT, name, vfs_protocol::OPEN_READ).expect("vfs open");
+        let (fh, size, _) = k
+            .open(RootId::DEFAULT, name, vfs_protocol::OPEN_READ)
+            .expect("vfs open");
         assert_eq!(size as usize, want.len(), "{name}: size mismatch");
 
         let mut got = vec![0u8; want.len()];
@@ -183,7 +192,10 @@ fn real_archive_matches_native_extract() {
         assert_eq!(off, want.len(), "{name}: short read");
         if got != want {
             let at = got.iter().zip(&want).position(|(a, b)| a != b).unwrap();
-            panic!("{name}: first byte mismatch at offset {at} (of {})", want.len());
+            panic!(
+                "{name}: first byte mismatch at offset {at} (of {})",
+                want.len()
+            );
         }
         eprintln!("{name}: {} bytes byte-exact", want.len());
     }
@@ -234,7 +246,11 @@ fn ring_client_reads_are_byte_exact() {
 
     let roots = [(vfs_protocol::RootId::DEFAULT, root)];
     let client = vfs_shim::director::FuseClient::connect(
-        &section, &roots, payload_cap, ring_bytes, arena_len,
+        &section,
+        &roots,
+        payload_cap,
+        ring_bytes,
+        arena_len,
     )
     .expect("client connect");
     let opened = client
@@ -265,7 +281,11 @@ fn ring_client_reads_are_byte_exact() {
             .read_fragmented(opened.fh, off as u64, &mut buf)
             .expect("read_fragmented");
         assert_eq!(n, len, "short read at off={off} len={len}");
-        assert_eq!(&buf[..n], &data[off..off + n], "mismatch at off={off} len={len}");
+        assert_eq!(
+            &buf[..n],
+            &data[off..off + n],
+            "mismatch at off={off} len={len}"
+        );
     }
 
     let _ = client.close(opened.fh);
@@ -304,7 +324,11 @@ fn absent_files_report_not_found_not_error() {
 
     // open: must distinguish "not found" from "I/O error". Anything else makes
     // a caller treat a missing optional plugin as a storage failure.
-    match k.open(RootId::DEFAULT, "ccasvsse001-almsivi.esm", vfs_protocol::OPEN_READ) {
+    match k.open(
+        RootId::DEFAULT,
+        "ccasvsse001-almsivi.esm",
+        vfs_protocol::OPEN_READ,
+    ) {
         Ok(_) => panic!("absent file opened"),
         Err(st) => assert_eq!(
             st,
@@ -369,7 +393,9 @@ fn implicit_zip_directories_resolve_like_a_real_install() {
         // These have explicit entries in the archive, so they must resolve.
         eprintln!("  {rel:<18} vfs_dir={via_vfs}");
         if !via_vfs {
-            bad.push(format!("{rel}: archive holds this directory but VFS does not"));
+            bad.push(format!(
+                "{rel}: archive holds this directory but VFS does not"
+            ));
         }
     }
     // A path with no entries at all must not masquerade as a directory.
@@ -383,7 +409,10 @@ fn implicit_zip_directories_resolve_like_a_real_install() {
     // readdir of the game root must list Data at all.
     match k.readdir(RootId::DEFAULT, "") {
         Ok(entries) => {
-            let names: Vec<String> = entries.iter().map(|e| e.name.to_ascii_lowercase()).collect();
+            let names: Vec<String> = entries
+                .iter()
+                .map(|e| e.name.to_ascii_lowercase())
+                .collect();
             eprintln!("  root readdir -> {} entries", names.len());
             if !names.iter().any(|n| n == "data") {
                 bad.push("root readdir does not list Data".into());
@@ -392,7 +421,11 @@ fn implicit_zip_directories_resolve_like_a_real_install() {
         Err(e) => bad.push(format!("root readdir error {e}")),
     }
 
-    assert!(bad.is_empty(), "directory semantics differ from a real install:\n  {}", bad.join("\n  "));
+    assert!(
+        bad.is_empty(),
+        "directory semantics differ from a real install:\n  {}",
+        bad.join("\n  ")
+    );
 }
 
 /// Does enumerating `Data` list the master plugins?
@@ -420,15 +453,19 @@ fn data_listing_includes_the_master_plugins() {
             return;
         }
     };
-    let stripped = vfs_compose::SubdirProvider::new(
-        Arc::new(backend),
-        "Skyrim Special Edition".to_string(),
-    );
+    let stripped =
+        vfs_compose::SubdirProvider::new(Arc::new(backend), "Skyrim Special Edition".to_string());
     let s = Session::new();
     s.mount("", Arc::new(stripped)).unwrap();
 
-    let entries = s.kernel().readdir(RootId::DEFAULT, "Data").expect("readdir Data");
-    let names: Vec<String> = entries.iter().map(|e| e.name.to_ascii_lowercase()).collect();
+    let entries = s
+        .kernel()
+        .readdir(RootId::DEFAULT, "Data")
+        .expect("readdir Data");
+    let names: Vec<String> = entries
+        .iter()
+        .map(|e| e.name.to_ascii_lowercase())
+        .collect();
 
     for master in [
         "skyrim.esm",

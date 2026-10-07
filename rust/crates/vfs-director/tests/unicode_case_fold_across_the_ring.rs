@@ -99,7 +99,10 @@ fn a_zip_entry_under_a_non_ascii_cased_directory_resolves_from_a_shim_folded_vpa
 
     let provider = ZipProvider::open(&zip).unwrap();
     assert!(
-        provider.getattr(VPath::at_default(&vpath)).unwrap().is_some(),
+        provider
+            .getattr(VPath::at_default(&vpath))
+            .unwrap()
+            .is_some(),
         "ZipProvider's fold index missed {vpath} — its `by_fold` map is keyed by \
          a different fold than the shim used"
     );
@@ -193,4 +196,3 @@ fn layered_readdir_collapses_two_case_spellings_of_a_non_ascii_name() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
-

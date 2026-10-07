@@ -873,7 +873,10 @@ mod tests {
         ));
         // Nothing here may ever read as Ready: a half-written file keeps waiting.
         for partial in ["", "rea", "ready ", "boot", "bootstrap", "Ready"] {
-            assert!(matches!(classify_ready(partial), ReadyState::Pending), "{partial:?}");
+            assert!(
+                matches!(classify_ready(partial), ReadyState::Pending),
+                "{partial:?}"
+            );
         }
     }
 }

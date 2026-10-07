@@ -34,6 +34,9 @@ mod tests {
     fn dedupes_identical_sources() {
         // Two vpaths resolving to the same source+size+mtime → same key.
         let s = SourceId::from("root/shared/tex.dds");
-        assert_eq!(compute_cache_key(&s, 2048, 9), compute_cache_key(&s, 2048, 9));
+        assert_eq!(
+            compute_cache_key(&s, 2048, 9),
+            compute_cache_key(&s, 2048, 9)
+        );
     }
 }

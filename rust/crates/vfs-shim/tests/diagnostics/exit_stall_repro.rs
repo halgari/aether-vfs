@@ -257,11 +257,7 @@ fn a_process_carrying_the_shim_still_exits() {
     fakedirector::install(&vroot, fakedirector::Fake::new().with_dir("."), 0);
 
     let cfg = base.join("shim.cfg");
-    std::fs::write(
-        &cfg,
-        vfs_shim::encode_config(vroot.to_str().unwrap()),
-    )
-    .unwrap();
+    std::fs::write(&cfg, vfs_shim::encode_config(vroot.to_str().unwrap())).unwrap();
 
     let mut stalled = Vec::new();
     for i in 0..RUNS {
@@ -271,7 +267,12 @@ fn a_process_carrying_the_shim_still_exits() {
             std::fs::write(dir.join(format!("hammer-{t}.bin")), b"x").unwrap();
         }
         let mut child = std::process::Command::new(&exe)
-            .args(["--exact", "exit_stall_repro::child", "--ignored", "--nocapture"])
+            .args([
+                "--exact",
+                "exit_stall_repro::child",
+                "--ignored",
+                "--nocapture",
+            ])
             .env(CHILD_ENV, "1")
             .env("AETHER_TASK8_ROOT", &dir)
             .env("AETHER_TASK8_DLL", &dll)

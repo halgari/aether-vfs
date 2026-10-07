@@ -19,8 +19,8 @@
 //! assert!(matches!(tree.resolve("data/a.esp"), Resolution::File { .. }));
 //! ```
 
-mod casefold;
 mod cachekey;
+mod casefold;
 pub mod finalname;
 mod model;
 mod path;
@@ -29,16 +29,16 @@ mod tree;
 mod wildcard;
 
 pub use cachekey::compute_cache_key;
+pub use casefold::fold;
 pub use model::{
     BuildError, CacheKey, EntryKind, InputEntry, Layer, LayerId, Resolution, SourceId, TreeEntry,
     TreeStat, VfsError,
 };
-pub use casefold::fold;
 pub use path::{
     normalize_rel, normalize_vpath, rel_components, split_parent, trim_rel, BadComponent, PathError,
 };
 pub use source::{decode, encode_zip_window, Source};
-pub use tree::VfsTree;
 pub use tree::build;
+pub use tree::VfsTree;
 pub use tree::{WalkNode, WalkNodeKind};
 pub use wildcard::wildcard_match;

@@ -21,8 +21,8 @@
 
 mod state;
 
-pub(crate) use state::{sub_logical, CacheState};
 use state::{identity, normalize};
+pub(crate) use state::{sub_logical, CacheState};
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -30,8 +30,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
 
 use vfs_provider::{
-    bad_fh, map_io_err, Access, Capabilities, DirEntry, Handle, Provider, Stat,
-    VPath, KIND_FILE,
+    bad_fh, map_io_err, Access, Capabilities, DirEntry, Handle, Provider, Stat, VPath, KIND_FILE,
 };
 
 use crate::catalog::CacheRec;
@@ -265,12 +264,7 @@ impl CachedSource {
     /// hold, from the source in one span (first missing byte to last), then
     /// stores exactly those and returns every block of the unit. Runs once
     /// per concurrent miss on the unit.
-    fn fetch(
-        &self,
-        f: &CachedFile,
-        inner: Handle,
-        u: u64,
-    ) -> Result<Unit, i32> {
+    fn fetch(&self, f: &CachedFile, inner: Handle, u: u64) -> Result<Unit, i32> {
         let s = &*self.storage;
         let bs = s.block_size();
         let start = u * self.unit * bs;
@@ -286,7 +280,9 @@ impl CachedSource {
             // counter, so `hits`/`misses` ratios stay meaningful regardless
             // of how large a unit is.
             let blocks_in_unit = (buf.len() as u64).div_ceil(bs);
-            s.cache.store_hits.fetch_add(blocks_in_unit, Ordering::Relaxed);
+            s.cache
+                .store_hits
+                .fetch_add(blocks_in_unit, Ordering::Relaxed);
         } else {
             let (lo, hi) = (missing[0].start, missing[missing.len() - 1].end);
             let mut filled = lo;

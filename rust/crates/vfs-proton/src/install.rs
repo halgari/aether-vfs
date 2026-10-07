@@ -121,7 +121,10 @@ impl From<io::Error> for InstallError {
 /// fails for reasons unrelated to the bytes on disk.
 pub fn parse_sha512sum(body: &str) -> Result<String, InstallError> {
     let bad = || InstallError::BadSha512Line(body.chars().take(120).collect::<String>());
-    let line = body.lines().find(|l| !l.trim().is_empty()).ok_or_else(bad)?;
+    let line = body
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .ok_or_else(bad)?;
     let token = line.split_whitespace().next().ok_or_else(bad)?;
     if token.len() != 128 || !token.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(bad());
@@ -603,8 +606,7 @@ mod tests {
 
     #[test]
     fn verify_digest_accepts_the_true_hash_and_rejects_a_wrong_one() {
-        let p = crate::test_tmp::dir()
-            .join(format!("vfs-proton-dg-{}.bin", std::process::id()));
+        let p = crate::test_tmp::dir().join(format!("vfs-proton-dg-{}.bin", std::process::id()));
         std::fs::write(&p, b"abc").unwrap();
         // Known SHA-512 of "abc".
         let want = "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a\
@@ -621,8 +623,7 @@ mod tests {
     fn extract_refuses_an_archive_with_a_traversing_member() {
         // A tar entry named ../escaped would write outside the target directory.
         // Build such an archive and require refusal.
-        let dir = crate::test_tmp::dir()
-            .join(format!("vfs-proton-evil-{}", std::process::id()));
+        let dir = crate::test_tmp::dir().join(format!("vfs-proton-evil-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let archive = dir.join("evil.tar.gz");
@@ -648,17 +649,22 @@ mod tests {
         let into = dir.join("into");
         std::fs::create_dir_all(&into).unwrap();
         assert!(
-            matches!(extract_tar_gz(&archive, &into), Err(InstallError::Traversal(_))),
+            matches!(
+                extract_tar_gz(&archive, &into),
+                Err(InstallError::Traversal(_))
+            ),
             "a traversing member must be refused"
         );
-        assert!(!dir.join("escaped.txt").exists(), "nothing may be written outside");
+        assert!(
+            !dir.join("escaped.txt").exists(),
+            "nothing may be written outside"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn extract_returns_the_single_top_level_directory() {
-        let dir = crate::test_tmp::dir()
-            .join(format!("vfs-proton-ok-{}", std::process::id()));
+        let dir = crate::test_tmp::dir().join(format!("vfs-proton-ok-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let archive = dir.join("ok.tar.gz");
@@ -708,8 +714,7 @@ mod tests {
 
     #[test]
     fn extract_refuses_a_symlink_whose_target_escapes() {
-        let dir = crate::test_tmp::dir()
-            .join(format!("vfs-proton-symesc-{}", std::process::id()));
+        let dir = crate::test_tmp::dir().join(format!("vfs-proton-symesc-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let into = dir.join("into");
@@ -731,8 +736,7 @@ mod tests {
 
     #[test]
     fn extract_refuses_a_hard_link_whose_target_escapes() {
-        let dir = crate::test_tmp::dir()
-            .join(format!("vfs-proton-hardesc-{}", std::process::id()));
+        let dir = crate::test_tmp::dir().join(format!("vfs-proton-hardesc-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let into = dir.join("into");
@@ -756,8 +760,8 @@ mod tests {
         // target (e.g. `files/lib/x/y -> ../../z`). Refusing every `..` would
         // break the real extraction, so containment, not the literal `..`, is
         // the rule.
-        let dir = crate::test_tmp::dir()
-            .join(format!("vfs-proton-syminside-{}", std::process::id()));
+        let dir =
+            crate::test_tmp::dir().join(format!("vfs-proton-syminside-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let archive = dir.join("sym.tar.gz");
@@ -797,8 +801,7 @@ mod tests {
         // tarball can match its publisher digest and still be stock Valve
         // Proton, which PROTONPATH would happily use. install_release runs
         // verify_ge on the extracted tree for exactly this reason.
-        let dir = crate::test_tmp::dir()
-            .join(format!("vfs-proton-stock-{}", std::process::id()));
+        let dir = crate::test_tmp::dir().join(format!("vfs-proton-stock-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let archive = dir.join("stock.tar.gz");
@@ -817,7 +820,10 @@ mod tests {
         std::fs::create_dir_all(&into).unwrap();
         let top = extract_tar_gz(&archive, &into).unwrap();
         assert!(
-            matches!(crate::runtime::verify_ge(&top), Err(crate::runtime::VerifyError::NotGe(_))),
+            matches!(
+                crate::runtime::verify_ge(&top),
+                Err(crate::runtime::VerifyError::NotGe(_))
+            ),
             "a stock Proton tree must not pass the GE gate"
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -829,8 +835,7 @@ mod tests {
         // network by construction: if the short-circuit regressed, the test
         // fails with a connection-refused Http error instead of downloading
         // 533 MB.
-        let base = crate::test_tmp::dir()
-            .join(format!("vfs-proton-idem-{}", std::process::id()));
+        let base = crate::test_tmp::dir().join(format!("vfs-proton-idem-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let root = Root::at(base.clone());
         let dir = root.runtime_dir("GE-Proton11-6");
@@ -845,7 +850,10 @@ mod tests {
         };
         let agent = ureq::Agent::new_with_defaults();
         let got = install_release(&root, &rel, &agent, false).unwrap();
-        assert!(!got.fresh, "an installed, verified runtime must not be re-downloaded");
+        assert!(
+            !got.fresh,
+            "an installed, verified runtime must not be re-downloaded"
+        );
         assert_eq!(got.tag, "GE-Proton11-6");
         assert_eq!(got.dir, dir);
         let _ = std::fs::remove_dir_all(&base);
@@ -853,8 +861,7 @@ mod tests {
 
     #[test]
     fn a_tag_that_would_escape_the_runtimes_directory_is_refused_before_any_io() {
-        let base = crate::test_tmp::dir()
-            .join(format!("vfs-proton-badtag-{}", std::process::id()));
+        let base = crate::test_tmp::dir().join(format!("vfs-proton-badtag-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let root = Root::at(base.clone());
         let rel = Release {
@@ -868,6 +875,9 @@ mod tests {
             install_release(&root, &rel, &agent, false),
             Err(InstallError::Traversal(_))
         ));
-        assert!(!base.exists(), "a refused tag must not create any directory");
+        assert!(
+            !base.exists(),
+            "a refused tag must not create any directory"
+        );
     }
 }

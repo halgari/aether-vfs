@@ -4,18 +4,18 @@ use std::collections::HashSet;
 use std::fs::{File, OpenOptions, TryLockError};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Mutex;
 
 use crate::compress::Codec;
 use crate::config::StoreConfig;
 use crate::error::{Error, Result};
 use crate::index::{
-    Index, META_BLOCK_SIZE, META_CLEAN_SHUTDOWN, META_NEXT_PACK_ID, META_SCHEMA_VERSION, PackInfo,
-    PackState, SCHEMA_VERSION, Tables,
+    Index, PackInfo, PackState, Tables, META_BLOCK_SIZE, META_CLEAN_SHUTDOWN, META_NEXT_PACK_ID,
+    META_SCHEMA_VERSION, SCHEMA_VERSION,
 };
-use crate::manifest::{MISSING, block_count, decode_ids, file_len, len_fits, segment_count};
-use crate::pack::{PackFiles, PackWriter, list_pack_ids, remove_pack_file, sync_dir};
+use crate::manifest::{block_count, decode_ids, file_len, len_fits, segment_count, MISSING};
+use crate::pack::{list_pack_ids, remove_pack_file, sync_dir, PackFiles, PackWriter};
 use crate::tracker::ReadTracker;
 use crate::{crash, files};
 

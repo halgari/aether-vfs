@@ -6,8 +6,8 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use vfs_director::stage::{ImageSource, stage_launch_into};
 use vfs_compose::DiskProvider;
+use vfs_director::stage::{stage_launch_into, ImageSource};
 use vfs_director::Director;
 use vfs_provider::{Provider, RootId};
 

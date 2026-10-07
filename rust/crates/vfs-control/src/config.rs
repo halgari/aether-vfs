@@ -66,13 +66,23 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum SourceSpec {
-    Disk { path: String },
-    Zip { path: String },
-    Http { url: String },
-    Remote { endpoint: String },
+    Disk {
+        path: String,
+    },
+    Zip {
+        path: String,
+    },
+    Http {
+        url: String,
+    },
+    Remote {
+        endpoint: String,
+    },
     /// A named persistent write layer held in the daemon's storage. Only valid
     /// with `write_layer = true`; the daemon (not `vfs_source`) builds it.
-    Layer { name: String },
+    Layer {
+        name: String,
+    },
     /// An in-memory name→content map (`vfs_compose::MemoryProvider`).
     ///
     /// Content is UTF-8 text, not arbitrary bytes: this variant exists so a
@@ -98,7 +108,9 @@ pub enum SourceSpec {
     /// the bindings, and handle it in `add_source`. Nobody has needed
     /// it over the wire — the hosts that want an in-memory provider compose one
     /// in code — so it is stated, not built.
-    Memory { files: BTreeMap<String, String> },
+    Memory {
+        files: BTreeMap<String, String>,
+    },
 }
 
 fn default_mount() -> String {
@@ -270,7 +282,10 @@ impl SessionConfig {
             // copy-up — it is already `Access::ReadWrite`). Say so here,
             // where the author can see which line is wrong, rather than as a
             // status code out of `AddSource`.
-            if !matches!(entry.spec, SourceSpec::Disk { .. } | SourceSpec::Layer { .. }) {
+            if !matches!(
+                entry.spec,
+                SourceSpec::Disk { .. } | SourceSpec::Layer { .. }
+            ) {
                 return Err(format!(
                     "write_layer source for root {} is {:?}; only a disk or layer source may \
                      serve as a write layer",
@@ -387,7 +402,12 @@ args = ["--foo"]
         assert_eq!(cfg.session.name.as_deref(), Some("skyrim-test"));
         assert!(cfg.roots.is_empty(), "no [[root]] table declared");
         assert_eq!(cfg.sources.len(), 2);
-        assert_eq!(cfg.sources[0].spec, SourceSpec::Zip { path: "C:/GameLayers/base.zip".into() });
+        assert_eq!(
+            cfg.sources[0].spec,
+            SourceSpec::Zip {
+                path: "C:/GameLayers/base.zip".into()
+            }
+        );
         assert_eq!(cfg.sources[0].mount, "/"); // defaulted
         assert_eq!(cfg.sources[0].root, 0); // defaulted — the flat-list sugar
         assert_eq!(cfg.sources[1].root, 0);
@@ -403,7 +423,12 @@ args = ["--foo"]
           "source": [ {"type":"disk","path":"C:/x","root":1} ],
           "launch": {"exec":"a.exe","wait":false} }"#;
         let cfg: SessionConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(cfg.sources[0].spec, SourceSpec::Disk { path: "C:/x".into() });
+        assert_eq!(
+            cfg.sources[0].spec,
+            SourceSpec::Disk {
+                path: "C:/x".into()
+            }
+        );
         assert_eq!(cfg.sources[0].root, 1);
         assert!(!cfg.launch.unwrap().wait);
     }
@@ -433,7 +458,14 @@ root = 1
 "#;
         let cfg: SessionConfig = toml::from_str(toml).unwrap();
         assert_eq!(cfg.roots.len(), 2);
-        assert_eq!(cfg.roots[0], RootEntry { id: 0, name: "game".into(), path: "C:/Games/Skyrim".into() });
+        assert_eq!(
+            cfg.roots[0],
+            RootEntry {
+                id: 0,
+                name: "game".into(),
+                path: "C:/Games/Skyrim".into()
+            }
+        );
         assert_eq!(cfg.roots[1].name, "docs");
         assert_eq!(cfg.sources[0].root, 0);
         assert_eq!(cfg.sources[1].root, 1);
@@ -455,9 +487,13 @@ path        = "C:/mods/overwrite"
 write_layer = true
 "#;
         let cfg: SessionConfig = toml::from_str(toml).unwrap();
-        assert!(!cfg.sources[0].write_layer, "an undeclared source is content");
+        assert!(
+            !cfg.sources[0].write_layer,
+            "an undeclared source is content"
+        );
         assert!(cfg.sources[1].write_layer);
-        cfg.validate_roots().expect("one write layer on one root is valid");
+        cfg.validate_roots()
+            .expect("one write layer on one root is valid");
     }
 
     /// Two write layers on one root would mean one of the two declarations
@@ -533,7 +569,9 @@ layer = 20
     fn validate_roots_is_a_no_op_when_no_root_table_is_declared() {
         let cfg = SessionConfig {
             sources: vec![SourceEntry {
-                spec: SourceSpec::Disk { path: "C:/x".into() },
+                spec: SourceSpec::Disk {
+                    path: "C:/x".into(),
+                },
                 mount: "/".into(),
                 root: 7, // would be undeclared if any [[root]] existed
                 write_layer: false,
@@ -547,9 +585,15 @@ layer = 20
     #[test]
     fn validate_roots_rejects_a_source_naming_an_undeclared_root() {
         let cfg = SessionConfig {
-            roots: vec![RootEntry { id: 0, name: "game".into(), path: "C:/g".into() }],
+            roots: vec![RootEntry {
+                id: 0,
+                name: "game".into(),
+                path: "C:/g".into(),
+            }],
             sources: vec![SourceEntry {
-                spec: SourceSpec::Disk { path: "C:/x".into() },
+                spec: SourceSpec::Disk {
+                    path: "C:/x".into(),
+                },
                 mount: "/".into(),
                 root: 1,
                 write_layer: false,
@@ -558,31 +602,55 @@ layer = 20
             ..Default::default()
         };
         let err = cfg.validate_roots().unwrap_err();
-        assert!(err.contains('1'), "error should name the offending root: {err}");
+        assert!(
+            err.contains('1'),
+            "error should name the offending root: {err}"
+        );
     }
 
     #[test]
     fn validate_roots_rejects_duplicate_root_ids() {
         let cfg = SessionConfig {
             roots: vec![
-                RootEntry { id: 0, name: "a".into(), path: "C:/a".into() },
-                RootEntry { id: 0, name: "b".into(), path: "C:/b".into() },
+                RootEntry {
+                    id: 0,
+                    name: "a".into(),
+                    path: "C:/a".into(),
+                },
+                RootEntry {
+                    id: 0,
+                    name: "b".into(),
+                    path: "C:/b".into(),
+                },
             ],
             ..Default::default()
         };
         let err = cfg.validate_roots().unwrap_err();
-        assert!(err.contains('0'), "error should name the duplicated id: {err}");
+        assert!(
+            err.contains('0'),
+            "error should name the duplicated id: {err}"
+        );
     }
 
     #[test]
     fn validate_roots_accepts_a_root_declared_with_no_sources() {
         let cfg = SessionConfig {
             roots: vec![
-                RootEntry { id: 0, name: "game".into(), path: "C:/g".into() },
-                RootEntry { id: 1, name: "docs".into(), path: "C:/d".into() },
+                RootEntry {
+                    id: 0,
+                    name: "game".into(),
+                    path: "C:/g".into(),
+                },
+                RootEntry {
+                    id: 1,
+                    name: "docs".into(),
+                    path: "C:/d".into(),
+                },
             ],
             sources: vec![SourceEntry {
-                spec: SourceSpec::Disk { path: "C:/x".into() },
+                spec: SourceSpec::Disk {
+                    path: "C:/x".into(),
+                },
                 mount: "/".into(),
                 root: 0,
                 write_layer: false,
@@ -590,7 +658,10 @@ layer = 20
             }],
             ..Default::default()
         };
-        assert!(cfg.validate_roots().is_ok(), "root 1 has no source, which is allowed");
+        assert!(
+            cfg.validate_roots().is_ok(),
+            "root 1 has no source, which is allowed"
+        );
     }
 
     #[test]
@@ -635,7 +706,12 @@ write_layer = true
 "#,
         )
         .unwrap();
-        assert_eq!(cfg.sources[0].spec, SourceSpec::Layer { name: "profile-a".into() });
+        assert_eq!(
+            cfg.sources[0].spec,
+            SourceSpec::Layer {
+                name: "profile-a".into()
+            }
+        );
         assert!(cfg.sources[0].write_layer);
         cfg.validate_roots().expect("a layer write layer is valid");
     }
@@ -670,7 +746,10 @@ name = "p"
         )
         .unwrap();
         let err = cfg.validate_roots().unwrap_err();
-        assert!(err.contains("a layer source is a write layer; set write_layer = true"), "{err}");
+        assert!(
+            err.contains("a layer source is a write layer; set write_layer = true"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -690,7 +769,8 @@ write_layer = true
 
     #[test]
     fn an_old_config_with_a_cache_block_still_loads() {
-        let path = vfs_testkit::scratch_root().join(format!("vfs-control-cache-{}.toml", std::process::id()));
+        let path = vfs_testkit::scratch_root()
+            .join(format!("vfs-control-cache-{}.toml", std::process::id()));
         std::fs::write(
             &path,
             "[cache]\nblock_size = \"64K\"\n\n[[source]]\ntype = \"disk\"\npath = \"C:/x\"\n",

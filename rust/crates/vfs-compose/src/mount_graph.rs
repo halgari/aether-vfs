@@ -114,7 +114,11 @@ impl Provider for MountGraph {
         if self.mounts.is_empty() {
             return Capabilities::read_only();
         }
-        let caps: Vec<Capabilities> = self.mounts.iter().map(|m| m.backend.capabilities()).collect();
+        let caps: Vec<Capabilities> = self
+            .mounts
+            .iter()
+            .map(|m| m.backend.capabilities())
+            .collect();
         // Strongest access, weakest everything else — same reasoning as
         // `LayeredProvider`: this graph can serve a write whenever *some*
         // mount can, because every write routes to whichever mount actually
@@ -163,9 +167,7 @@ impl Provider for MountGraph {
             if rel.is_empty() {
                 continue;
             }
-            if let Some(name) =
-                crate::stored_name(m.backend.as_ref(), VPath::new(p.root, &rel))?
-            {
+            if let Some(name) = crate::stored_name(m.backend.as_ref(), VPath::new(p.root, &rel))? {
                 return Ok(Some(name));
             }
         }
@@ -372,9 +374,10 @@ impl Provider for MountGraph {
             ) else {
                 continue;
             };
-            return m
-                .backend
-                .rename(VPath::new(from.root, &from_rel), VPath::new(to.root, &to_rel));
+            return m.backend.rename(
+                VPath::new(from.root, &from_rel),
+                VPath::new(to.root, &to_rel),
+            );
         }
         Err(bad_request())
     }
@@ -397,7 +400,13 @@ mod tests {
     use vfs_provider::{RootId, KIND_FILE, OPEN_READ};
 
     fn graph(mounts: Vec<(&str, Arc<dyn Provider>)>) -> MountGraph {
-        MountGraph::new(mounts.into_iter().map(|(p, b)| (p.to_string(), b)).collect()).unwrap()
+        MountGraph::new(
+            mounts
+                .into_iter()
+                .map(|(p, b)| (p.to_string(), b))
+                .collect(),
+        )
+        .unwrap()
     }
 
     /// One name, without a listing: the spelling the merged listing shows.
@@ -423,10 +432,7 @@ mod tests {
             ),
             (
                 "Data/Mods/Deep",
-                Arc::new(crate::InlineProvider::from_files([(
-                    "f",
-                    b"x".as_slice(),
-                )])),
+                Arc::new(crate::InlineProvider::from_files([("f", b"x".as_slice())])),
             ),
         ]);
         let name = |p: &str| g.stored_name(VPath::at_default(p)).unwrap();
@@ -469,7 +475,9 @@ mod tests {
 
         let entries = g.readdir(VPath::at_default("data")).unwrap();
         assert!(
-            entries.iter().any(|e| e.name == "somemod" && e.stat.kind == KIND_DIR),
+            entries
+                .iter()
+                .any(|e| e.name == "somemod" && e.stat.kind == KIND_DIR),
             "expected a synthetic 'somemod' dir entry, got {entries:?}"
         );
     }
@@ -510,7 +518,11 @@ mod tests {
 
         let entries = g.readdir(VPath::at_default("data")).unwrap();
         let matches: Vec<_> = entries.iter().filter(|e| e.name == "somemod").collect();
-        assert_eq!(matches.len(), 1, "expected exactly one 'somemod' entry, got {entries:?}");
+        assert_eq!(
+            matches.len(),
+            1,
+            "expected exactly one 'somemod' entry, got {entries:?}"
+        );
         assert_eq!(
             matches[0].stat.kind, KIND_FILE,
             "the real provider-supplied file entry must survive untouched, \
@@ -531,7 +543,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         // Deliberately do not create `dir` — the mount's own root must not
         // resolve.
-        let g = graph(vec![("data/ghostmod", Arc::new(crate::DiskProvider::new(&dir)))]);
+        let g = graph(vec![(
+            "data/ghostmod",
+            Arc::new(crate::DiskProvider::new(&dir)),
+        )]);
 
         let entries = g.readdir(VPath::at_default("data")).unwrap_or_default();
         assert!(
@@ -565,7 +580,10 @@ mod tests {
             .iter()
             .find(|e| e.name == "singlefile")
             .unwrap_or_else(|| panic!("expected a 'singlefile' entry, got {entries:?}"));
-        assert_eq!(e.stat.kind, KIND_FILE, "expected the file-shaped mount to surface as KIND_FILE");
+        assert_eq!(
+            e.stat.kind, KIND_FILE,
+            "expected the file-shaped mount to surface as KIND_FILE"
+        );
         assert_eq!(e.stat.size, 5);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -577,7 +595,10 @@ mod tests {
         // for itself.
         let g = graph(vec![(
             "data",
-            Arc::new(crate::InlineProvider::from_files([("a.txt", b"x".as_slice())])),
+            Arc::new(crate::InlineProvider::from_files([(
+                "a.txt",
+                b"x".as_slice(),
+            )])),
         )]);
 
         let entries = g.readdir(VPath::at_default("data")).unwrap();
@@ -609,12 +630,19 @@ mod tests {
         // lowercased vpath the shim always produces.
         let g = graph(vec![(
             "Data/SomeMod",
-            Arc::new(crate::InlineProvider::from_files([("f.txt", b"x".as_slice())])),
+            Arc::new(crate::InlineProvider::from_files([(
+                "f.txt",
+                b"x".as_slice(),
+            )])),
         )]);
 
-        assert!(g.getattr(VPath::at_default("data/somemod/f.txt")).unwrap().is_some());
-        let (h, size, is_dir_flag) =
-            g.open(VPath::at_default("data/somemod/f.txt"), OPEN_READ).unwrap();
+        assert!(g
+            .getattr(VPath::at_default("data/somemod/f.txt"))
+            .unwrap()
+            .is_some());
+        let (h, size, is_dir_flag) = g
+            .open(VPath::at_default("data/somemod/f.txt"), OPEN_READ)
+            .unwrap();
         assert!(!is_dir_flag);
         assert_eq!(size, 1);
         g.close(h).unwrap();
@@ -637,7 +665,8 @@ mod tests {
     }
 
     #[test]
-    fn open_for_write_against_a_read_only_mount_is_recorded_even_though_a_sibling_mount_is_writable() {
+    fn open_for_write_against_a_read_only_mount_is_recorded_even_though_a_sibling_mount_is_writable(
+    ) {
         // Task 3 review, Finding 1: `capabilities()` reports the *strongest*
         // child access, so a graph with any writable source reports
         // `ReadWrite` in aggregate — `Director`'s own coarse pre-check never
@@ -649,7 +678,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let g = graph(vec![
-            ("rw", Arc::new(crate::DiskProvider::new(&dir)) as Arc<dyn Provider>),
+            (
+                "rw",
+                Arc::new(crate::DiskProvider::new(&dir)) as Arc<dyn Provider>,
+            ),
             (
                 "ro",
                 Arc::new(crate::InlineProvider::from_files([("f", b"x".as_slice())])),
@@ -666,7 +698,9 @@ mod tests {
         assert_eq!(result, Err(vfs_provider::ST_READ_ONLY));
         let rejected = crate::rejected_writes();
         assert!(
-            rejected.iter().any(|(path, count)| path == "ro/f" && *count >= 1),
+            rejected
+                .iter()
+                .any(|(path, count)| path == "ro/f" && *count >= 1),
             "a write refused by one mount in a graph containing a writable \
              sibling must still be discoverable, got {rejected:?}"
         );
@@ -693,7 +727,10 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("only-on-disk.txt"), b"DISK").unwrap();
         let g = graph(vec![
-            ("", Arc::new(crate::DiskProvider::new(&dir)) as Arc<dyn Provider>),
+            (
+                "",
+                Arc::new(crate::DiskProvider::new(&dir)) as Arc<dyn Provider>,
+            ),
             (
                 "",
                 Arc::new(crate::InlineProvider::from_files([(
@@ -709,7 +746,10 @@ mod tests {
         // this test, so a plain absence check needs no reset — and cannot
         // wipe another test's entry out from under it.
         let (h, size, _) = g
-            .open(VPath::at_default("only-on-disk.txt"), vfs_provider::OPEN_WRITE)
+            .open(
+                VPath::at_default("only-on-disk.txt"),
+                vfs_provider::OPEN_WRITE,
+            )
             .expect(
                 "a read-only mount that does not hold this path must not refuse the write on \
                  behalf of the writable mount that does",
@@ -728,7 +768,10 @@ mod tests {
         // The control: the read-only mount still refuses a write to a path it
         // *does* hold, rather than falling past it onto the writable disk
         // mount and silently creating a divergent copy there.
-        let err = g.open(VPath::at_default("only-in-archive.txt"), vfs_provider::OPEN_WRITE);
+        let err = g.open(
+            VPath::at_default("only-in-archive.txt"),
+            vfs_provider::OPEN_WRITE,
+        );
         assert_eq!(
             err,
             Err(vfs_provider::ST_READ_ONLY),

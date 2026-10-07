@@ -9,7 +9,11 @@ pub use vfs_protocol::shimcfg::StaticImport;
 /// (including a config from another build: the shim's bootstrap refuses that by name).
 pub(crate) fn load_static_imports_from_path(path: &str) -> Option<Vec<StaticImport>> {
     let bytes = std::fs::read(path).ok()?;
-    Some(vfs_protocol::shimcfg::decode_config(&bytes).ok()?.static_imports)
+    Some(
+        vfs_protocol::shimcfg::decode_config(&bytes)
+            .ok()?
+            .static_imports,
+    )
 }
 
 /// Convert static-import rows into early-payload redirects (stat backings, NT paths).

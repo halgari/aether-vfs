@@ -3,7 +3,7 @@
 use std::fs::File;
 use std::io::{self, BufReader, Read};
 
-use crate::codec::{HEADER_LEN, RecordHeader, checksum};
+use crate::codec::{checksum, RecordHeader, HEADER_LEN};
 use crate::config::CompactOptions;
 use crate::crash;
 use crate::error::{Error, Result};
@@ -276,10 +276,10 @@ impl BlockStore {
 
 #[cfg(test)]
 mod tests {
-    use crate::BlockStore;
     use crate::index::{PackInfo, PackState};
     use crate::pack::pack_path;
     use crate::store::tests::test_config;
+    use crate::BlockStore;
     use std::sync::atomic::Ordering;
 
     #[test]

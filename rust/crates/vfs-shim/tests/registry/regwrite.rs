@@ -18,12 +18,12 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use fakedirector::Fake;
 use reg::{
-    Checker, ObjectAttributes, Paths, UnicodeString, close, hex, object_name, open_abs, reg_create,
-    wide, with_us,
+    close, hex, object_name, open_abs, reg_create, wide, with_us, Checker, ObjectAttributes, Paths,
+    UnicodeString,
 };
 use vfs_registry::Lookup;
 use vfs_shim::{is_synthetic_key_handle, regclient, registry_handle_path};
-use windows_sys::Win32::System::Registry::{HKEY, RegCloseKey, RegSetValueExW};
+use windows_sys::Win32::System::Registry::{RegCloseKey, RegSetValueExW, HKEY};
 
 static LOCK: Mutex<()> = Mutex::new(());
 

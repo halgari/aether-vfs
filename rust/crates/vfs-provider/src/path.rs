@@ -32,7 +32,10 @@ impl<'a> VPath<'a> {
 
     /// Address under [`RootId::DEFAULT`].
     pub fn at_default(rel: &'a str) -> Self {
-        VPath { root: RootId::DEFAULT, rel }
+        VPath {
+            root: RootId::DEFAULT,
+            rel,
+        }
     }
 }
 
@@ -42,7 +45,10 @@ mod tests {
 
     #[test]
     fn the_same_relative_path_under_two_roots_differs() {
-        assert_ne!(VPath::new(RootId(0), "foo/bar"), VPath::new(RootId(1), "foo/bar"));
+        assert_ne!(
+            VPath::new(RootId(0), "foo/bar"),
+            VPath::new(RootId(1), "foo/bar")
+        );
     }
 
     #[test]

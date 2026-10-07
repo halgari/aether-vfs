@@ -16,7 +16,11 @@ fn an_immediate_timeout_kills_the_parked_process() {
     let _ = std::fs::remove_dir_all(&base);
     std::fs::create_dir_all(&root).unwrap();
     let config_path = base.join("shim.cfg");
-    std::fs::write(&config_path, vfs_shim::encode_config(root.to_str().unwrap())).unwrap();
+    std::fs::write(
+        &config_path,
+        vfs_shim::encode_config(root.to_str().unwrap()),
+    )
+    .unwrap();
     let output_path = base.join("probe-out.bin");
     let (dll, payload) = common::locate_shim_and_payload();
 
@@ -36,7 +40,10 @@ fn an_immediate_timeout_kills_the_parked_process() {
         detach: false,
     });
 
-    assert!(matches!(result, Err(InjectError::Timeout)), "got {result:?}");
+    assert!(
+        matches!(result, Err(InjectError::Timeout)),
+        "got {result:?}"
+    );
     for _ in 0..40 {
         if output_path.exists() {
             break;

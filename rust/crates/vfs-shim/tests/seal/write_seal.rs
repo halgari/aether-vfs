@@ -22,7 +22,7 @@
 use crate::fakedirector;
 
 use std::io::Write;
-use vfs_shim::{OpenOutcome, install, outcome_count};
+use vfs_shim::{install, outcome_count, OpenOutcome};
 
 /// `ERROR_FILE_NOT_FOUND` — `STATUS_OBJECT_NAME_NOT_FOUND`.
 const ERROR_FILE_NOT_FOUND: i32 = 2;

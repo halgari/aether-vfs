@@ -43,8 +43,8 @@ mod tests {
 
     /// The names in `bin/build-windows`'s `ARTIFACTS=( … )` array.
     fn script_list() -> Vec<String> {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../bin/build-windows");
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../bin/build-windows");
         let text = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
         text.lines()
@@ -57,7 +57,11 @@ mod tests {
 
     #[test]
     fn the_build_script_builds_exactly_the_artifacts_listed_here() {
-        assert_eq!(script_list(), WINDOWS_ARTIFACTS, "bin/build-windows ARTIFACTS");
+        assert_eq!(
+            script_list(),
+            WINDOWS_ARTIFACTS,
+            "bin/build-windows ARTIFACTS"
+        );
     }
 
     #[test]

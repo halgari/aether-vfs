@@ -191,7 +191,7 @@ fn a_refused_delete_on_close_is_counted_and_the_handle_still_closes() {
 #[test]
 fn a_set_info_delete_clears_delete_on_close_so_the_close_does_not_delete_again() {
     use windows_sys::Win32::Storage::FileSystem::{
-        FILE_DISPOSITION_INFO, FileDispositionInfo, SetFileInformationByHandle,
+        FileDispositionInfo, SetFileInformationByHandle, FILE_DISPOSITION_INFO,
     };
     isolate!();
     let base = std::env::temp_dir().join(format!("vfs-doc-once-{}", std::process::id()));

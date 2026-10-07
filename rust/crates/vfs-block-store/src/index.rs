@@ -11,7 +11,7 @@ use redb::{
     ReadableTable, Table, TableDefinition, Value,
 };
 
-use crate::codec::{HEADER_LEN, Hash128};
+use crate::codec::{Hash128, HEADER_LEN};
 use crate::error::{Error, Result};
 
 /// Manifest segments, keyed by (file id, segment number).

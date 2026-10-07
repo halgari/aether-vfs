@@ -26,13 +26,13 @@ mod tracker;
 mod verify;
 mod write;
 
-pub use class::{WriteClass, with_write_class};
+pub use class::{with_write_class, WriteClass};
 pub use compact::CompactReport;
 pub use config::{BulkCompression, CompactOptions, StoreConfig};
 pub use error::{Error, Result};
-pub use index::IndexStats;
 #[cfg(feature = "gpu-zstd")]
-pub use gpu::{GPU_MAX_BLOCK, GpuConfig, GpuLevel, GpuStats};
+pub use gpu::{GpuConfig, GpuLevel, GpuStats, GPU_MAX_BLOCK};
+pub use index::IndexStats;
 pub use stats::{ClassWriteStats, IndexSize, PackStats, Stats, Usage, WriteStats};
 pub use store::{BlockStore, FileInfo, ReadResult};
 pub use verify::VerifyReport;

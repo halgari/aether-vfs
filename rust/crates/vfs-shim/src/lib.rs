@@ -11,8 +11,8 @@ mod detour_table;
 mod bootstrap;
 /// Lock-free record of the hook currently executing, in a shared file.
 pub mod breadcrumb;
-pub mod director;
 mod child;
+pub mod director;
 mod handle_tags;
 mod hook;
 mod hookstats;
@@ -31,12 +31,12 @@ mod synth_file;
 mod synth_section;
 mod tramp;
 
-pub use child::{finish_ready_handshake, signal_bootstrap_failed};
 pub use bootstrap::{
-    BootstrapError, bootstrap_failed_content, bootstrap_from_config_path,
-    bootstrap_from_config_path_with_payload, load_static_imports_from_config_path,
-    static_imports_to_preinit, sync_bootstrap,
+    bootstrap_failed_content, bootstrap_from_config_path, bootstrap_from_config_path_with_payload,
+    load_static_imports_from_config_path, static_imports_to_preinit, sync_bootstrap,
+    BootstrapError,
 };
+pub use child::{finish_ready_handshake, signal_bootstrap_failed};
 // The encoders (and `StaticImport`) live in `vfs_protocol::shimcfg` — pure
 // byte assembly with no Windows dependency — so a native Linux Director can
 // build a shim config too. Re-exported here so every existing caller
@@ -55,23 +55,20 @@ pub use hook::as_shim_io_for_tests;
 /// `no_extern_hook_bypasses_the_panic_containment_macro`.
 pub use hook::contain_panic;
 pub use hook::{
-    HookGuard, InstallError, install, install_late, registry_detours_installed, skipped_detours,
-    tracked_handle_count,
+    install, install_late, registry_detours_installed, skipped_detours, tracked_handle_count,
+    HookGuard, InstallError,
 };
 /// The under-root open classifier's counters. Exported so a gate's own tests
 /// can assert that a bypass class it closed reads **zero** — see
 /// [`hookstats::outcome_count`]. A class nobody asserts on is a class that can
 /// quietly start (or stop) counting again.
 pub use hookstats::{
-    OpenOutcome, RegNotify, child_inject_refused_count, child_inject_refused_total,
-    delete_on_close_refused_count, hook_panic_count, hook_panics_total,
-    link_refused_count, outcome_count, reg_notify_count, reg_overlay_disabled_by,
-    reg_read_fallback_count, reg_unresolved_count, reg_write_refused_count,
-    unrouted_director_opens,
+    child_inject_refused_count, child_inject_refused_total, delete_on_close_refused_count,
+    hook_panic_count, hook_panics_total, link_refused_count, outcome_count, reg_notify_count,
+    reg_overlay_disabled_by, reg_read_fallback_count, reg_unresolved_count,
+    reg_write_refused_count, unrouted_director_opens, OpenOutcome, RegNotify,
 };
-pub use vfs_protocol::shimcfg::{
-    StaticImport, encode_config, encode_config_full,
-};
+pub use vfs_protocol::shimcfg::{encode_config, encode_config_full, StaticImport};
 
 /// The canonical path the registry hooks recorded for a key handle (synthetic or
 /// pass-through), if they track it. For tests and diagnostics.

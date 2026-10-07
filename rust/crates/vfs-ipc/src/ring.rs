@@ -67,7 +67,11 @@ pub fn init(seg: &SharedSeg, slot_count: u32, payload_cap: u32) -> Result<Geom, 
     seg.write_u64(RH_REQ_SEQ, 0);
     seg.write_u32(RH_SUBMIT_SEQ, 0);
     seg.write_u64(RH_REG_GEN, 0);
-    let geom = Geom { slot_count, slot_stride: stride as u32, payload_cap };
+    let geom = Geom {
+        slot_count,
+        slot_stride: stride as u32,
+        payload_cap,
+    };
     for s in 0..slot_count {
         seg.write_u32(geom.slot_off(s) + SH_STATE, ST_FREE);
     }
@@ -92,7 +96,11 @@ pub fn open(seg: &SharedSeg) -> Result<Geom, IpcError> {
     if total > seg.len() as u64 {
         return Err(IpcError::Layout);
     }
-    Ok(Geom { slot_count, slot_stride, payload_cap })
+    Ok(Geom {
+        slot_count,
+        slot_stride,
+        payload_cap,
+    })
 }
 
 /// Server: say how many threads serve this ring. Call once, after [`init`]
@@ -200,7 +208,12 @@ pub fn server_take_from(seg: &SharedSeg, geom: &Geom, start: u32) -> Option<u32>
         let s = (start.wrapping_add(i)) % n;
         if let Some(st) = state(seg, geom, s) {
             if st
-                .compare_exchange(ST_SUBMITTED, ST_PROCESSING, Ordering::Acquire, Ordering::Relaxed)
+                .compare_exchange(
+                    ST_SUBMITTED,
+                    ST_PROCESSING,
+                    Ordering::Acquire,
+                    Ordering::Relaxed,
+                )
                 .is_ok()
             {
                 return Some(s);
@@ -211,11 +224,7 @@ pub fn server_take_from(seg: &SharedSeg, geom: &Geom, start: u32) -> Option<u32>
 }
 
 /// Read (opcode, flags, req_id, payload) from a PROCESSING slot.
-pub fn read_request(
-    seg: &SharedSeg,
-    geom: &Geom,
-    slot: u32,
-) -> Option<(u32, u32, u64, Vec<u8>)> {
+pub fn read_request(seg: &SharedSeg, geom: &Geom, slot: u32) -> Option<(u32, u32, u64, Vec<u8>)> {
     let base = geom.slot_off(slot);
     let opcode = seg.read_u32(base + SH_OPCODE)?;
     let flags = seg.read_u32(base + SH_FLAGS)?;

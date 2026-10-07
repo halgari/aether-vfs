@@ -188,7 +188,14 @@ mod tests {
         assert_eq!(MAGIC, 0x5646_4950);
         assert_eq!(VERSION, 4);
         assert_eq!(
-            [ST_FREE, ST_CLAIMED, ST_SUBMITTED, ST_PROCESSING, ST_COMPLETED, ST_ABANDONED],
+            [
+                ST_FREE,
+                ST_CLAIMED,
+                ST_SUBMITTED,
+                ST_PROCESSING,
+                ST_COMPLETED,
+                ST_ABANDONED
+            ],
             [0, 1, 2, 3, 4, 5]
         );
         assert_eq!(
@@ -207,7 +214,15 @@ mod tests {
         );
         assert_eq!(RING_HEADER_SIZE, 48);
         assert_eq!(
-            [SH_STATE, SH_OPCODE, SH_FLAGS, SH_PAYLOAD_LEN, SH_STATUS, SH_ACK, SH_REQ_ID],
+            [
+                SH_STATE,
+                SH_OPCODE,
+                SH_FLAGS,
+                SH_PAYLOAD_LEN,
+                SH_STATUS,
+                SH_ACK,
+                SH_REQ_ID
+            ],
             [0, 4, 8, 12, 16, 20, 24]
         );
         assert_eq!(SLOT_HEADER_SIZE, 32);

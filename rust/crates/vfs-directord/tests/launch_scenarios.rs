@@ -220,7 +220,9 @@ async fn scenario_toml_disk_source_fixture_writepath() {
     assert!(!session.id.is_empty());
     assert!(!session.root.is_empty());
 
-    use vfs_control::pb::{source_spec, AddSourceReq, DiskSource, LaunchReq, SourceSpec as PbSource};
+    use vfs_control::pb::{
+        source_spec, AddSourceReq, DiskSource, LaunchReq, SourceSpec as PbSource,
+    };
 
     client
         .add_source(AddSourceReq {
@@ -295,8 +297,7 @@ async fn scenario_toml_disk_source_fixture_writepath() {
     // reach the director and get a legitimate negative answer back — the
     // shim correctly records each as `Routed` regardless of that answer
     // (see `support`'s module doc for the verification behind this).
-    let opens_ok_delta =
-        (opens_ok_after - opens_ok_before) + (opens_err_after - opens_err_before);
+    let opens_ok_delta = (opens_ok_after - opens_ok_before) + (opens_err_after - opens_err_before);
 
     // The decisive assertions, on the filesystem, not on a director query:
     // bytes must be in the DiskProvider's backing directory, and NOTHING may
@@ -487,7 +488,9 @@ async fn scenario_toml_two_disk_sources_fixture_writepath() {
     assert!(!session.id.is_empty());
     assert!(!session.root.is_empty());
 
-    use vfs_control::pb::{source_spec, AddSourceReq, DiskSource, LaunchReq, SourceSpec as PbSource};
+    use vfs_control::pb::{
+        source_spec, AddSourceReq, DiskSource, LaunchReq, SourceSpec as PbSource,
+    };
 
     client
         .add_source(AddSourceReq {
@@ -566,8 +569,7 @@ async fn scenario_toml_two_disk_sources_fixture_writepath() {
     // arrived-open count, `opens_ok + opens_err`, not `opens_ok` alone —
     // this fixture's own error probes are real, correctly-`Routed` opens
     // that the director legitimately answered with an error.
-    let opens_ok_delta =
-        (opens_ok_after - opens_ok_before) + (opens_err_after - opens_err_before);
+    let opens_ok_delta = (opens_ok_after - opens_ok_before) + (opens_err_after - opens_err_before);
 
     // The decisive assertions: bytes in the TOP source's backing directory
     // (the layer writes route to), nothing in the bottom source, and nothing
@@ -761,8 +763,7 @@ async fn scenario_layered_sources_with_write_layer_copy_up_in_place() {
         .into_inner();
 
     use vfs_control::pb::{
-        source_spec, AddSourceReq, DiskSource, LaunchReq, SourceSpec as PbSource,
-        ZipSource,
+        source_spec, AddSourceReq, DiskSource, LaunchReq, SourceSpec as PbSource, ZipSource,
     };
 
     client
@@ -862,8 +863,7 @@ async fn scenario_layered_sources_with_write_layer_copy_up_in_place() {
     );
 
     let (opens_ok_after, opens_err_after) = vfs_director::io_stats::open_totals();
-    let opens_ok_delta =
-        (opens_ok_after - opens_ok_before) + (opens_err_after - opens_err_before);
+    let opens_ok_delta = (opens_ok_after - opens_ok_before) + (opens_err_after - opens_err_before);
 
     // The copied-up file, on disk, in the directory the wire named — with the
     // edit applied and every other byte of the archive's content preserved.
@@ -964,7 +964,10 @@ async fn scenario_layered_sources_with_write_layer_copy_up_in_place() {
         recon.write_fallback(),
         std::fs::read_to_string(&stats_log)
     );
-    assert!(recon.outcomes_section_found, "no outcomes section: {recon:?}");
+    assert!(
+        recon.outcomes_section_found,
+        "no outcomes section: {recon:?}"
+    );
 
     client
         .teardown_session(vfs_control::pb::TeardownReq {
@@ -1014,7 +1017,11 @@ async fn rooted_launch_by_name_and_absolute_path_stages_a_graph_only_image() {
     // Root 0's location: a fresh path that does not exist yet (the first
     // launch creates it), so fixture.exe is graph-only relative to it.
     let base = vfs_testkit::tempdir().expect("base tempdir");
-    let loc = base.path().join("Game").to_string_lossy().replace('/', "\\");
+    let loc = base
+        .path()
+        .join("Game")
+        .to_string_lossy()
+        .replace('/', "\\");
     assert!(!Path::new(&loc).exists());
 
     let cfg = SessionConfig {
@@ -1073,7 +1080,11 @@ async fn rooted_launch_by_name_and_absolute_path_stages_a_graph_only_image() {
     .await
     .unwrap_or_else(|_| panic!("{}", stall(r"{Game}\fixture.exe")))
     .expect("launch by root name");
-    assert_eq!(by_name, Some(0), "{{Game}}\\fixture.exe should stage and exit 0");
+    assert_eq!(
+        by_name,
+        Some(0),
+        "{{Game}}\\fixture.exe should stage and exit 0"
+    );
 
     let abs = format!(r"{loc}\fixture.exe");
     let by_path = tokio::time::timeout(

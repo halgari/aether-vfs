@@ -44,25 +44,25 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use vfs_registry::layout::{
-    self, KEY_VALUE_ENTRY_SIZE, KeyInfoClass, ValueEntry, ValueInfoClass, Written,
+    self, KeyInfoClass, ValueEntry, ValueInfoClass, Written, KEY_VALUE_ENTRY_SIZE,
 };
 use vfs_registry::path::{self, fold};
-use vfs_registry::{Child, KeyView, Lookup, Node, Value, merge};
+use vfs_registry::{merge, Child, KeyView, Lookup, Node, Value};
 use windows_sys::Win32::Foundation::{HANDLE, NTSTATUS};
 
 use crate::ntdef::{
-    KEY_BASIC_INFORMATION, KEY_FULL_INFORMATION, KEY_NAME_INFORMATION, KEY_NODE_INFORMATION,
-    KEY_VALUE_BASIC_INFORMATION, KEY_VALUE_PARTIAL_INFORMATION, STATUS_ACCESS_DENIED,
-    STATUS_ACCESS_VIOLATION, STATUS_BUFFER_OVERFLOW, STATUS_BUFFER_TOO_SMALL,
+    UnicodeString, KEY_BASIC_INFORMATION, KEY_FULL_INFORMATION, KEY_NAME_INFORMATION,
+    KEY_NODE_INFORMATION, KEY_VALUE_BASIC_INFORMATION, KEY_VALUE_PARTIAL_INFORMATION,
+    STATUS_ACCESS_DENIED, STATUS_ACCESS_VIOLATION, STATUS_BUFFER_OVERFLOW, STATUS_BUFFER_TOO_SMALL,
     STATUS_INVALID_HANDLE, STATUS_INVALID_PARAMETER, STATUS_KEY_DELETED, STATUS_NO_MORE_ENTRIES,
     STATUS_OBJECT_NAME_NOT_FOUND, STATUS_OBJECT_PATH_NOT_FOUND, STATUS_SUCCESS,
-    STATUS_UNSUCCESSFUL, UnicodeString,
+    STATUS_UNSUCCESSFUL,
 };
 use crate::regclient;
 use crate::regkeys::{
-    self, KEY_ENUMERATE_SUB_KEYS, KEY_QUERY_VALUE, KeyHandle, KeyRef, Mode, Real,
+    self, KeyHandle, KeyRef, Mode, Real, KEY_ENUMERATE_SUB_KEYS, KEY_QUERY_VALUE,
 };
-use crate::sync::{CloseLock, lock_for_close};
+use crate::sync::{lock_for_close, CloseLock};
 
 /// The rights a read of a real key needs on the private handle that replaces one lacking them.
 const READS: u32 = KEY_QUERY_VALUE | KEY_ENUMERATE_SUB_KEYS;

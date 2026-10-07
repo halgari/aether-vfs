@@ -250,9 +250,10 @@ mod tests {
     /// entry itself (size, time) is still the top's.
     #[test]
     fn a_shared_name_keeps_the_bottoms_spelling_and_the_tops_entry() {
-        let bottom = Arc::new(InlineProvider::from_files([
-            ("Data/Skyrim.esm", b"BASE".as_slice()),
-        ]));
+        let bottom = Arc::new(InlineProvider::from_files([(
+            "Data/Skyrim.esm",
+            b"BASE".as_slice(),
+        )]));
         let top = Arc::new(InlineProvider::from_files([
             ("data/skyrim.esm", b"TOP-LONGER".as_slice()),
             ("data/new.esp", b"N".as_slice()),
@@ -264,26 +265,41 @@ mod tests {
         assert_eq!(names, ["Data"]);
 
         let data = layered.readdir(VPath::at_default("Data")).unwrap();
-        let by_name: Vec<(&str, u64)> = data.iter().map(|e| (e.name.as_str(), e.stat.size)).collect();
+        let by_name: Vec<(&str, u64)> = data
+            .iter()
+            .map(|e| (e.name.as_str(), e.stat.size))
+            .collect();
         assert_eq!(by_name, [("new.esp", 1), ("Skyrim.esm", 10)]);
 
         // `stored_name` follows the listing, for each spelling of the query.
         for q in ["data", "DATA", "Data"] {
             assert_eq!(
-                layered.stored_name(VPath::at_default(q)).unwrap().as_deref(),
+                layered
+                    .stored_name(VPath::at_default(q))
+                    .unwrap()
+                    .as_deref(),
                 Some("Data")
             );
         }
         assert_eq!(
-            layered.stored_name(VPath::at_default("DATA/SKYRIM.ESM")).unwrap().as_deref(),
+            layered
+                .stored_name(VPath::at_default("DATA/SKYRIM.ESM"))
+                .unwrap()
+                .as_deref(),
             Some("Skyrim.esm")
         );
         // A name only the top has is spelled as the top spells it.
         assert_eq!(
-            layered.stored_name(VPath::at_default("data/NEW.ESP")).unwrap().as_deref(),
+            layered
+                .stored_name(VPath::at_default("data/NEW.ESP"))
+                .unwrap()
+                .as_deref(),
             Some("new.esp")
         );
-        assert_eq!(layered.stored_name(VPath::at_default("data/nope")).unwrap(), None);
+        assert_eq!(
+            layered.stored_name(VPath::at_default("data/nope")).unwrap(),
+            None
+        );
         assert_eq!(layered.stored_name(VPath::at_default("")).unwrap(), None);
     }
 
@@ -359,9 +375,10 @@ mod tests {
     #[test]
     fn a_layered_stack_with_only_bottom_writable_passes_conformance() {
         use vfs_provider::RwMemFixture;
-        let top: Arc<dyn Provider> = Arc::new(InlineProvider::from_files(
-            std::iter::empty::<(&str, &[u8])>(),
-        ));
+        let top: Arc<dyn Provider> = Arc::new(InlineProvider::from_files(std::iter::empty::<(
+            &str,
+            &[u8],
+        )>()));
         let bottom: Arc<dyn Provider> = Arc::new(RwMemFixture::new());
         let layered: Arc<dyn Provider> = Arc::new(LayeredProvider::new(top, bottom));
         vfs_provider::assert_conformance(layered);

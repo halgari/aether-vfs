@@ -56,7 +56,9 @@ struct KernelSource<'a>(&'a Session);
 impl vfs_director::stage::ImageSource for KernelSource<'_> {
     fn read(&self, vpath: &str) -> Option<Vec<u8>> {
         let k = self.0.kernel();
-        let (fh, size, _) = k.open(RootId::DEFAULT, vpath, vfs_protocol::OPEN_READ).ok()?;
+        let (fh, size, _) = k
+            .open(RootId::DEFAULT, vpath, vfs_protocol::OPEN_READ)
+            .ok()?;
         let mut buf = vec![0u8; size as usize];
         let mut off = 0usize;
         while off < buf.len() {
@@ -302,7 +304,10 @@ component match sees exactly what the game's own raw NT open spells)",
         profiles_target.display()
     );
     if resolved_target_matches(&profiles_target, &profiles) {
-        eprintln!("  root 1 resolution OK: matches the configured profiles dir ({})", profiles.display());
+        eprintln!(
+            "  root 1 resolution OK: matches the configured profiles dir ({})",
+            profiles.display()
+        );
     } else {
         eprintln!(
             "  WARNING: root 1's resolved target does not match the configured profiles dir \
@@ -478,7 +483,10 @@ component match sees exactly what the game's own raw NT open spells)",
 
     timeline.mark("staged");
     eprintln!("  IPC serving; launching the staged image…");
-    eprintln!("  writes under the game root land in {}", overrides.display());
+    eprintln!(
+        "  writes under the game root land in {}",
+        overrides.display()
+    );
     eprintln!("  saves → {}", saves.display());
     eprintln!("  profiles/inis → {}", profiles.display());
 
@@ -519,7 +527,10 @@ component match sees exactly what the game's own raw NT open spells)",
         eprint!("{}", bench::report(&timeline, &totals, &label));
         match size {
             Some((w, h)) => eprintln!("  window: {w}x{h} (pid {pid})"),
-            None => eprintln!("  window: NONE within {}s — timing is a timeout, not a load", timeout.as_secs()),
+            None => eprintln!(
+                "  window: NONE within {}s — timing is a timeout, not a load",
+                timeout.as_secs()
+            ),
         }
         eprintln!("\n{}", bench::markdown_header());
         eprintln!("{}", bench::markdown_row(&timeline, &totals, &label));
@@ -662,7 +673,8 @@ fn resolve_second_root_target(_docs: &Path) -> Result<PathBuf, String> {
 fn resolved_target_matches(resolved: &Path, expected: &Path) -> bool {
     let a = std::fs::canonicalize(resolved).unwrap_or_else(|_| resolved.to_path_buf());
     let b = std::fs::canonicalize(expected).unwrap_or_else(|_| expected.to_path_buf());
-    a.to_string_lossy().eq_ignore_ascii_case(&b.to_string_lossy())
+    a.to_string_lossy()
+        .eq_ignore_ascii_case(&b.to_string_lossy())
 }
 
 /// Wraps another provider, tallying getattr/open/read/write traffic
@@ -858,10 +870,7 @@ fn detect_zip_root_prefix(be: &dyn Provider) -> Result<Option<String>, String> {
         .filter(|e| e.stat.kind == KIND_DIR)
         .map(|e| e.name.clone())
         .collect();
-    let files: Vec<_> = entries
-        .iter()
-        .filter(|e| e.stat.kind != KIND_DIR)
-        .collect();
+    let files: Vec<_> = entries.iter().filter(|e| e.stat.kind != KIND_DIR).collect();
     if files.is_empty() && dirs.len() == 1 {
         Ok(Some(dirs[0].clone()))
     } else {
@@ -871,7 +880,6 @@ fn detect_zip_root_prefix(be: &dyn Provider) -> Result<Option<String>, String> {
 
 /// Skyrim SE Steam AppID (appmanifest_489830.acf).
 const SKYRIM_SE_APP_ID: &str = "489830";
-
 
 /// Valve steam_appid.txt: lets SteamAPI_Init talk to the running client without
 /// RestartAppIfNecessary → steam://run (Remote Play / UI relaunch).
@@ -1060,9 +1068,15 @@ fn inject_enable_game_overlay_off(path: &Path, appid: &str) -> Result<bool, Stri
             return Ok(false);
         }
         let patched_block = block
-            .replace("\"EnableGameOverlay\"\t\t\"1\"", "\"EnableGameOverlay\"\t\t\"0\"")
+            .replace(
+                "\"EnableGameOverlay\"\t\t\"1\"",
+                "\"EnableGameOverlay\"\t\t\"0\"",
+            )
             .replace("\"EnableGameOverlay\" \"1\"", "\"EnableGameOverlay\" \"0\"")
-            .replace("\"EnableGameOverlay\"\t\"1\"", "\"EnableGameOverlay\"\t\"0\"");
+            .replace(
+                "\"EnableGameOverlay\"\t\"1\"",
+                "\"EnableGameOverlay\"\t\"0\"",
+            );
         if patched_block == block {
             return Ok(false);
         }
@@ -1160,9 +1174,7 @@ fn steam_offline_mode_active() -> bool {
         if let Ok(raw) = std::fs::read(log) {
             let start = raw.len().saturating_sub(32 * 1024);
             let text = String::from_utf8_lossy(&raw[start..]);
-            if text.to_ascii_lowercase().contains("offline")
-                && !text.contains("[Connected")
-            {
+            if text.to_ascii_lowercase().contains("offline") && !text.contains("[Connected") {
                 return true;
             }
         }
@@ -1438,7 +1450,8 @@ fn stage_dx_redist(root: &Path, cache: &Path) -> Result<(), String> {
         "d3dx10_43.dll",
     ];
     // Prefer already-cached copies; else pull from the winget MSIX package.
-    let pkg = r"C:\Program Files\WindowsApps\Microsoft.DirectXRuntime_9.29.1974.0_x64__8wekyb3d8bbwe";
+    let pkg =
+        r"C:\Program Files\WindowsApps\Microsoft.DirectXRuntime_9.29.1974.0_x64__8wekyb3d8bbwe";
     let mut n = 0usize;
     for name in names {
         let dest_cache = cache.join(name);
@@ -1468,7 +1481,10 @@ fn stage_dx_redist(root: &Path, cache: &Path) -> Result<(), String> {
         }
     }
     if n > 0 {
-        eprintln!("  staged {n} DirectX runtime DLL(s) under {}", root.display());
+        eprintln!(
+            "  staged {n} DirectX runtime DLL(s) under {}",
+            root.display()
+        );
     } else {
         eprintln!(
             "  warning: no DirectX runtime DLLs found — install Microsoft.DirectX \
@@ -1524,14 +1540,16 @@ fn setup_my_games_junctions(profiles: &Path, saves: &Path) -> Result<PathBuf, St
     if old_saves.is_dir() && !is_reparse_point(&old_saves) {
         eprintln!("  migrating existing Saves → {}", saves.display());
         merge_dir(&old_saves, saves)?;
-        std::fs::remove_dir_all(&old_saves)
-            .map_err(|e| format!("remove old Saves: {e}"))?;
+        std::fs::remove_dir_all(&old_saves).map_err(|e| format!("remove old Saves: {e}"))?;
     }
 
     // Migrate other My Games content into profiles (if real directory).
     if docs.is_dir() && !is_reparse_point(&docs) {
         eprintln!("  migrating My Games SSE → {}", profiles.display());
-        for ent in std::fs::read_dir(&docs).map_err(|e| e.to_string())?.flatten() {
+        for ent in std::fs::read_dir(&docs)
+            .map_err(|e| e.to_string())?
+            .flatten()
+        {
             let name = ent.file_name();
             if name == "Saves" {
                 continue;
@@ -1562,11 +1580,7 @@ fn setup_my_games_junctions(profiles: &Path, saves: &Path) -> Result<PathBuf, St
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     ensure_junction(&docs, profiles)?;
-    eprintln!(
-        "  junction: {}  ⇒  {}",
-        docs.display(),
-        profiles.display()
-    );
+    eprintln!("  junction: {}  ⇒  {}", docs.display(), profiles.display());
     eprintln!(
         "  junction: {}  ⇒  {}",
         profiles_saves.display(),
@@ -1671,7 +1685,11 @@ fn seed_profile_settings(profiles: &Path) -> Result<(), String> {
         );
     } else {
         std::fs::write(&path, &after).map_err(|e| format!("write {}: {e}", path.display()))?;
-        eprintln!("  profile seed: {} — {} change(s)", path.display(), changes.len());
+        eprintln!(
+            "  profile seed: {} — {} change(s)",
+            path.display(),
+            changes.len()
+        );
         for c in &changes {
             eprintln!("    {c}");
         }
@@ -1777,8 +1795,7 @@ mod profile_seed_tests {
     #[test]
     fn an_existing_setting_is_rewritten_in_place_and_nothing_else_moves() {
         let before = "[Display]\niSize W=800\n[General]\nbUpsellOwned=0\nuLargeRefLODGridSize=11\n";
-        let (after, changes) =
-            merge_ini_settings(before, &[("General", "bUpsellOwned", "1")]);
+        let (after, changes) = merge_ini_settings(before, &[("General", "bUpsellOwned", "1")]);
         assert_eq!(
             after,
             "[Display]\niSize W=800\n[General]\nbUpsellOwned=1\nuLargeRefLODGridSize=11\n"
@@ -1808,10 +1825,15 @@ mod profile_seed_tests {
         // case-sensitive match would append a second section and the game
         // would read the *later* one, inverting the setting.
         let before = "[GamePlay]\nbCheckForMissingContentOnStartup=1\n";
-        let (after, changes) =
-            merge_ini_settings(before, &[("Gameplay", "bcheckformissingcontentonstartup", "0")]);
+        let (after, changes) = merge_ini_settings(
+            before,
+            &[("Gameplay", "bcheckformissingcontentonstartup", "0")],
+        );
         assert_eq!(after.matches('[').count(), 1, "duplicate section: {after}");
-        assert!(after.contains("bcheckformissingcontentonstartup=0"), "{after}");
+        assert!(
+            after.contains("bcheckformissingcontentonstartup=0"),
+            "{after}"
+        );
         assert_eq!(changes.len(), 1, "{changes:?}");
     }
 
@@ -1820,7 +1842,10 @@ mod profile_seed_tests {
         let before = "[General]\nbUpsellOwned=1\n";
         let (after, changes) =
             merge_ini_settings(before, &[("Bethesda.net", "bEnablePlatform", "0")]);
-        assert!(after.contains("[Bethesda.net]\nbEnablePlatform=0"), "{after}");
+        assert!(
+            after.contains("[Bethesda.net]\nbEnablePlatform=0"),
+            "{after}"
+        );
         assert_eq!(changes.len(), 1, "{changes:?}");
     }
 
@@ -1832,7 +1857,10 @@ mod profile_seed_tests {
         let before = "[General]\nbFreebiesSeen=1\nbUpsellOwned=1\n";
         let (_, changes) = merge_ini_settings(
             before,
-            &[("General", "bFreebiesSeen", "1"), ("General", "bUpsellOwned", "1")],
+            &[
+                ("General", "bFreebiesSeen", "1"),
+                ("General", "bUpsellOwned", "1"),
+            ],
         );
         assert!(changes.is_empty(), "{changes:?}");
     }
@@ -2132,7 +2160,11 @@ mod staging_layer_tests {
         mount_low_priority_disk_layers(&session, &root, &staged_dir).unwrap();
 
         assert!(
-            session.kernel().getattr(RootId::DEFAULT, "SkyrimSE.exe").unwrap().is_none(),
+            session
+                .kernel()
+                .getattr(RootId::DEFAULT, "SkyrimSE.exe")
+                .unwrap()
+                .is_none(),
             "must not be visible before staging happens"
         );
 

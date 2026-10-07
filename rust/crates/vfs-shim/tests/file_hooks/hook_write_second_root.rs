@@ -16,7 +16,7 @@
 //! `shared.txt` is served under both, with different bytes.
 use crate::fakedirector;
 
-use fakedirector::{Fake, ReadStyle, key};
+use fakedirector::{key, Fake, ReadStyle};
 use std::io::Write;
 use vfs_shim::install;
 

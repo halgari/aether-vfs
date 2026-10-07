@@ -87,8 +87,7 @@ fn a_failed_shrink_commit_never_resurrects_the_cut_bytes() {
     for (cut, regrow) in [(BS + 5, "set_len"), (BS, "set_len"), (BS + 5, "write")] {
         let (s, _d) = temp_storage();
         let lid = s.catalog.create_layer("l").unwrap();
-        let lp: Arc<LayerProvider> =
-            Arc::new(LayerProvider::new(Arc::clone(&s), "l".into(), lid));
+        let lp: Arc<LayerProvider> = Arc::new(LayerProvider::new(Arc::clone(&s), "l".into(), lid));
         let p: Arc<dyn Provider> = lp.clone();
         write_file(&p, "f", 0, &vec![0xAAu8; 3 * BS as usize]);
         let guid = s.catalog.get(lid, "f").unwrap().unwrap().guid;

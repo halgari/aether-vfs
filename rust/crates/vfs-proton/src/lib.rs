@@ -35,10 +35,10 @@ mod test_tmp;
 // repository's tests use.
 #[cfg(feature = "acquire")]
 pub use install::{extract_tar_gz, install_release, parse_sha512sum, partial_path, verify_digest};
-pub use launch::{DEFAULT_WINEDEBUG, WineLaunch, finish, launch_env, merge_dll_overrides, spawn};
+pub use launch::{finish, launch_env, merge_dll_overrides, spawn, WineLaunch, DEFAULT_WINEDEBUG};
 pub use layout::Root;
-pub use prefix::{Prefix, PrefixInit, ensure, ensure_with};
+pub use prefix::{ensure, ensure_with, Prefix, PrefixInit};
 #[cfg(feature = "acquire")]
-pub use release::{Release, fetch_releases, pick};
+pub use release::{fetch_releases, pick, Release};
 pub use runtime::{cmp_tags, installed, installed_dirs, verify_ge};
 pub use steam::{HelperStatus, SteamLaunch, SteamSide};

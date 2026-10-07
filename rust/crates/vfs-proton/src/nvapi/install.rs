@@ -267,11 +267,10 @@ mod tests {
         assert_eq!(env["DXVK_ENABLE_NVAPI"], "1");
         assert_eq!(env["NVIDIA_WINE_DLL_DIR"], ngx.to_string_lossy());
         assert_eq!(env["DXVK_NVAPI_SET_NGX_DEBUG_OPTIONS"], NGX_DEBUG_OPTIONS);
-        assert!(
-            !s.env(true)
-                .iter()
-                .any(|(k, _)| k == "DXVK_NVAPI_SET_NGX_DEBUG_OPTIONS")
-        );
+        assert!(!s
+            .env(true)
+            .iter()
+            .any(|(k, _)| k == "DXVK_NVAPI_SET_NGX_DEBUG_OPTIONS"));
     }
 
     #[test]

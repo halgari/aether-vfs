@@ -190,9 +190,7 @@ fn key_full_without_class() {
     assert_eq!(r, ok(44));
     assert_eq!(
         b,
-        cat(&[
-            &LW_BYTES, &ZERO, &NONE, &ZERO, &ZERO, &ZERO, &ZERO, &ZERO, &ZERO, &ZERO
-        ])
+        cat(&[&LW_BYTES, &ZERO, &NONE, &ZERO, &ZERO, &ZERO, &ZERO, &ZERO, &ZERO, &ZERO])
     );
 }
 

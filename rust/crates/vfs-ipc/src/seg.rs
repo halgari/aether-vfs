@@ -180,7 +180,10 @@ mod tests {
         seg.atomic_u32(8).unwrap().store(0xABCD, Ordering::Relaxed);
         assert_eq!(seg.read_u32(8), Some(0xABCD));
         seg.write_u64(16, 0x0102_0304_0506_0708);
-        assert_eq!(seg.atomic_u64(16).unwrap().load(Ordering::Relaxed), 0x0102_0304_0506_0708);
+        assert_eq!(
+            seg.atomic_u64(16).unwrap().load(Ordering::Relaxed),
+            0x0102_0304_0506_0708
+        );
         seg.write_i32(24, -5);
         assert_eq!(seg.read_i32(24), Some(-5));
     }

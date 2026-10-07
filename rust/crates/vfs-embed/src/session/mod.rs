@@ -12,10 +12,10 @@ use crate::image::RootLocation;
 // (`IpcServe::start_file_backed`), which is how a shim inside Wine reaches a
 // native Linux director. So neither this import nor the `ipc` field below is
 // gated; only the two bodies that pick a transport are.
-use vfs_director::Director;
 use vfs_director::ipc::IpcServe;
 use vfs_director::stage::StagedDir;
-use vfs_provider::{RootId, overlay_layer_dir};
+use vfs_director::Director;
+use vfs_provider::{overlay_layer_dir, RootId};
 
 mod compose;
 mod opts;
@@ -31,7 +31,7 @@ pub use compose::compose_root;
 pub use opts::{LaunchOpts, StageOpts};
 #[cfg(unix)]
 pub use proton::{LaunchHandle, LaunchStopper};
-pub use registry::{RegistrySync, registry_sync_for};
+pub use registry::{registry_sync_for, RegistrySync};
 
 use compose::RootComposition;
 #[cfg(unix)]

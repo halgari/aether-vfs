@@ -65,9 +65,7 @@ pub async fn drain_launch_events(
         while let Some(ev) = stream.message().await.expect("stream") {
             events += 1;
             match ev.event {
-                Some(vfs_control::pb::launch_event::Event::Exited(x)) => {
-                    *exit_code = Some(x.code)
-                }
+                Some(vfs_control::pb::launch_event::Event::Exited(x)) => *exit_code = Some(x.code),
                 Some(vfs_control::pb::launch_event::Event::Started(_)) => saw_started = true,
                 Some(vfs_control::pb::launch_event::Event::Log(l)) => {
                     eprintln!("{label}: {}", l.line)

@@ -61,7 +61,11 @@ fn main() {
     //    place. Runs first so nothing this fixture wrote can be mistaken for
     //    the copied-up file.
     if let Ok(cow_paths) = std::env::var(COW_PATH_ENV) {
-        for cow_path in cow_paths.split(';').map(str::trim).filter(|p| !p.is_empty()) {
+        for cow_path in cow_paths
+            .split(';')
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+        {
             in_place_edit(cow_path);
         }
     }
@@ -224,7 +228,11 @@ fn main() {
     // other director refusal and fell through to the shim-local overlay —
     // which created the file there and reported success, so an exclusive
     // create against an existing file silently "succeeded".
-    match OpenOptions::new().write(true).create_new(true).open(EXCL_PATH) {
+    match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(EXCL_PATH)
+    {
         Ok(mut f) => {
             if let Err(e) = f.write_all(b"first") {
                 eprintln!("WRITEPATH FIXTURE FAIL [15]: write {EXCL_PATH}: {e}");
@@ -236,7 +244,11 @@ fn main() {
             exit(15);
         }
     }
-    match OpenOptions::new().write(true).create_new(true).open(EXCL_PATH) {
+    match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(EXCL_PATH)
+    {
         Ok(_) => {
             eprintln!(
                 "WRITEPATH FIXTURE FAIL [16]: exclusive-create against an existing {EXCL_PATH} succeeded"
@@ -317,8 +329,7 @@ fn in_place_edit(path: &str) {
     }
 
     let mut expected = original.clone();
-    expected[COW_OFFSET as usize..COW_OFFSET as usize + COW_EDIT.len()]
-        .copy_from_slice(COW_EDIT);
+    expected[COW_OFFSET as usize..COW_OFFSET as usize + COW_EDIT.len()].copy_from_slice(COW_EDIT);
     if let Err(e) = f.seek(SeekFrom::Start(0)) {
         eprintln!("WRITEPATH FIXTURE FAIL [20]: seek {path}: {e}");
         exit(20);

@@ -43,12 +43,7 @@ pub fn locate(name: &str) -> Option<PathBuf> {
 
 /// [`locate`], panicking with `hint` (what to build first) when it is absent.
 pub fn locate_or_panic(name: &str, hint: &str) -> PathBuf {
-    locate(name).unwrap_or_else(|| {
-        panic!(
-            "{name} not found near {:?}; {hint}",
-            profile_dir()
-        )
-    })
+    locate(name).unwrap_or_else(|| panic!("{name} not found near {:?}; {hint}", profile_dir()))
 }
 
 #[cfg(test)]
@@ -57,13 +52,18 @@ mod tests {
 
     #[test]
     fn profile_dir_is_not_the_deps_directory() {
-        assert_ne!(profile_dir().file_name().and_then(|s| s.to_str()), Some("deps"));
+        assert_ne!(
+            profile_dir().file_name().and_then(|s| s.to_str()),
+            Some("deps")
+        );
     }
 
     #[test]
     fn a_file_beside_the_profile_is_found_and_a_missing_one_is_not() {
         assert!(locate("definitely-not-an-artefact.nope").is_none());
-        let dep = profile_dir().join("deps").join(format!("testkit-probe-{}", std::process::id()));
+        let dep = profile_dir()
+            .join("deps")
+            .join(format!("testkit-probe-{}", std::process::id()));
         std::fs::write(&dep, b"x").unwrap();
         let found = locate(dep.file_name().unwrap().to_str().unwrap());
         let _ = std::fs::remove_file(&dep);

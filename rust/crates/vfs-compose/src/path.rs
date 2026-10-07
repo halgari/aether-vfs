@@ -89,10 +89,7 @@ mod tests {
     fn strip_prefix_is_case_insensitive() {
         // Shim vpaths are always lowercased; a mount configured with mixed
         // case (as Mod Organizer style configs do) must still match.
-        assert_eq!(
-            strip_prefix("data/somemod/a", "Data/SomeMod").unwrap(),
-            "a"
-        );
+        assert_eq!(strip_prefix("data/somemod/a", "Data/SomeMod").unwrap(), "a");
         assert_eq!(strip_prefix("data/somemod", "Data/SomeMod").unwrap(), "");
         assert!(strip_prefix("data/othermod", "Data/SomeMod").is_none());
         // Boundary must still be a full path segment, not a substring match.

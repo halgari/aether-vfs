@@ -18,9 +18,8 @@ use vfs_embed::{MemoryProvider, RootId, Session, OPEN_WRITE};
 
 #[test]
 fn a_memory_provider_round_trips_a_write_back_to_the_host() {
-    let session_base =
-        std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
-            .join(format!("vfs-embed-memrt-{}", std::process::id()));
+    let session_base = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("vfs-embed-memrt-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&session_base);
 
     let mut session = Session::new();
@@ -46,8 +45,14 @@ fn a_memory_provider_round_trips_a_write_back_to_the_host() {
         .open(RootId::DEFAULT, "Skyrim.ini", OPEN_WRITE)
         .expect("an Access::ReadWrite mount must accept an in-place write directly");
     assert!(!is_dir);
-    assert_eq!(size, 12, "the handle opens onto the bytes the host supplied");
-    session.kernel().write(fh, 0, b"EDITED-INI!!").expect("write");
+    assert_eq!(
+        size, 12,
+        "the handle opens onto the bytes the host supplied"
+    );
+    session
+        .kernel()
+        .write(fh, 0, b"EDITED-INI!!")
+        .expect("write");
     session.kernel().close(fh).expect("close");
 
     // The host-facing read-back — not a peek at the provider's internals,

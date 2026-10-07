@@ -12,7 +12,7 @@ mod storage;
 
 pub use apply::*;
 pub use client::*;
-pub use discovery::{Discovery, default_discovery_path, read_discovery, write_discovery};
+pub use discovery::{default_discovery_path, read_discovery, write_discovery, Discovery};
 pub use flags::*;
 pub use server::*;
 pub use service::DirectorService;

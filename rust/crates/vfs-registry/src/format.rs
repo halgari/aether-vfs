@@ -9,7 +9,7 @@
 //!
 //! `decode` validates everything and never panics: a damaged file is a [`FormatError`].
 use crate::overlay::{
-    Child, MAX_DATA, MAX_DECODE_DEPTH, MAX_KEY_NAME, MAX_VALUE_NAME, Node, Overlay, Value,
+    Child, Node, Overlay, Value, MAX_DATA, MAX_DECODE_DEPTH, MAX_KEY_NAME, MAX_VALUE_NAME,
 };
 use crate::path::fold;
 use std::collections::BTreeSet;
@@ -533,7 +533,7 @@ mod tests {
     }
 
     fn write_depth_body() {
-        use crate::overlay::{MAX_WRITE_DEPTH, RegError};
+        use crate::overlay::{RegError, MAX_WRITE_DEPTH};
         let chain = |n: usize| {
             let mut p = String::from(r"\Registry");
             for i in 0..n {

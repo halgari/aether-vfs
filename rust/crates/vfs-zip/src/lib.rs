@@ -134,7 +134,9 @@ pub(crate) fn read_central_directory(
         let mut fixed = [0u8; 46];
         f.read_exact(&mut fixed)?;
         if u32le(&fixed, 0) != CDH_SIG {
-            return Err(ZipError::Malformed("bad central-directory signature".into()));
+            return Err(ZipError::Malformed(
+                "bad central-directory signature".into(),
+            ));
         }
         let method = u16le(&fixed, 10);
         let time = u16le(&fixed, 12);
@@ -153,12 +155,7 @@ pub(crate) fn read_central_directory(
         // ZIP64 extra field: real u64s for any sentinel 32-bit field, in order
         // uncomp, comp, local-header-offset.
         if uncomp_size == SENTINEL32 as u64 || local_header_off == SENTINEL32 as u64 {
-            apply_zip64_extra(
-                extra,
-                &fixed,
-                &mut uncomp_size,
-                &mut local_header_off,
-            )?;
+            apply_zip64_extra(extra, &fixed, &mut uncomp_size, &mut local_header_off)?;
         }
 
         entries.push(CdEntry {
@@ -218,7 +215,9 @@ pub(crate) fn data_offset(f: &mut std::fs::File, local_header_off: u64) -> Resul
     f.seek(SeekFrom::Start(local_header_off))?;
     f.read_exact(&mut lfh)?;
     if u32le(&lfh, 0) != LFH_SIG {
-        return Err(ZipError::Malformed("bad local file header signature".into()));
+        return Err(ZipError::Malformed(
+            "bad local file header signature".into(),
+        ));
     }
     let name_len = u16le(&lfh, 26) as u64;
     let extra_len = u16le(&lfh, 28) as u64;
@@ -304,7 +303,8 @@ mod tests {
     /// A real archive from the corpus directory: `VFS_TEST_ZIP_CORPUS` if set,
     /// else `C:\GameLayers`.
     fn corpus_archive(name: &str) -> std::path::PathBuf {
-        let dir = std::env::var_os("VFS_TEST_ZIP_CORPUS").unwrap_or_else(|| r"C:\GameLayers".into());
+        let dir =
+            std::env::var_os("VFS_TEST_ZIP_CORPUS").unwrap_or_else(|| r"C:\GameLayers".into());
         std::path::Path::new(&dir).join(name)
     }
 
@@ -312,7 +312,9 @@ mod tests {
     fn zip_error_displays_and_chains() {
         use std::error::Error;
         assert_eq!(ZipError::NotAZip.to_string(), "not a zip archive");
-        assert!(ZipError::Unsupported("deflate".into()).to_string().contains("deflate"));
+        assert!(ZipError::Unsupported("deflate".into())
+            .to_string()
+            .contains("deflate"));
         let io = ZipError::from(std::io::Error::other("boom"));
         assert!(io.to_string().contains("boom"));
         assert!(io.source().is_some());
@@ -359,7 +361,10 @@ mod tests {
             .unwrap();
         bytes[cd + 10] = 8;
         std::fs::write(&zip, &bytes).unwrap();
-        assert!(matches!(ZipProvider::open(&zip), Err(ZipError::Unsupported(_))));
+        assert!(matches!(
+            ZipProvider::open(&zip),
+            Err(ZipError::Unsupported(_))
+        ));
     }
 
     #[test]
@@ -370,7 +375,10 @@ mod tests {
             return; // skip when the archive is absent
         }
         let be = ZipProvider::open(&zip).unwrap();
-        let st = be.getattr(VPath::at_default("Data/SkyUI_SE.esp")).unwrap().unwrap();
+        let st = be
+            .getattr(VPath::at_default("Data/SkyUI_SE.esp"))
+            .unwrap()
+            .unwrap();
         assert_eq!(st.size, 2433);
     }
 
@@ -381,7 +389,10 @@ mod tests {
         let zip = corpus_archive("1. Skyrim Special Edition.zip");
         let be = ZipProvider::open(&zip).unwrap();
         // An entry known to sit past the 4 GB mark exercises ZIP64 offsets.
-        let st = be.getattr(VPath::at_default("Data/Skyrim - Textures1.bsa")).unwrap().unwrap();
+        let st = be
+            .getattr(VPath::at_default("Data/Skyrim - Textures1.bsa"))
+            .unwrap()
+            .unwrap();
         assert_eq!(st.size, 1_511_492_648);
     }
 

@@ -157,9 +157,9 @@ pub fn query_dos_device(drive: char) -> Option<String> {
 pub fn volume_guid_for_drive(drive: char) -> Option<String> {
     let mount_point = wide(&format!("{drive}:\\"));
     let mut buf = vec![0u16; 130]; // MSDN: 50 is guaranteed sufficient; rounded up.
-    // SAFETY: FFI. `mount_point` is a valid NUL-terminated UTF-16 pointer
-    // ending in a separator as this API requires; `buf` is valid for
-    // `buf.len()` `u16`s, matching `cchbufferlength`.
+                                   // SAFETY: FFI. `mount_point` is a valid NUL-terminated UTF-16 pointer
+                                   // ending in a separator as this API requires; `buf` is valid for
+                                   // `buf.len()` `u16`s, matching `cchbufferlength`.
     let ok = unsafe {
         GetVolumeNameForVolumeMountPointW(mount_point.as_ptr(), buf.as_mut_ptr(), buf.len() as u32)
     };

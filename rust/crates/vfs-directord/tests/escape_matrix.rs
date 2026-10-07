@@ -14,7 +14,7 @@ use vfs_control::pb::director_server::DirectorServer;
 use vfs_directord::{connect, DirectorService, SessionRegistry};
 
 mod support;
-use support::{escape::*, launch::*, artifacts::*};
+use support::{artifacts::*, escape::*, launch::*};
 
 /// The full, fixed vector-id order `vfs-fixture-escape` emits — used to
 /// assert every expected line actually showed up (a vector silently
@@ -393,7 +393,9 @@ async fn escape_matrix_positive_and_negative_canary() {
         );
     }
     for line in &pos_lines {
-        let Some(want) = positive_expectation(&line.vector) else { continue };
+        let Some(want) = positive_expectation(&line.vector) else {
+            continue;
+        };
         if line.outcome.starts_with("unbuildable:") {
             // A first-class, environment-dependent outcome — recorded in
             // the matrix, not a failure of this assertion.
@@ -460,7 +462,9 @@ async fn escape_matrix_positive_and_negative_canary() {
     // engine's `cow_seed` last-resort branch (since deleted); gate 4's Task 5 deleted it, and the write half is
     // asserted by `escape_matrix_write_access_positive_and_negative_canary`.
     for line in &neg_lines {
-        let Some(want) = negative_expectation(&line.vector) else { continue };
+        let Some(want) = negative_expectation(&line.vector) else {
+            continue;
+        };
         if line.outcome.starts_with("unbuildable:") {
             continue; // Never attempted at the OS level; nothing to seal.
         }
@@ -508,9 +512,16 @@ async fn escape_matrix_positive_and_negative_canary() {
             "negative canary, isolated run for vector {}: must exit 0. Lines: {iso_lines:?}",
             line.vector
         );
-        assert!(!iso_truncated, "isolated run for vector {} truncated its path list", line.vector);
+        assert!(
+            !iso_truncated,
+            "isolated run for vector {} truncated its path list",
+            line.vector
+        );
         if std::env::var("VFS_TEST_MATRIX_DUMP").is_ok() {
-            eprintln!("--- isolated vector {} classified set (marker={marker:?}) ---", line.vector);
+            eprintln!(
+                "--- isolated vector {} classified set (marker={marker:?}) ---",
+                line.vector
+            );
             for p in &iso_classified {
                 eprintln!("{p}");
             }
@@ -615,7 +626,6 @@ fn negative_write_expectation(vector: &str) -> Option<&'static str> {
     Some("not-found")
 }
 
-
 /// The only two names this harness accepts in a canary directory's real-disk
 /// listing after a write run: the canary it put there itself, and vector 14's
 /// injected child (see [`V14_WRITE_SUFFIX`]).
@@ -640,7 +650,13 @@ fn make_escape_junction(tag: &str, target: &Path) -> (PathBuf, Option<String>) {
     let link = vfs_testkit::scratch_path(&format!("vfs-escape-junction-{tag}"));
     let _ = std::fs::remove_dir(&link);
     let ready = std::process::Command::new("cmd")
-        .args(["/C", "mklink", "/J", &link.to_string_lossy(), &target.to_string_lossy()])
+        .args([
+            "/C",
+            "mklink",
+            "/J",
+            &link.to_string_lossy(),
+            &target.to_string_lossy(),
+        ])
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false);
@@ -768,7 +784,8 @@ async fn escape_matrix_write_access_positive_and_negative_canary() {
     let served_sub = PathBuf::from("Games").join("Skyrim").join("Data");
     let unserved_sub = PathBuf::from("Games").join("Skyrim").join("Unserved");
     std::fs::create_dir_all(root.join(&served_sub)).expect("mkdir served dir under session root");
-    std::fs::create_dir_all(root.join(&unserved_sub)).expect("mkdir unserved dir under session root");
+    std::fs::create_dir_all(root.join(&unserved_sub))
+        .expect("mkdir unserved dir under session root");
 
     // Both seeds are shorter than the fixture's fixed 22-byte write payload,
     // which matters: the write disposition is `OPEN_ALWAYS` (create, never
@@ -837,7 +854,10 @@ async fn escape_matrix_write_access_positive_and_negative_canary() {
          means a vector took the process down before the rest of the matrix was attempted. Lines \
          captured: {pos_lines:?}"
     );
-    assert!(!pos_truncated, "the shim report's path list truncated on the positive write run");
+    assert!(
+        !pos_truncated,
+        "the shim report's path list truncated on the positive write run"
+    );
     for id in ALL_VECTOR_IDS {
         assert!(
             pos_lines.iter().any(|l| &l.vector == id),
@@ -846,7 +866,9 @@ async fn escape_matrix_write_access_positive_and_negative_canary() {
         );
     }
     for line in &pos_lines {
-        let Some(want) = positive_write_expectation(&line.vector) else { continue };
+        let Some(want) = positive_write_expectation(&line.vector) else {
+            continue;
+        };
         if line.outcome.starts_with("unbuildable:") {
             continue; // First-class, environment-dependent; recorded, not a failure.
         }
@@ -906,7 +928,10 @@ async fn escape_matrix_write_access_positive_and_negative_canary() {
         "vfs-fixture-escape (write mode) must exit 0 against the negative canary too. Lines \
          captured: {neg_lines:?}"
     );
-    assert!(!neg_truncated, "the shim report's path list truncated on the negative write run");
+    assert!(
+        !neg_truncated,
+        "the shim report's path list truncated on the negative write run"
+    );
     for id in ALL_VECTOR_IDS {
         assert!(
             neg_lines.iter().any(|l| &l.vector == id),
@@ -914,7 +939,9 @@ async fn escape_matrix_write_access_positive_and_negative_canary() {
         );
     }
     for line in &neg_lines {
-        let Some(want) = negative_write_expectation(&line.vector) else { continue };
+        let Some(want) = negative_write_expectation(&line.vector) else {
+            continue;
+        };
         if line.outcome.starts_with("unbuildable:") {
             continue; // Never attempted at the OS level; nothing to seal.
         }
@@ -989,8 +1016,10 @@ fn assert_no_escaped_real_files(dir: &Path, canary: &str, canary_path: &Path, la
          below would pass for the wrong reason"
     );
 
-    let stray: Vec<&String> =
-        names.iter().filter(|n| !accounted_for_on_real_disk(n, canary)).collect();
+    let stray: Vec<&String> = names
+        .iter()
+        .filter(|n| !accounted_for_on_real_disk(n, canary))
+        .collect();
     assert!(
         stray.is_empty(),
         "{label}: these files appeared on the REAL filesystem under the managed root at {dir:?}: \
@@ -1139,15 +1168,17 @@ async fn escape_matrix_holds_against_a_second_root() {
 
     const NEGATIVE_BASENAME: &str = "escape-negative-canary.bin";
     let neg_rel = sub.join(NEGATIVE_BASENAME);
-    std::fs::write(docs_root.path().join(&neg_rel), b"the-negative-canary-bytes")
-        .expect("negative (root 1)");
+    std::fs::write(
+        docs_root.path().join(&neg_rel),
+        b"the-negative-canary-bytes",
+    )
+    .expect("negative (root 1)");
 
     // Vector 7's junction, created by this never-injected harness process for
     // the same reason the root-0 matrix does it here — pointed at root 1's
     // own directory, which is the part that would break if junction aliases
     // were resolved against root 0's path alone.
-    let vector7_link =
-        vfs_testkit::scratch_path("vfs-escape-junction-root1");
+    let vector7_link = vfs_testkit::scratch_path("vfs-escape-junction-root1");
     let _ = std::fs::remove_dir(&vector7_link);
     let vector7_link_ready = std::process::Command::new("cmd")
         .args([
@@ -1189,7 +1220,9 @@ async fn escape_matrix_holds_against_a_second_root() {
         );
     }
     for line in &pos_lines {
-        let Some(want) = positive_expectation(&line.vector) else { continue };
+        let Some(want) = positive_expectation(&line.vector) else {
+            continue;
+        };
         if line.outcome.starts_with("unbuildable:") {
             continue;
         }
@@ -1215,7 +1248,9 @@ async fn escape_matrix_holds_against_a_second_root() {
         "vfs-fixture-escape must exit 0 against root 1's negative canary. Lines: {neg_lines:?}"
     );
     for line in &neg_lines {
-        let Some(want) = negative_expectation(&line.vector) else { continue };
+        let Some(want) = negative_expectation(&line.vector) else {
+            continue;
+        };
         if line.outcome.starts_with("unbuildable:") {
             continue;
         }
@@ -1360,8 +1395,14 @@ async fn metadata_queries_are_sealed_for_canonicaliser_only_spellings() {
         write_access: false,
     };
 
-    let (exit, lines, _classified, _truncated) =
-        run_escape_fixture(&mut client, &ctx, &root.join(&neg_rel), &out_file, Some("4m")).await;
+    let (exit, lines, _classified, _truncated) = run_escape_fixture(
+        &mut client,
+        &ctx,
+        &root.join(&neg_rel),
+        &out_file,
+        Some("4m"),
+    )
+    .await;
 
     assert_eq!(
         exit, 0,

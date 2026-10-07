@@ -4,8 +4,8 @@ use std::sync::Mutex;
 
 use tonic::transport::Channel;
 use vfs_provider::{
-    map_io_err, Access, Capabilities, CaseMatch, DirEntry, Handle, Provider, Stat, VPath,
-    KIND_DIR, KIND_FILE,
+    map_io_err, Access, Capabilities, CaseMatch, DirEntry, Handle, Provider, Stat, VPath, KIND_DIR,
+    KIND_FILE,
 };
 
 use crate::pb::source_client::SourceClient;
@@ -207,7 +207,10 @@ mod tests {
 
     #[tonic::async_trait]
     impl Source for WrongVersionService {
-        async fn get_capabilities(&self, _req: Request<Empty>) -> Result<Response<CapsResp>, Status> {
+        async fn get_capabilities(
+            &self,
+            _req: Request<Empty>,
+        ) -> Result<Response<CapsResp>, Status> {
             Ok(Response::new(CapsResp {
                 contract_version: crate::SOURCE_CONTRACT_VERSION + 1,
                 access: 1,
@@ -216,10 +219,16 @@ mod tests {
                 preferred_block: 0,
             }))
         }
-        async fn get_attr(&self, _req: Request<GetAttrReq>) -> Result<Response<GetAttrResp>, Status> {
+        async fn get_attr(
+            &self,
+            _req: Request<GetAttrReq>,
+        ) -> Result<Response<GetAttrResp>, Status> {
             unreachable!("connect must reject the version before any other RPC")
         }
-        async fn read_dir(&self, _req: Request<ReadDirReq>) -> Result<Response<ReadDirResp>, Status> {
+        async fn read_dir(
+            &self,
+            _req: Request<ReadDirReq>,
+        ) -> Result<Response<ReadDirResp>, Status> {
             unreachable!("connect must reject the version before any other RPC")
         }
         async fn open(&self, _req: Request<OpenReq>) -> Result<Response<OpenResp>, Status> {

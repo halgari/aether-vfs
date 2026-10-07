@@ -9,13 +9,15 @@
 use windows_sys::Wdk::Storage::FileSystem::REPARSE_DATA_BUFFER;
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, GetFinalPathNameByHandleW, GetLogicalDrives, GetLongPathNameW,
-    GetShortPathNameW, GetVolumeNameForVolumeMountPointW, QueryDosDeviceW,
-    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_NAME_NORMALIZED,
-    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    CreateFileW, GetFinalPathNameByHandleW, GetLogicalDrives, GetLongPathNameW, GetShortPathNameW,
+    GetVolumeNameForVolumeMountPointW, QueryDosDeviceW, FILE_FLAG_BACKUP_SEMANTICS,
+    FILE_FLAG_OPEN_REPARSE_POINT, FILE_NAME_NORMALIZED, FILE_SHARE_DELETE, FILE_SHARE_READ,
+    FILE_SHARE_WRITE, OPEN_EXISTING,
 };
 use windows_sys::Win32::System::Ioctl::FSCTL_GET_REPARSE_POINT;
-use windows_sys::Win32::System::SystemServices::{IO_REPARSE_TAG_MOUNT_POINT, IO_REPARSE_TAG_SYMLINK};
+use windows_sys::Win32::System::SystemServices::{
+    IO_REPARSE_TAG_MOUNT_POINT, IO_REPARSE_TAG_SYMLINK,
+};
 use windows_sys::Win32::System::IO::DeviceIoControl;
 
 /// What one currently-mounted drive letter resolves to at the NT layer.
@@ -67,7 +69,11 @@ pub fn drive_mappings() -> Vec<DriveMapping> {
             if !is_device_namespace_name(&device_name) {
                 return None;
             }
-            Some(DriveMapping { drive, device_name, volume_guid_win32: volume_guid_for_drive(drive) })
+            Some(DriveMapping {
+                drive,
+                device_name,
+                volume_guid_win32: volume_guid_for_drive(drive),
+            })
         })
         .collect()
 }
@@ -79,7 +85,9 @@ pub fn drive_mappings() -> Vec<DriveMapping> {
 /// or a regression test reproducing a `subst` shape without actually
 /// running `subst` — can apply the exact guard `drive_mappings` relies on.
 pub fn is_device_namespace_name(device_name: &str) -> bool {
-    device_name.get(..8).is_some_and(|p| p.eq_ignore_ascii_case(r"\Device\"))
+    device_name
+        .get(..8)
+        .is_some_and(|p| p.eq_ignore_ascii_case(r"\Device\"))
 }
 
 /// Bitmask of drive letters currently in use, bit 0 = A ... bit 25 = Z.
@@ -317,14 +325,16 @@ fn reparse_target_from_handle(handle: HANDLE) -> Option<String> {
             // scalar fields does not require `mp` itself to be aligned.
             let mp = unsafe { core::ptr::addr_of!((*rdb_ptr).Anonymous.MountPointReparseBuffer) };
             let path_buf = unsafe { core::ptr::addr_of!((*mp).PathBuffer) as *const u16 };
-            let offset = unsafe { core::ptr::addr_of!((*mp).SubstituteNameOffset).read_unaligned() };
+            let offset =
+                unsafe { core::ptr::addr_of!((*mp).SubstituteNameOffset).read_unaligned() };
             let len = unsafe { core::ptr::addr_of!((*mp).SubstituteNameLength).read_unaligned() };
             (offset, len, path_buf)
         }
         IO_REPARSE_TAG_SYMLINK => {
             let sl = unsafe { core::ptr::addr_of!((*rdb_ptr).Anonymous.SymbolicLinkReparseBuffer) };
             let path_buf = unsafe { core::ptr::addr_of!((*sl).PathBuffer) as *const u16 };
-            let offset = unsafe { core::ptr::addr_of!((*sl).SubstituteNameOffset).read_unaligned() };
+            let offset =
+                unsafe { core::ptr::addr_of!((*sl).SubstituteNameOffset).read_unaligned() };
             let len = unsafe { core::ptr::addr_of!((*sl).SubstituteNameLength).read_unaligned() };
             (offset, len, path_buf)
         }
@@ -349,8 +359,12 @@ fn read_utf16_bounded(buf: &[u8], base: *const u16, offset: u16, len: u16) -> Op
     }
     // The `is_multiple_of(2)` guard above is what makes `as_chunks`' remainder
     // provably empty, so discarding `.1` drops nothing.
-    let units: Vec<u16> =
-        buf[start..end].as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes(*c)).collect();
+    let units: Vec<u16> = buf[start..end]
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|c| u16::from_le_bytes(*c))
+        .collect();
     Some(String::from_utf16_lossy(&units))
 }
 
@@ -388,7 +402,12 @@ pub unsafe fn final_path_for_handle(handle: HANDLE) -> Option<String> {
         // consumes it. `buf` is valid for `buf.len()` `u16`s, matching
         // `cchfilepath`.
         unsafe {
-            GetFinalPathNameByHandleW(handle, buf.as_mut_ptr(), buf.len() as u32, FILE_NAME_NORMALIZED)
+            GetFinalPathNameByHandleW(
+                handle,
+                buf.as_mut_ptr(),
+                buf.len() as u32,
+                FILE_NAME_NORMALIZED,
+            )
         }
     })
 }
@@ -451,10 +470,18 @@ mod tests {
     #[test]
     fn drive_mappings_includes_current_drive_with_device_name() {
         let cwd = std::env::current_dir().unwrap();
-        let drive = cwd.to_string_lossy().chars().next().unwrap().to_ascii_uppercase();
+        let drive = cwd
+            .to_string_lossy()
+            .chars()
+            .next()
+            .unwrap()
+            .to_ascii_uppercase();
         let mappings = drive_mappings();
-        let mine = mappings.iter().find(|m| m.drive.eq_ignore_ascii_case(&drive));
-        let mine = mine.unwrap_or_else(|| panic!("current drive {drive} not enumerated: {mappings:?}"));
+        let mine = mappings
+            .iter()
+            .find(|m| m.drive.eq_ignore_ascii_case(&drive));
+        let mine =
+            mine.unwrap_or_else(|| panic!("current drive {drive} not enumerated: {mappings:?}"));
         assert!(
             mine.device_name.starts_with(r"\Device\"),
             "unexpected device name: {}",
@@ -474,7 +501,9 @@ mod tests {
         if let Some(short) = short_path_name(&long_str) {
             if !short.eq_ignore_ascii_case(&long_str) {
                 let expanded = expand_long_path(&short).expect("expansion should succeed");
-                assert!(expanded.to_ascii_lowercase().contains("thisisalongfilenamefor"));
+                assert!(expanded
+                    .to_ascii_lowercase()
+                    .contains("thisisalongfilenamefor"));
             }
             // else: 8.3 generation disabled on this volume, nothing to expand.
         }
@@ -485,7 +514,8 @@ mod tests {
     /// `final_path_for_open` succeeds on a real file and reports its name.
     #[test]
     fn final_path_for_open_resolves_an_existing_file() {
-        let dir = std::env::temp_dir().join(format!("vfs-win-final-path-test-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("vfs-win-final-path-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("final-path.txt");
         std::fs::write(&path, b"x").unwrap();
@@ -515,14 +545,22 @@ mod tests {
     /// care either way.
     #[test]
     fn reparse_point_target_reads_a_junction_without_opening_its_target() {
-        let base =
-            std::env::temp_dir().join(format!("vfs-win-reparse-target-test-{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!(
+            "vfs-win-reparse-target-test-{}",
+            std::process::id()
+        ));
         let target = base.join("target");
         std::fs::create_dir_all(&target).unwrap();
         let link = base.join("link");
         let _ = std::fs::remove_dir(&link);
         let made = std::process::Command::new("cmd")
-            .args(["/C", "mklink", "/J", &link.to_string_lossy(), &target.to_string_lossy()])
+            .args([
+                "/C",
+                "mklink",
+                "/J",
+                &link.to_string_lossy(),
+                &target.to_string_lossy(),
+            ])
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false);
@@ -551,8 +589,10 @@ mod tests {
     /// An ordinary directory (no reparse point) has nothing to report.
     #[test]
     fn reparse_point_target_is_none_for_an_ordinary_directory() {
-        let dir =
-            std::env::temp_dir().join(format!("vfs-win-reparse-target-ordinary-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "vfs-win-reparse-target-ordinary-{}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         assert!(reparse_point_target(&dir.to_string_lossy()).is_none());
         std::fs::remove_dir(&dir).ok();

@@ -19,14 +19,14 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use fakedirector::Fake;
 use reg::{
-    Checker, OBJECT_NAME_INFORMATION, ObjectAttributes, Paths, UnicodeString, close, object_string,
-    reg_create, wide, with_oa,
+    close, object_string, reg_create, wide, with_oa, Checker, ObjectAttributes, Paths,
+    UnicodeString, OBJECT_NAME_INFORMATION,
 };
 use vfs_registry::Lookup;
 use vfs_shim::{is_synthetic_key_handle, regclient, registry_handle_path};
 use windows_sys::Win32::System::Registry::{
-    HKEY, HKEY_CURRENT_USER, KEY_ALL_ACCESS, KEY_READ, KEY_SET_VALUE, REG_DWORD,
-    REG_OPTION_NON_VOLATILE, RegCloseKey, RegCreateKeyExW, RegOpenKeyExW, RegSetValueExW,
+    RegCloseKey, RegCreateKeyExW, RegOpenKeyExW, RegSetValueExW, HKEY, HKEY_CURRENT_USER,
+    KEY_ALL_ACCESS, KEY_READ, KEY_SET_VALUE, REG_DWORD, REG_OPTION_NON_VOLATILE,
 };
 
 static LOCK: Mutex<()> = Mutex::new(());

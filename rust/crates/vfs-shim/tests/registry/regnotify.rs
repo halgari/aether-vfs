@@ -23,16 +23,16 @@ use std::time::{Duration, Instant};
 
 use fakedirector::Fake;
 use reg::{
-    Checker, ObjectAttributes, Paths, UnicodeString, close, open_abs, reg_create, wide, with_oa,
-    with_us,
+    close, open_abs, reg_create, wide, with_oa, with_us, Checker, ObjectAttributes, Paths,
+    UnicodeString,
 };
 use vfs_shim::{
-    RegNotify, is_synthetic_key_handle, reg_notify_count, reg_read_fallback_count,
-    reg_write_refused_count, regclient, registry_handle_path, registry_notify_pending,
+    is_synthetic_key_handle, reg_notify_count, reg_read_fallback_count, reg_write_refused_count,
+    regclient, registry_handle_path, registry_notify_pending, RegNotify,
 };
 use windows_sys::Win32::Foundation::{
-    CloseHandle, GetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT, HANDLE_FLAG_PROTECT_FROM_CLOSE,
-    LocalFree, SetHandleInformation,
+    CloseHandle, GetHandleInformation, LocalFree, SetHandleInformation, HANDLE,
+    HANDLE_FLAG_INHERIT, HANDLE_FLAG_PROTECT_FROM_CLOSE,
 };
 use windows_sys::Win32::System::Registry::{RegCloseKey, RegSetValueExW};
 use windows_sys::Win32::System::Threading::{CreateEventW, SleepEx, WaitForSingleObject};
@@ -281,7 +281,7 @@ impl Fixture {
     /// to the real disk).
     fn file(&self, name: &str) -> isize {
         use windows_sys::Win32::Storage::FileSystem::{
-            CREATE_ALWAYS, CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_READ,
+            CreateFileW, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_READ,
             FILE_GENERIC_WRITE,
         };
         let p = self.files.join(name);

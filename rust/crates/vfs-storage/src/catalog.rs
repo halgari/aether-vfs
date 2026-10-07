@@ -322,12 +322,7 @@ impl Catalog {
     /// Commits with no durability; [`Self::commit_durable`] publishes it,
     /// after `BlockStore::flush()` so no durable row references store data that
     /// is not yet durable (spec §6).
-    pub fn put(
-        &self,
-        layer: u64,
-        folded: &str,
-        rec: &EntryRec,
-    ) -> Result<(), StorageError> {
+    pub fn put(&self, layer: u64, folded: &str, rec: &EntryRec) -> Result<(), StorageError> {
         let key = vfs_core::fold(folded);
         self.write(false, |txn| {
             let mut t = txn.open_table(ENTRIES).map_err(db_err)?;
@@ -338,11 +333,7 @@ impl Catalog {
     }
 
     /// [`Self::put`] of every `(folded, rec)` of `rows`, in one commit.
-    pub fn put_many(
-        &self,
-        layer: u64,
-        rows: &[(String, EntryRec)],
-    ) -> Result<(), StorageError> {
+    pub fn put_many(&self, layer: u64, rows: &[(String, EntryRec)]) -> Result<(), StorageError> {
         self.write(false, |txn| {
             let mut t = txn.open_table(ENTRIES).map_err(db_err)?;
             for (folded, rec) in rows {
@@ -709,8 +700,7 @@ mod tests {
         c.put(l, "saves", &dirr("Saves")).unwrap();
         c.put(l, "saves/one.ess", &file("One.ess")).unwrap();
         c.put(l, "saves/sub", &dirr("Sub")).unwrap();
-        c.put(l, "saves/sub/deep.ess", &file("deep.ess"))
-            .unwrap();
+        c.put(l, "saves/sub/deep.ess", &file("deep.ess")).unwrap();
         let mut names: Vec<_> = c
             .children(l, "saves")
             .unwrap()
@@ -834,10 +824,7 @@ mod tests {
         // Empty now; a sibling sharing the prefix `d` does not count as a child.
         c.remove(l, "d").unwrap();
         assert!(c.get(l, "d").unwrap().is_none());
-        assert!(matches!(
-            c.remove(l, ""),
-            Err(StorageError::BadRequest(_))
-        ));
+        assert!(matches!(c.remove(l, ""), Err(StorageError::BadRequest(_))));
     }
 
     /// A directory whose children have their own deep subtrees still lists
@@ -851,20 +838,14 @@ mod tests {
         for d in ["a", "b", "c"] {
             c.put(l, &format!("root/{d}"), &dirr(d)).unwrap();
             for i in 0..50 {
-                c.put(l, &format!("root/{d}/x{i}"), &dirr("x"))
+                c.put(l, &format!("root/{d}/x{i}"), &dirr("x")).unwrap();
+                c.put(l, &format!("root/{d}/x{i}/deep.ess"), &file("deep.ess", 1))
                     .unwrap();
-                c.put(
-                    l,
-                    &format!("root/{d}/x{i}/deep.ess"),
-                    &file("deep.ess", 1),
-                )
-                .unwrap();
             }
         }
         c.put(l, "root/a.txt", &file("a.txt", 2)).unwrap(); // sorts after "a/..."
         c.put(l, "root/b0", &file("b0", 3)).unwrap(); // the skip target itself
-        c.put(l, "root/orphan/child", &file("child", 4))
-            .unwrap(); // no "root/orphan" row
+        c.put(l, "root/orphan/child", &file("child", 4)).unwrap(); // no "root/orphan" row
         c.put(l, "root/z", &file("z", 5)).unwrap();
         c.put(l, "root0", &file("root0", 6)).unwrap(); // past the prefix
         let names: Vec<_> = c

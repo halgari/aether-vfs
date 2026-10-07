@@ -4,13 +4,13 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock, Weak};
 
+use crate::registry::{RegistryGenSink, RegistryGeneration, RegistryHost};
+use vfs_compose::path::normalize;
+use vfs_provider::OPEN_APPEND;
 use vfs_provider::{
     bad_request, is_dir, map_io_err, not_found, read_only, Access, DirEntry, Handle, Provider,
     RootId, SetAttr, Stat, VPath, OPEN_WRITE,
 };
-use vfs_compose::path::normalize;
-use crate::registry::{RegistryGenSink, RegistryGeneration, RegistryHost};
-use vfs_provider::OPEN_APPEND;
 
 struct OpenRec {
     backend: Arc<dyn Provider>,
@@ -185,7 +185,11 @@ impl Director {
     /// refuse composing over a root someone mounted directly — see
     /// [`Director::mount`].
     pub fn serves(&self, root: RootId) -> Result<bool, i32> {
-        Ok(self.roots.lock().map_err(|_| map_io_err())?.contains_key(&root))
+        Ok(self
+            .roots
+            .lock()
+            .map_err(|_| map_io_err())?
+            .contains_key(&root))
     }
 
     /// The provider serving `root` and the mount generation it belongs to,
@@ -199,7 +203,12 @@ impl Director {
     }
 
     fn provider_for(&self, root: RootId) -> Result<Option<Arc<dyn Provider>>, i32> {
-        Ok(self.roots.lock().map_err(|_| map_io_err())?.get(&root).cloned())
+        Ok(self
+            .roots
+            .lock()
+            .map_err(|_| map_io_err())?
+            .get(&root)
+            .cloned())
     }
 
     pub fn getattr(&self, root: RootId, path: &str) -> Result<Option<Stat>, i32> {
@@ -278,7 +287,11 @@ impl Director {
         let (bh, size, is_dir_flag) = provider.open(VPath::new(root, &path), flags)?;
         let immutable = flags & OPEN_WRITE == 0 && !is_dir_flag && provider.is_immutable(bh);
         let fh = self.next_fh.fetch_add(1, Ordering::Relaxed);
-        let cursor = if flags & OPEN_APPEND != 0 { Some(size) } else { None };
+        let cursor = if flags & OPEN_APPEND != 0 {
+            Some(size)
+        } else {
+            None
+        };
         self.opens.lock().map_err(|_| map_io_err())?.insert(
             fh,
             OpenRec {
@@ -305,12 +318,7 @@ impl Director {
             if rec.is_dir {
                 return Err(is_dir());
             }
-            (
-                Arc::clone(&rec.backend),
-                rec.bh,
-                rec.size,
-                rec.is_dir,
-            )
+            (Arc::clone(&rec.backend), rec.bh, rec.size, rec.is_dir)
         };
         let _ = (size, is_dir_flag);
         backend.read_at(bh, offset, buf)
@@ -336,7 +344,11 @@ impl Director {
             if rec.is_dir {
                 return Err(is_dir());
             }
-            (Arc::clone(&rec.backend), rec.bh, rec.cursor.unwrap_or(offset))
+            (
+                Arc::clone(&rec.backend),
+                rec.bh,
+                rec.cursor.unwrap_or(offset),
+            )
         };
         let result = backend.write_at(bh, effective_offset, buf);
         if let Ok(n) = result {
@@ -450,7 +462,10 @@ mod tests {
         d.write(w.fh, 0, b"upper").unwrap();
         d.close(w.fh).unwrap();
         let b2 = d.open_info(RootId::DEFAULT, "b.ini", OPEN_READ).unwrap();
-        assert!(!b2.immutable, "a copied-up file is served by the mutable upper");
+        assert!(
+            !b2.immutable,
+            "a copied-up file is served by the mutable upper"
+        );
         for h in [a.fh, b.fh, b2.fh] {
             d.close(h).unwrap();
         }
@@ -467,10 +482,14 @@ mod tests {
     fn a_remount_racing_opens_never_pairs_new_content_with_an_old_generation() {
         use std::collections::HashMap;
         use std::sync::atomic::AtomicBool;
-        let a: Arc<dyn Provider> =
-            Arc::new(vfs_compose::InlineProvider::from_files([("f", b"AAAA".as_slice())]));
-        let b: Arc<dyn Provider> =
-            Arc::new(vfs_compose::InlineProvider::from_files([("f", b"BBBB".as_slice())]));
+        let a: Arc<dyn Provider> = Arc::new(vfs_compose::InlineProvider::from_files([(
+            "f",
+            b"AAAA".as_slice(),
+        )]));
+        let b: Arc<dyn Provider> = Arc::new(vfs_compose::InlineProvider::from_files([(
+            "f",
+            b"BBBB".as_slice(),
+        )]));
         let d = Director::new();
         d.mount(RootId::DEFAULT, Arc::clone(&a)).unwrap();
         let stop = AtomicBool::new(false);
@@ -534,13 +553,20 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("f"), b"disk").unwrap();
         let d = Director::new();
-        d.mount(RootId::DEFAULT, Arc::new(vfs_compose::DiskProvider::new(&dir))).unwrap();
+        d.mount(
+            RootId::DEFAULT,
+            Arc::new(vfs_compose::DiskProvider::new(&dir)),
+        )
+        .unwrap();
         let disk = d.open_info(RootId::DEFAULT, "f", OPEN_READ).unwrap();
         assert!(!disk.immutable, "a real directory can change underneath us");
 
         d.mount(
             RootId::DEFAULT,
-            Arc::new(vfs_compose::InlineProvider::from_files([("f", b"x".as_slice())])),
+            Arc::new(vfs_compose::InlineProvider::from_files([(
+                "f",
+                b"x".as_slice(),
+            )])),
         )
         .unwrap();
         let inline = d.open_info(RootId::DEFAULT, "f", OPEN_READ).unwrap();
@@ -560,7 +586,10 @@ mod tests {
         let d = Director::new();
         d.mount(
             RootId::DEFAULT,
-            Arc::new(vfs_compose::InlineProvider::from_files([("f", b"x".as_slice())])),
+            Arc::new(vfs_compose::InlineProvider::from_files([(
+                "f",
+                b"x".as_slice(),
+            )])),
         )
         .unwrap();
         assert_eq!(
@@ -574,14 +603,19 @@ mod tests {
         let d = Director::new();
         d.mount(
             RootId::DEFAULT,
-            Arc::new(vfs_compose::InlineProvider::from_files([("f", b"x".as_slice())])),
+            Arc::new(vfs_compose::InlineProvider::from_files([(
+                "f",
+                b"x".as_slice(),
+            )])),
         )
         .unwrap();
         vfs_compose::reset_rejected_writes();
         let _ = d.open(RootId::DEFAULT, "f", OPEN_WRITE);
         let rejected = vfs_compose::rejected_writes();
         assert!(
-            rejected.iter().any(|(path, count)| path == "f" && *count >= 1),
+            rejected
+                .iter()
+                .any(|(path, count)| path == "f" && *count >= 1),
             "a rejected write must be discoverable, got {rejected:?}"
         );
     }
@@ -592,10 +626,18 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let d = Director::new();
-        d.mount(RootId::DEFAULT, Arc::new(vfs_compose::DiskProvider::new(&dir))).unwrap();
+        d.mount(
+            RootId::DEFAULT,
+            Arc::new(vfs_compose::DiskProvider::new(&dir)),
+        )
+        .unwrap();
 
         let (fh, _, _) = d
-            .open(RootId::DEFAULT, "w.txt", OPEN_WRITE | vfs_provider::OPEN_CREATE)
+            .open(
+                RootId::DEFAULT,
+                "w.txt",
+                OPEN_WRITE | vfs_provider::OPEN_CREATE,
+            )
             .unwrap();
         assert_eq!(d.write(fh, 0, b"hello").unwrap(), 5);
         d.close(fh).unwrap();
@@ -616,10 +658,18 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("log.txt"), b"one").unwrap();
         let d = Director::new();
-        d.mount(RootId::DEFAULT, Arc::new(vfs_compose::DiskProvider::new(&dir))).unwrap();
+        d.mount(
+            RootId::DEFAULT,
+            Arc::new(vfs_compose::DiskProvider::new(&dir)),
+        )
+        .unwrap();
 
         let (fh, _, _) = d
-            .open(RootId::DEFAULT, "log.txt", OPEN_WRITE | vfs_provider::OPEN_APPEND)
+            .open(
+                RootId::DEFAULT,
+                "log.txt",
+                OPEN_WRITE | vfs_provider::OPEN_APPEND,
+            )
             .unwrap();
         // Offset 0 must be ignored on an append handle.
         d.write(fh, 0, b"two").unwrap();
@@ -635,10 +685,18 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("log.txt"), b"0123456789").unwrap();
         let d = Director::new();
-        d.mount(RootId::DEFAULT, Arc::new(vfs_compose::DiskProvider::new(&dir))).unwrap();
+        d.mount(
+            RootId::DEFAULT,
+            Arc::new(vfs_compose::DiskProvider::new(&dir)),
+        )
+        .unwrap();
 
         let (fh, _, _) = d
-            .open(RootId::DEFAULT, "log.txt", OPEN_WRITE | vfs_provider::OPEN_APPEND)
+            .open(
+                RootId::DEFAULT,
+                "log.txt",
+                OPEN_WRITE | vfs_provider::OPEN_APPEND,
+            )
             .unwrap();
         // Cursor starts at 10 (the size at open). Truncating to 4 must clamp
         // it down too, or the next append would write at the stale offset
@@ -669,10 +727,16 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let graph = vfs_compose::MountGraph::new(vec![
-            ("/".to_string(), Arc::new(vfs_compose::DiskProvider::new(&dir)) as Arc<dyn Provider>),
             (
                 "/".to_string(),
-                Arc::new(vfs_compose::InlineProvider::from_files([("f", b"x".as_slice())])),
+                Arc::new(vfs_compose::DiskProvider::new(&dir)) as Arc<dyn Provider>,
+            ),
+            (
+                "/".to_string(),
+                Arc::new(vfs_compose::InlineProvider::from_files([(
+                    "f",
+                    b"x".as_slice(),
+                )])),
             ),
         ])
         .unwrap();
@@ -693,7 +757,11 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("x.txt"), b"x").unwrap();
         let d = Director::new();
-        d.mount(RootId::DEFAULT, Arc::new(vfs_compose::DiskProvider::new(&dir))).unwrap();
+        d.mount(
+            RootId::DEFAULT,
+            Arc::new(vfs_compose::DiskProvider::new(&dir)),
+        )
+        .unwrap();
         assert!(d.getattr(RootId::DEFAULT, "x.txt").unwrap().is_some());
         d.unmount(RootId::DEFAULT).unwrap();
         assert!(d.getattr(RootId::DEFAULT, "x.txt").unwrap().is_none());
@@ -708,12 +776,18 @@ mod tests {
         let d = Director::new();
         d.mount(
             RootId(0),
-            Arc::new(vfs_compose::InlineProvider::from_files([("a.txt", b"ZERO".as_slice())])),
+            Arc::new(vfs_compose::InlineProvider::from_files([(
+                "a.txt",
+                b"ZERO".as_slice(),
+            )])),
         )
         .unwrap();
         d.mount(
             RootId(1),
-            Arc::new(vfs_compose::InlineProvider::from_files([("a.txt", b"ONE".as_slice())])),
+            Arc::new(vfs_compose::InlineProvider::from_files([(
+                "a.txt",
+                b"ONE".as_slice(),
+            )])),
         )
         .unwrap();
 

@@ -16,7 +16,7 @@ use vfs_proton::{
 };
 
 use super::stage::ResolvedImage;
-use super::{LaunchExit, LaunchOpts, STOPPED_EXIT_CODE, Session, check_image};
+use super::{check_image, LaunchExit, LaunchOpts, Session, STOPPED_EXIT_CODE};
 use crate::image::{self, RootLocation};
 
 mod handle;
@@ -571,16 +571,18 @@ impl Session {
         // behaves as on Windows.
         let resolved = self.resolve_launch_image(opts)?;
 
-        let booted = self.ensure_prefix().map_err(|e| match e.strip_prefix(NO_RUNTIME) {
-            // The CLI hint belongs to aether's own launch path; a host that
-            // calls `prepare_prefix` gets the bare message.
-            Some(_) => format!(
-                "launch: {e} — install one with `vfs-proton install` (VFS_HOME selects \
+        let booted = self
+            .ensure_prefix()
+            .map_err(|e| match e.strip_prefix(NO_RUNTIME) {
+                // The CLI hint belongs to aether's own launch path; a host that
+                // calls `prepare_prefix` gets the bare message.
+                Some(_) => format!(
+                    "launch: {e} — install one with `vfs-proton install` (VFS_HOME selects \
                  where it lands). Launching on stock Proton instead is the silent \
                  downgrade this path refuses."
-            ),
-            None => format!("launch: {e}"),
-        })?;
+                ),
+                None => format!("launch: {e}"),
+            })?;
         let wine = self.wine_launch(opts, ipc, &ring, resolved, &booted)?;
 
         let child = vfs_proton::launch::spawn(&wine).map_err(|e| format!("launch: {e}"))?;
@@ -699,9 +701,7 @@ impl Session {
         let home = self.proton_home()?;
         let runtime = vfs_proton::runtime::newest_installed(&home)
             .map_err(|e| format!("reading {}: {e}", home.runtimes().display()))?
-            .ok_or_else(|| {
-                format!("{NO_RUNTIME} {}", home.runtimes().display())
-            })?;
+            .ok_or_else(|| format!("{NO_RUNTIME} {}", home.runtimes().display()))?;
 
         let prefix_id = match &self.proton.prefix_name {
             Some(name) => name.clone(),

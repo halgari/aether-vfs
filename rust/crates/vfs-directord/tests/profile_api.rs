@@ -119,7 +119,9 @@ async fn profile_api_reads_a_managed_root_ini_through_the_director() {
         .expect("CreateSession")
         .into_inner();
 
-    use vfs_control::pb::{source_spec, AddSourceReq, DiskSource, LaunchReq, SourceSpec as PbSource};
+    use vfs_control::pb::{
+        source_spec, AddSourceReq, DiskSource, LaunchReq, SourceSpec as PbSource,
+    };
     client
         .add_source(AddSourceReq {
             session_id: session.id.clone(),
@@ -386,9 +388,10 @@ async fn profile_api_reads_a_managed_root_ini_through_the_director() {
         .find_map(|l| {
             let rest = l.trim().strip_prefix("reads:")?;
             let (_, after_apc) = rest.split_once('/')?;
-            after_apc.trim().strip_suffix(" with event").or_else(|| {
-                after_apc.split_once(" with event").map(|(n, _)| n)
-            })
+            after_apc
+                .trim()
+                .strip_suffix(" with event")
+                .or_else(|| after_apc.split_once(" with event").map(|(n, _)| n))
         })
         .and_then(|n| n.trim().parse::<u64>().ok())
         .unwrap_or_else(|| {
@@ -465,7 +468,9 @@ async fn profile_api_writes_a_managed_root_ini_through_the_director() {
         .expect("CreateSession")
         .into_inner();
 
-    use vfs_control::pb::{source_spec, AddSourceReq, DiskSource, LaunchReq, SourceSpec as PbSource};
+    use vfs_control::pb::{
+        source_spec, AddSourceReq, DiskSource, LaunchReq, SourceSpec as PbSource,
+    };
     client
         .add_source(AddSourceReq {
             session_id: session.id.clone(),
@@ -496,7 +501,10 @@ async fn profile_api_writes_a_managed_root_ini_through_the_director() {
         "VFS_FIXTURE_INI_OUT".to_string(),
         out_file.to_string_lossy().into_owned(),
     );
-    env.insert("VFS_FIXTURE_INI_WRITE".to_string(), PREFS_WRITTEN.to_string());
+    env.insert(
+        "VFS_FIXTURE_INI_WRITE".to_string(),
+        PREFS_WRITTEN.to_string(),
+    );
 
     let mut stream = client
         .launch(LaunchReq {

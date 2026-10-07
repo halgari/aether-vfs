@@ -103,7 +103,10 @@ mod tests {
         let t = describe_injector_error("ready-timeout:180");
         assert!(t.contains("180 s"), "{t}");
         let f = describe_injector_error("fuse-failed:no ring");
-        assert!(f.contains("attach to the director") && f.contains("no ring"), "{f}");
+        assert!(
+            f.contains("attach to the director") && f.contains("no ring"),
+            "{f}"
+        );
         let b = describe_injector_error("bootstrap-failed:shim config version 3");
         assert!(b.contains("bootstrap") && b.contains("version 3"), "{b}");
         assert_eq!(
@@ -124,13 +127,18 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let ready = dir.join("ready.flag");
         assert!(read_child_refusals(&ready).is_empty());
-        std::fs::write(child_refused_path(&ready), "C:\\a b\\x.exe ready-timeout\n\ny.exe child-32bit\n")
-            .unwrap();
+        std::fs::write(
+            child_refused_path(&ready),
+            "C:\\a b\\x.exe ready-timeout\n\ny.exe child-32bit\n",
+        )
+        .unwrap();
         assert_eq!(
             read_child_refusals(&ready),
             ["C:\\a b\\x.exe ready-timeout", "y.exe child-32bit"]
         );
-        assert!(child_refused_path(&ready).to_string_lossy().ends_with(".child-refused"));
+        assert!(child_refused_path(&ready)
+            .to_string_lossy()
+            .ends_with(".child-refused"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

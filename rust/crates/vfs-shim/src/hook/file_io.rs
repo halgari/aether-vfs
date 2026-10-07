@@ -2,7 +2,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 use super::{
-    TRAMP_FLUSH, TRAMP_LOCK, TRAMP_READ, TRAMP_UNLOCK, TRAMP_WRITE, open_synth, synth_path,
+    open_synth, synth_path, TRAMP_FLUSH, TRAMP_LOCK, TRAMP_READ, TRAMP_UNLOCK, TRAMP_WRITE,
 };
 use crate::ntdef::{
     STATUS_END_OF_FILE, STATUS_INVALID_HANDLE, STATUS_SUCCESS, STATUS_UNSUCCESSFUL,

@@ -71,7 +71,8 @@ fn layout(name: &str) -> Layout {
 /// real content always wins), then the game archive, then the mod tree.
 fn mount_read_layers(s: &Session, l: &Layout) {
     s.mount("", Arc::new(DiskProvider::new(&l.root))).unwrap();
-    s.mount("", Arc::new(DiskProvider::new(&l.staging))).unwrap();
+    s.mount("", Arc::new(DiskProvider::new(&l.staging)))
+        .unwrap();
     s.mount(
         "",
         Arc::new(vfs_zip::ZipProvider::open(&l.zip).expect("zip index")),
@@ -82,7 +83,9 @@ fn mount_read_layers(s: &Session, l: &Layout) {
 
 fn read_whole(s: &Session, vpath: &str) -> Vec<u8> {
     let k = s.kernel();
-    let (fh, size, _) = k.open(RootId::DEFAULT, vpath, OPEN_READ).expect("open for read");
+    let (fh, size, _) = k
+        .open(RootId::DEFAULT, vpath, OPEN_READ)
+        .expect("open for read");
     let mut buf = vec![0u8; size as usize];
     let mut off = 0usize;
     while off < buf.len() {
@@ -113,13 +116,11 @@ fn an_in_place_edit_of_read_only_layered_content_lands_in_the_write_layer() {
     // Exactly what `fopen(path, "r+b")` becomes by the time it reaches the
     // ring: OPEN_WRITE with **no** create/truncate bits. Nothing writable
     // holds this path, so only copy-up can answer it.
-    let (fh, size, is_dir) = k
-        .open(RootId::DEFAULT, ZIP_VPATH, OPEN_WRITE)
-        .expect(
-            "an in-place edit of read-only layered content must be served by copy-up. \
+    let (fh, size, is_dir) = k.open(RootId::DEFAULT, ZIP_VPATH, OPEN_WRITE).expect(
+        "an in-place edit of read-only layered content must be served by copy-up. \
              ST_READ_ONLY here is the regression this test exists for: the writable layer \
              is a sibling mount again instead of an overlay upper",
-        );
+    );
     assert!(!is_dir);
     assert_eq!(
         size as usize,
@@ -155,7 +156,11 @@ fn an_in_place_edit_of_read_only_layered_content_lands_in_the_write_layer() {
     // …and no other layer received a stray copy. A write that landed in the
     // managed root's own directory would be the escape the whole gate exists
     // to prevent.
-    for (label, dir) in [("root", &l.root), ("staging", &l.staging), ("mods", &l.mods)] {
+    for (label, dir) in [
+        ("root", &l.root),
+        ("staging", &l.staging),
+        ("mods", &l.mods),
+    ] {
         assert!(
             !dir.join("data").join("x.esp").exists(),
             "the write leaked into the {label} layer at {dir:?}"
@@ -173,7 +178,10 @@ fn an_in_place_edit_of_read_only_layered_content_lands_in_the_write_layer() {
                 .is_some_and(|n| n.starts_with(".cu."))
         })
         .collect();
-    assert!(strays.is_empty(), "copy-up left temp files behind: {strays:?}");
+    assert!(
+        strays.is_empty(),
+        "copy-up left temp files behind: {strays:?}"
+    );
 }
 
 /// The negative control for the test above, and the shape that regressed:
@@ -189,7 +197,8 @@ fn the_same_layers_with_the_write_layer_mounted_as_a_sibling_cannot_edit_in_plac
     let s = Session::new();
     mount_read_layers(&s, &l);
     // The pre-fix composition: one more sibling mount at the same prefix.
-    s.mount("", Arc::new(DiskProvider::new(&l.overrides))).unwrap();
+    s.mount("", Arc::new(DiskProvider::new(&l.overrides)))
+        .unwrap();
 
     let err = s
         .kernel()
@@ -216,7 +225,8 @@ fn a_brand_new_file_still_lands_in_the_write_layer() {
     let l = layout("create");
     let s = Session::new();
     mount_read_layers(&s, &l);
-    s.set_write_layer(Arc::new(DiskProvider::new(&l.overrides))).unwrap();
+    s.set_write_layer(Arc::new(DiskProvider::new(&l.overrides)))
+        .unwrap();
 
     let k = s.kernel();
     let (fh, _, _) = k
@@ -246,7 +256,8 @@ fn reads_of_untouched_layered_content_are_unchanged_by_the_write_layer() {
 
     let s = Session::new();
     mount_read_layers(&s, &l);
-    s.set_write_layer(Arc::new(DiskProvider::new(&l.overrides))).unwrap();
+    s.set_write_layer(Arc::new(DiskProvider::new(&l.overrides)))
+        .unwrap();
 
     assert_eq!(read_whole(&s, ZIP_VPATH), ORIGINAL);
     assert_eq!(read_whole(&s, "modfile.txt"), b"FROM-MODS");
@@ -277,12 +288,21 @@ fn a_write_open_of_a_layered_directory_does_not_create_a_file_over_it() {
     let l = layout("dircreate");
     let s = Session::new();
     mount_read_layers(&s, &l);
-    s.set_write_layer(Arc::new(DiskProvider::new(&l.overrides))).unwrap();
+    s.set_write_layer(Arc::new(DiskProvider::new(&l.overrides)))
+        .unwrap();
 
     // `data` exists only implicitly, as the parent of the zip's `Data/x.esp`
     // — the same way a real archive carries its directories.
-    let st = s.kernel().getattr(RootId::DEFAULT, "data").unwrap().unwrap();
-    assert_eq!(st.kind, vfs_embed::KIND_DIR, "setup: `data` must resolve as a directory");
+    let st = s
+        .kernel()
+        .getattr(RootId::DEFAULT, "data")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        st.kind,
+        vfs_embed::KIND_DIR,
+        "setup: `data` must resolve as a directory"
+    );
 
     let err = s
         .kernel()
@@ -305,7 +325,11 @@ fn a_write_open_of_a_layered_directory_does_not_create_a_file_over_it() {
     );
     // The directory is still a directory afterwards.
     assert_eq!(
-        s.kernel().getattr(RootId::DEFAULT, "data").unwrap().unwrap().kind,
+        s.kernel()
+            .getattr(RootId::DEFAULT, "data")
+            .unwrap()
+            .unwrap()
+            .kind,
         vfs_embed::KIND_DIR
     );
 }
@@ -323,11 +347,16 @@ fn a_stray_file_in_the_write_layer_does_not_break_a_directorys_listing() {
     // Planted directly on disk, deliberately bypassing the provider graph:
     // the point is resilience to a write layer that is already in this state,
     // whatever produced it.
-    std::fs::write(l.overrides.join("data"), b"a file where a directory belongs").unwrap();
+    std::fs::write(
+        l.overrides.join("data"),
+        b"a file where a directory belongs",
+    )
+    .unwrap();
 
     let s = Session::new();
     mount_read_layers(&s, &l);
-    s.set_write_layer(Arc::new(DiskProvider::new(&l.overrides))).unwrap();
+    s.set_write_layer(Arc::new(DiskProvider::new(&l.overrides)))
+        .unwrap();
 
     let names: Vec<String> = s
         .kernel()
@@ -355,7 +384,8 @@ fn listing_a_plain_file_still_reports_not_a_directory() {
     let l = layout("notadir");
     let s = Session::new();
     mount_read_layers(&s, &l);
-    s.set_write_layer(Arc::new(DiskProvider::new(&l.overrides))).unwrap();
+    s.set_write_layer(Arc::new(DiskProvider::new(&l.overrides)))
+        .unwrap();
 
     let err = s
         .kernel()
@@ -431,5 +461,8 @@ fn write_stored_zip(path: &Path, entry: &str, content: &[u8]) {
     buf.extend_from_slice(&cd_size.to_le_bytes());
     buf.extend_from_slice(&cd_start.to_le_bytes());
     buf.extend_from_slice(&0u16.to_le_bytes());
-    std::fs::File::create(path).unwrap().write_all(&buf).unwrap();
+    std::fs::File::create(path)
+        .unwrap()
+        .write_all(&buf)
+        .unwrap();
 }

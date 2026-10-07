@@ -18,9 +18,9 @@
 //! `AddSource` on the wire, since that — not the Rust API — is what a config
 //! file reaches.
 
-use vfs_testkit::zip::write_stored_zip;
 use std::path::PathBuf;
 use std::sync::Arc;
+use vfs_testkit::zip::write_stored_zip;
 
 use tokio::net::TcpListener;
 use tonic::transport::Server;
@@ -28,8 +28,8 @@ use vfs_control::pb::director_server::DirectorServer;
 use vfs_control::pb::{source_spec, AddSourceReq, CreateSessionReq, DiskSource, ZipSource};
 use vfs_control::SourceSpec;
 use vfs_director::{Provider, RootId, OPEN_WRITE};
-use vfs_embed::DiskProvider;
 use vfs_directord::{connect, DirectorService, SessionRegistry};
+use vfs_embed::DiskProvider;
 use vfs_source::build_provider;
 
 /// The archive-only file every test here edits, spelled as a real archive
@@ -182,8 +182,14 @@ fn the_writable_directory_added_as_an_ordinary_source_cannot_edit_in_place() {
     let summary = reg.create("daemon-cow-sibling".into()).unwrap();
     add_read_sources(&reg, &summary.id, &l);
     let overrides = write_layer_dir(&reg, &summary.id);
-    reg.add_source(&summary.id, 0, "/", 20, Arc::new(DiskProvider::new(&overrides)))
-        .unwrap();
+    reg.add_source(
+        &summary.id,
+        0,
+        "/",
+        20,
+        Arc::new(DiskProvider::new(&overrides)),
+    )
+    .unwrap();
 
     let err = open_for_in_place_edit(&reg, &summary.id)
         .expect_err("a sibling writable source cannot copy up, so this open cannot succeed");
@@ -577,7 +583,6 @@ write_layer = true
 fn toml_quote(s: &str) -> String {
     format!("{s:?}")
 }
-
 
 /// Sessions default to a directory under the system temp dir, and the daemons
 /// these tests spawn inherit this process's environment. Point both at `target/`.

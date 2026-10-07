@@ -67,7 +67,11 @@ fn child_prefix(path: &str) -> String {
 /// *is* that child (a file or explicit empty dir) rather than merely
 /// implying it (a deeper entry on its way to some grandchild).
 fn direct_child<'k>(path: &str, prefix: &str, key: &'k str) -> Option<(&'k str, bool)> {
-    let rel = if path.is_empty() { key } else { key.strip_prefix(prefix)? };
+    let rel = if path.is_empty() {
+        key
+    } else {
+        key.strip_prefix(prefix)?
+    };
     let name = rel.split('/').next().unwrap_or("");
     (!name.is_empty()).then_some((name, name.len() == rel.len()))
 }
@@ -79,18 +83,33 @@ fn direct_child<'k>(path: &str, prefix: &str, key: &'k str) -> Option<(&'k str, 
 /// what exists.
 fn stat_of(files: &HashMap<String, Vec<u8>>, dirs: &HashSet<String>, path: &str) -> Option<Stat> {
     if path.is_empty() {
-        return Some(Stat { kind: KIND_DIR, size: 0, mtime: 0 });
+        return Some(Stat {
+            kind: KIND_DIR,
+            size: 0,
+            mtime: 0,
+        });
     }
     if let Some(b) = files.get(path) {
-        return Some(Stat { kind: KIND_FILE, size: b.len() as u64, mtime: 0 });
+        return Some(Stat {
+            kind: KIND_FILE,
+            size: b.len() as u64,
+            mtime: 0,
+        });
     }
     if dirs.contains(path) {
-        return Some(Stat { kind: KIND_DIR, size: 0, mtime: 0 });
+        return Some(Stat {
+            kind: KIND_DIR,
+            size: 0,
+            mtime: 0,
+        });
     }
     let prefix = format!("{path}/");
-    if files.keys().any(|k| k.starts_with(&prefix)) || dirs.iter().any(|d| d.starts_with(&prefix))
-    {
-        return Some(Stat { kind: KIND_DIR, size: 0, mtime: 0 });
+    if files.keys().any(|k| k.starts_with(&prefix)) || dirs.iter().any(|d| d.starts_with(&prefix)) {
+        return Some(Stat {
+            kind: KIND_DIR,
+            size: 0,
+            mtime: 0,
+        });
     }
     None
 }
@@ -188,7 +207,9 @@ fn canonical_in(
         let folded_part = fold(part);
         let mut best: Option<&str> = None;
         for k in files.keys().chain(dirs.iter()) {
-            let Some(rest) = k.strip_prefix(prefix.as_str()) else { continue };
+            let Some(rest) = k.strip_prefix(prefix.as_str()) else {
+                continue;
+            };
             let name = rest.split('/').next().unwrap_or("");
             if name.is_empty() || fold(name) != folded_part {
                 continue;
@@ -339,19 +360,38 @@ impl Provider for MemoryProvider {
         let prefix = child_prefix(&path);
         let mut names: HashMap<String, Stat> = HashMap::new();
         for (k, b) in files.iter() {
-            let Some((name, is_leaf)) = direct_child(&path, &prefix, k) else { continue };
+            let Some((name, is_leaf)) = direct_child(&path, &prefix, k) else {
+                continue;
+            };
             let st = if is_leaf {
-                Stat { kind: KIND_FILE, size: b.len() as u64, mtime: 0 }
+                Stat {
+                    kind: KIND_FILE,
+                    size: b.len() as u64,
+                    mtime: 0,
+                }
             } else {
-                Stat { kind: KIND_DIR, size: 0, mtime: 0 }
+                Stat {
+                    kind: KIND_DIR,
+                    size: 0,
+                    mtime: 0,
+                }
             };
             names.entry(name.to_string()).or_insert(st);
         }
         for d in dirs.iter() {
-            let Some((name, _)) = direct_child(&path, &prefix, d) else { continue };
-            names.entry(name.to_string()).or_insert(Stat { kind: KIND_DIR, size: 0, mtime: 0 });
+            let Some((name, _)) = direct_child(&path, &prefix, d) else {
+                continue;
+            };
+            names.entry(name.to_string()).or_insert(Stat {
+                kind: KIND_DIR,
+                size: 0,
+                mtime: 0,
+            });
         }
-        Ok(names.into_iter().map(|(name, stat)| DirEntry { name, stat }).collect())
+        Ok(names
+            .into_iter()
+            .map(|(name, stat)| DirEntry { name, stat })
+            .collect())
     }
 
     fn open(&self, p: VPath, flags: u32) -> Result<(Handle, u64, bool), i32> {
@@ -426,7 +466,10 @@ impl Provider for MemoryProvider {
         let path = self.opens.get(h)?;
         let mut files = self.files.lock().map_err(|_| map_io_err())?;
         let existed = files.contains_key(&path);
-        files.entry(path.clone()).or_default().resize(len as usize, 0);
+        files
+            .entry(path.clone())
+            .or_default()
+            .resize(len as usize, 0);
         if !existed {
             let mut by_fold = self.by_fold.lock().map_err(|_| map_io_err())?;
             index_insert(&mut by_fold, &path);
@@ -480,7 +523,8 @@ impl Provider for MemoryProvider {
             return Ok(());
         }
         let prefix = child_prefix(&path);
-        if files.keys().any(|k| k.starts_with(&prefix)) || dirs.iter().any(|d| d.starts_with(&prefix))
+        if files.keys().any(|k| k.starts_with(&prefix))
+            || dirs.iter().any(|d| d.starts_with(&prefix))
         {
             return Err(is_dir());
         }
@@ -550,7 +594,11 @@ impl Provider for MemoryProvider {
         // a move into a not-yet-existing child of an existing fold-equal
         // directory lands inside it instead of forking a divergently-cased
         // sibling — the create-side half of spec 6b, reached through rename.
-        let insert_base = if to_exists { to_p.clone() } else { to_c.clone() };
+        let insert_base = if to_exists {
+            to_p.clone()
+        } else {
+            to_c.clone()
+        };
 
         if files.contains_key(&from_c) {
             if to_exists && to_c != from_c {
@@ -642,8 +690,9 @@ mod tests {
     /// capabilities this one actually declares (`Access::ReadWrite`).
     #[test]
     fn memory_provider_passes_conformance_as_read_write() {
-        let p: Arc<dyn Provider> =
-            Arc::new(MemoryProvider::from_files(vfs_provider::FIXTURE_FILES.iter().copied()));
+        let p: Arc<dyn Provider> = Arc::new(MemoryProvider::from_files(
+            vfs_provider::FIXTURE_FILES.iter().copied(),
+        ));
         assert_eq!(p.capabilities().access, Access::ReadWrite);
         vfs_provider::assert_conformance(p);
     }
@@ -668,14 +717,17 @@ mod tests {
             "remove of a non-empty directory must fail, not silently do nothing"
         );
         assert_eq!(
-            p.getattr(VPath::at_default("sub/b.txt")).unwrap().map(|s| s.size),
+            p.getattr(VPath::at_default("sub/b.txt"))
+                .unwrap()
+                .map(|s| s.size),
             Some(6),
             "the refused remove must leave the child alone"
         );
         // An empty directory still goes away: the refusal is about children,
         // not about being a directory.
         p.mkdir(VPath::at_default("empty")).unwrap();
-        p.remove(VPath::at_default("empty")).expect("an empty directory removes");
+        p.remove(VPath::at_default("empty"))
+            .expect("an empty directory removes");
         assert!(p.getattr(VPath::at_default("empty")).unwrap().is_none());
     }
 
@@ -703,15 +755,21 @@ mod tests {
         );
         assert!(p.getattr(VPath::at_default("sub/b.txt")).unwrap().is_none());
         assert_eq!(
-            p.getattr(VPath::at_default("sub2/b.txt")).unwrap().map(|s| s.size),
+            p.getattr(VPath::at_default("sub2/b.txt"))
+                .unwrap()
+                .map(|s| s.size),
             Some(6)
         );
         assert_eq!(
-            p.getattr(VPath::at_default("sub2/deep/c.txt")).unwrap().map(|s| s.size),
+            p.getattr(VPath::at_default("sub2/deep/c.txt"))
+                .unwrap()
+                .map(|s| s.size),
             Some(6)
         );
         assert_eq!(
-            p.getattr(VPath::at_default("sub2/hollow")).unwrap().map(|s| s.kind),
+            p.getattr(VPath::at_default("sub2/hollow"))
+                .unwrap()
+                .map(|s| s.kind),
             Some(KIND_DIR),
             "an explicitly-created empty child directory must move too"
         );
@@ -732,12 +790,16 @@ mod tests {
             "rename onto an occupied path must be refused"
         );
         assert_eq!(
-            p.getattr(VPath::at_default("other/keep.txt")).unwrap().map(|s| s.size),
+            p.getattr(VPath::at_default("other/keep.txt"))
+                .unwrap()
+                .map(|s| s.size),
             Some(4),
             "the refused rename must leave the destination alone"
         );
         assert_eq!(
-            p.getattr(VPath::at_default("sub/b.txt")).unwrap().map(|s| s.size),
+            p.getattr(VPath::at_default("sub/b.txt"))
+                .unwrap()
+                .map(|s| s.size),
             Some(6),
             "the refused rename must leave the source alone"
         );
@@ -765,7 +827,11 @@ mod tests {
             .into_iter()
             .map(|e| e.name)
             .collect();
-        assert_eq!(names, vec!["A.esp".to_string()], "readdir must report the seeded spelling");
+        assert_eq!(
+            names,
+            vec!["A.esp".to_string()],
+            "readdir must report the seeded spelling"
+        );
     }
 
     /// Non-ASCII, because `to_ascii_lowercase` would pass every case above.
@@ -773,7 +839,9 @@ mod tests {
     fn folding_is_unicode_not_ascii() {
         let p = MemoryProvider::from_files([("Über/A.esp", &b"x"[..])]);
         assert!(
-            p.getattr(VPath::at_default("über/a.esp")).unwrap().is_some(),
+            p.getattr(VPath::at_default("über/a.esp"))
+                .unwrap()
+                .is_some(),
             "Unicode fold-equal spelling did not resolve"
         );
     }
@@ -793,16 +861,25 @@ mod tests {
         p.rename(VPath::at_default("a.txt"), VPath::at_default("B.TXT"))
             .expect("rename onto a fold-equal destination");
 
-        let names: Vec<String> =
-            p.readdir(VPath::at_default("")).unwrap().into_iter().map(|e| e.name).collect();
+        let names: Vec<String> = p
+            .readdir(VPath::at_default(""))
+            .unwrap()
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
         assert_eq!(
             names,
             vec!["B.TXT".to_string()],
             "the fold-equal destination must be overwritten, not duplicated: {names:?}"
         );
 
-        let (h, size, _) = p.open(VPath::at_default("b.txt"), vfs_provider::OPEN_READ).unwrap();
-        assert_eq!(size, 6, "found via the old destination's fold-equal spelling");
+        let (h, size, _) = p
+            .open(VPath::at_default("b.txt"), vfs_provider::OPEN_READ)
+            .unwrap();
+        assert_eq!(
+            size, 6,
+            "found via the old destination's fold-equal spelling"
+        );
         let mut buf = [0u8; 6];
         p.read_at(h, 0, &mut buf).unwrap();
         assert_eq!(&buf, b"from a", "the renamed file's content must win");
@@ -825,12 +902,16 @@ mod tests {
             "rename onto a fold-equal occupied path must be refused"
         );
         assert_eq!(
-            p.getattr(VPath::at_default("Dest/keep.txt")).unwrap().map(|s| s.size),
+            p.getattr(VPath::at_default("Dest/keep.txt"))
+                .unwrap()
+                .map(|s| s.size),
             Some(4),
             "the refused rename must leave the fold-equal destination alone"
         );
         assert_eq!(
-            p.getattr(VPath::at_default("sub/b.txt")).unwrap().map(|s| s.size),
+            p.getattr(VPath::at_default("sub/b.txt"))
+                .unwrap()
+                .map(|s| s.size),
             Some(6),
             "the refused rename must leave the source alone"
         );
@@ -849,12 +930,16 @@ mod tests {
             "a fold-equal self-nesting rename must be refused"
         );
         assert_eq!(
-            p.getattr(VPath::at_default("Data/A.esp")).unwrap().map(|s| s.size),
+            p.getattr(VPath::at_default("Data/A.esp"))
+                .unwrap()
+                .map(|s| s.size),
             Some(4),
             "the refused rename must leave the source alone"
         );
         assert!(
-            p.getattr(VPath::at_default("DATA/Sub/A.esp")).unwrap().is_none(),
+            p.getattr(VPath::at_default("DATA/Sub/A.esp"))
+                .unwrap()
+                .is_none(),
             "the refused rename must not have moved anything"
         );
     }
@@ -865,7 +950,9 @@ mod tests {
     #[test]
     fn constructed_bytes_are_readable_back_untouched() {
         let p = MemoryProvider::from_files([("Skyrim.ini", b"ORIGINAL".as_slice())]);
-        let (h, size, _) = p.open(VPath::at_default("Skyrim.ini"), vfs_provider::OPEN_READ).unwrap();
+        let (h, size, _) = p
+            .open(VPath::at_default("Skyrim.ini"), vfs_provider::OPEN_READ)
+            .unwrap();
         assert_eq!(size, 8);
         let mut buf = [0u8; 8];
         let n = p.read_at(h, 0, &mut buf).unwrap();
@@ -898,7 +985,11 @@ mod tests {
                 .into_iter()
                 .map(|e| e.name)
                 .collect();
-            assert_eq!(data, vec!["A.esp".to_string()], "readdir(Data) must show only its own child");
+            assert_eq!(
+                data,
+                vec!["A.esp".to_string()],
+                "readdir(Data) must show only its own child"
+            );
 
             let datau: Vec<String> = p
                 .readdir(VPath::at_default("DATA"))
@@ -906,16 +997,24 @@ mod tests {
                 .into_iter()
                 .map(|e| e.name)
                 .collect();
-            assert_eq!(datau, vec!["B.esp".to_string()], "readdir(DATA) must show only its own child");
+            assert_eq!(
+                datau,
+                vec!["B.esp".to_string()],
+                "readdir(DATA) must show only its own child"
+            );
         }
 
         assert_eq!(
-            p.getattr(VPath::at_default("Data/A.esp")).unwrap().map(|s| s.size),
+            p.getattr(VPath::at_default("Data/A.esp"))
+                .unwrap()
+                .map(|s| s.size),
             Some(4),
             "Data/A.esp must remain reachable"
         );
         assert_eq!(
-            p.getattr(VPath::at_default("DATA/B.esp")).unwrap().map(|s| s.size),
+            p.getattr(VPath::at_default("DATA/B.esp"))
+                .unwrap()
+                .map(|s| s.size),
             Some(2),
             "DATA/B.esp must remain reachable -- the old bug hid it under every spelling"
         );
@@ -932,10 +1031,13 @@ mod tests {
                 ("Data/A.esp", b"body".as_slice()),
                 ("DATA/B.esp", b"XY".as_slice()),
             ]);
-            p.rename(VPath::at_default("DATA"), VPath::at_default("X")).expect("rename DATA -> X");
+            p.rename(VPath::at_default("DATA"), VPath::at_default("X"))
+                .expect("rename DATA -> X");
 
             assert_eq!(
-                p.getattr(VPath::at_default("Data/A.esp")).unwrap().map(|s| s.size),
+                p.getattr(VPath::at_default("Data/A.esp"))
+                    .unwrap()
+                    .map(|s| s.size),
                 Some(4),
                 "Data must be untouched by a rename of DATA"
             );
@@ -944,13 +1046,23 @@ mod tests {
             // three entries. (`DATA` is still a valid, fold-equal *query*
             // for the sole remaining `Data`, same as any other fold-equal
             // spelling -- that is expected, not a leftover of the rename.)
-            let top: Vec<String> =
-                p.readdir(VPath::at_default("")).unwrap().into_iter().map(|e| e.name).collect();
+            let top: Vec<String> = p
+                .readdir(VPath::at_default(""))
+                .unwrap()
+                .into_iter()
+                .map(|e| e.name)
+                .collect();
             let mut top = top;
             top.sort();
-            assert_eq!(top, vec!["Data".to_string(), "X".to_string()], "DATA must be gone as a distinct entry");
             assert_eq!(
-                p.getattr(VPath::at_default("X/B.esp")).unwrap().map(|s| s.size),
+                top,
+                vec!["Data".to_string(), "X".to_string()],
+                "DATA must be gone as a distinct entry"
+            );
+            assert_eq!(
+                p.getattr(VPath::at_default("X/B.esp"))
+                    .unwrap()
+                    .map(|s| s.size),
                 Some(2),
                 "X must hold DATA's child, not Data's"
             );
@@ -970,12 +1082,19 @@ mod tests {
         let p = MemoryProvider::from_files([("Data/old.txt", b"host".as_slice())]);
 
         let (h, _len, _is_dir) = p
-            .open(VPath::at_default("data/new.txt"), vfs_provider::OPEN_WRITE | OPEN_CREATE)
+            .open(
+                VPath::at_default("data/new.txt"),
+                vfs_provider::OPEN_WRITE | OPEN_CREATE,
+            )
             .expect("create through a fold-equal directory spelling must succeed");
         p.close(h).expect("close");
 
-        let top: Vec<String> =
-            p.readdir(VPath::at_default("")).unwrap().into_iter().map(|e| e.name).collect();
+        let top: Vec<String> = p
+            .readdir(VPath::at_default(""))
+            .unwrap()
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
         assert_eq!(
             top.len(),
             1,
@@ -1016,7 +1135,9 @@ mod tests {
         );
 
         assert_eq!(
-            p.getattr(VPath::at_default("Dest")).unwrap().map(|s| s.kind),
+            p.getattr(VPath::at_default("Dest"))
+                .unwrap()
+                .map(|s| s.kind),
             Some(KIND_DIR),
             "Dest must still be a directory, not clobbered into a file"
         );
@@ -1026,9 +1147,15 @@ mod tests {
             .into_iter()
             .map(|e| e.name)
             .collect();
-        assert_eq!(names, vec!["keep.txt".to_string()], "Dest's child must survive the refused rename");
         assert_eq!(
-            p.getattr(VPath::at_default("a.txt")).unwrap().map(|s| s.size),
+            names,
+            vec!["keep.txt".to_string()],
+            "Dest's child must survive the refused rename"
+        );
+        assert_eq!(
+            p.getattr(VPath::at_default("a.txt"))
+                .unwrap()
+                .map(|s| s.size),
             Some(6),
             "the refused rename must leave the source alone"
         );

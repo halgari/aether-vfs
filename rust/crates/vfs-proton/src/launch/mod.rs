@@ -45,8 +45,8 @@ mod injector;
 
 use env::stale_env;
 pub use env::{
-    BASE_DLL_OVERRIDES, DEFAULT_WINEDEBUG, check_extra_env, is_reserved_env, launch_env,
-    merge_dll_overrides,
+    check_extra_env, is_reserved_env, launch_env, merge_dll_overrides, BASE_DLL_OVERRIDES,
+    DEFAULT_WINEDEBUG,
 };
 pub use injector::{
     child_refused_path, describe_child_refusal, describe_injector_error, injector_error_path,

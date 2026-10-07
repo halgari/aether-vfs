@@ -127,8 +127,7 @@ fn a_write_under_a_base_directory_does_not_respell_it() {
 fn a_created_name_keeps_the_spelling_it_was_created_with() {
     let (s, _d) = temp_storage();
     let (ov, _upper) = game_overlay(&s);
-    const SAVE: &str =
-        "Save12_ABCDEF01_0_4E6F726420486572_Tamriel_000123_20261002150000_1_1.ess";
+    const SAVE: &str = "Save12_ABCDEF01_0_4E6F726420486572_Tamriel_000123_20261002150000_1_1.ess";
     ov.mkdir(at("Saves")).unwrap();
     write_file(&ov, &format!("saves/{SAVE}"), 0, b"save");
     ov.mkdir(at("Data/SKSE")).unwrap();

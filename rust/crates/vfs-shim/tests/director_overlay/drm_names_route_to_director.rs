@@ -34,7 +34,7 @@
 use crate::fakedirector;
 
 use fakedirector::{Fake, ReadStyle};
-use vfs_shim::{OpenOutcome, install, outcome_count};
+use vfs_shim::{install, outcome_count, OpenOutcome};
 
 /// Bytes on the real filesystem under the managed root. One per name, so a
 /// failure says *which* file was reached rather than only that one was.

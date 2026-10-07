@@ -32,11 +32,19 @@ pub fn is_windows_absolute(s: &str) -> bool {
 /// `c:` for a drive path and `\\server\share` for UNC.
 fn split_abs(s: &str) -> Option<(String, Vec<String>)> {
     let norm = s.replace('/', "\\");
-    let norm = norm.strip_prefix(r"\\?\").map(|rest| {
-        rest.strip_prefix(r"UNC\").map(|u| format!(r"\\{u}")).unwrap_or_else(|| rest.to_string())
-    }).unwrap_or(norm);
+    let norm = norm
+        .strip_prefix(r"\\?\")
+        .map(|rest| {
+            rest.strip_prefix(r"UNC\")
+                .map(|u| format!(r"\\{u}"))
+                .unwrap_or_else(|| rest.to_string())
+        })
+        .unwrap_or(norm);
     let parts = |t: &str| -> Vec<String> {
-        t.split('\\').filter(|c| !c.is_empty() && *c != ".").map(str::to_string).collect()
+        t.split('\\')
+            .filter(|c| !c.is_empty() && *c != ".")
+            .map(str::to_string)
+            .collect()
     };
     let b = norm.as_bytes();
     if b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':' {
@@ -45,7 +53,10 @@ fn split_abs(s: &str) -> Option<(String, Vec<String>)> {
     if let Some(unc) = norm.strip_prefix(r"\\") {
         let mut it = parts(unc).into_iter();
         let (server, share) = (it.next()?, it.next()?);
-        return Some((format!(r"\\{server}\{share}").to_ascii_lowercase(), it.collect()));
+        return Some((
+            format!(r"\\{server}\{share}").to_ascii_lowercase(),
+            it.collect(),
+        ));
     }
     None
 }
@@ -65,21 +76,31 @@ pub fn classify_image(image: &str, roots: &[RootLocation]) -> Result<ImageTarget
         ));
     }
     if !is_windows_absolute(image) {
-        let vpath: Vec<&str> =
-            image.split(['\\', '/']).filter(|c| !c.is_empty() && *c != ".").collect();
+        let vpath: Vec<&str> = image
+            .split(['\\', '/'])
+            .filter(|c| !c.is_empty() && *c != ".")
+            .collect();
         if vpath.is_empty() {
             return Err(format!("launch image {image:?} names no file"));
         }
-        return Ok(ImageTarget::InRoot { root: 0, vpath: vpath.join("/") });
+        return Ok(ImageTarget::InRoot {
+            root: 0,
+            vpath: vpath.join("/"),
+        });
     }
     let (vol, comps) = split_abs(image)
         .ok_or_else(|| format!("launch image {image:?} is not a usable absolute path"))?;
     let mut best: Option<(usize, u32)> = None;
     for r in roots {
-        let Some((rvol, rcomps)) = split_abs(&r.location) else { continue };
+        let Some((rvol, rcomps)) = split_abs(&r.location) else {
+            continue;
+        };
         let inside = rvol == vol
             && rcomps.len() <= comps.len()
-            && rcomps.iter().zip(&comps).all(|(a, b)| a.eq_ignore_ascii_case(b));
+            && rcomps
+                .iter()
+                .zip(&comps)
+                .all(|(a, b)| a.eq_ignore_ascii_case(b));
         if inside && best.is_none_or(|(n, _)| rcomps.len() > n) {
             best = Some((rcomps.len(), r.id));
         }
@@ -94,7 +115,10 @@ pub fn classify_image(image: &str, roots: &[RootLocation]) -> Result<ImageTarget
                      name a program inside it"
                 ));
             }
-            Ok(ImageTarget::InRoot { root: id, vpath: rest.join("/") })
+            Ok(ImageTarget::InRoot {
+                root: id,
+                vpath: rest.join("/"),
+            })
         }
     }
 }
@@ -110,10 +134,19 @@ mod tests {
 
     fn roots() -> Vec<RootLocation> {
         vec![
-            RootLocation { id: 0, location: r"C:\Games\Fixture".into() },
-            RootLocation { id: 1, location: r"C:\users\steamuser\Saves".into() },
+            RootLocation {
+                id: 0,
+                location: r"C:\Games\Fixture".into(),
+            },
+            RootLocation {
+                id: 1,
+                location: r"C:\users\steamuser\Saves".into(),
+            },
             // Nested inside root 0: the longest location must win.
-            RootLocation { id: 2, location: r"C:\Games\Fixture\Data\Mods".into() },
+            RootLocation {
+                id: 2,
+                location: r"C:\Games\Fixture\Data\Mods".into(),
+            },
         ]
     }
 
@@ -121,7 +154,10 @@ mod tests {
     fn relative_is_root_zero() {
         assert_eq!(
             classify_image(r"bin\game.exe", &roots()).unwrap(),
-            ImageTarget::InRoot { root: 0, vpath: "bin/game.exe".into() }
+            ImageTarget::InRoot {
+                root: 0,
+                vpath: "bin/game.exe".into()
+            }
         );
     }
 
@@ -129,16 +165,25 @@ mod tests {
     fn absolute_inside_a_root_is_that_root() {
         assert_eq!(
             classify_image(r"C:\users\steamuser\Saves\tool.exe", &roots()).unwrap(),
-            ImageTarget::InRoot { root: 1, vpath: "tool.exe".into() }
+            ImageTarget::InRoot {
+                root: 1,
+                vpath: "tool.exe".into()
+            }
         );
     }
 
     #[test]
     fn matches_across_case_separators_and_trailing_slash() {
-        let r = vec![RootLocation { id: 0, location: "c:/games/fixture/".into() }];
+        let r = vec![RootLocation {
+            id: 0,
+            location: "c:/games/fixture/".into(),
+        }];
         assert_eq!(
             classify_image(r"C:\GAMES\Fixture\x.exe", &r).unwrap(),
-            ImageTarget::InRoot { root: 0, vpath: "x.exe".into() }
+            ImageTarget::InRoot {
+                root: 0,
+                vpath: "x.exe".into()
+            }
         );
     }
 
@@ -146,11 +191,17 @@ mod tests {
     fn nested_roots_pick_the_longest_location() {
         assert_eq!(
             classify_image(r"C:\Games\Fixture\Data\Mods\m.exe", &roots()).unwrap(),
-            ImageTarget::InRoot { root: 2, vpath: "m.exe".into() }
+            ImageTarget::InRoot {
+                root: 2,
+                vpath: "m.exe".into()
+            }
         );
         assert_eq!(
             classify_image(r"C:\Games\Fixture\Data\other.exe", &roots()).unwrap(),
-            ImageTarget::InRoot { root: 0, vpath: "Data/other.exe".into() }
+            ImageTarget::InRoot {
+                root: 0,
+                vpath: "Data/other.exe".into()
+            }
         );
     }
 
@@ -175,7 +226,10 @@ mod tests {
     fn verbatim_prefix_is_understood() {
         assert_eq!(
             classify_image(r"\\?\C:\Games\Fixture\g.exe", &roots()).unwrap(),
-            ImageTarget::InRoot { root: 0, vpath: "g.exe".into() }
+            ImageTarget::InRoot {
+                root: 0,
+                vpath: "g.exe".into()
+            }
         );
     }
 
@@ -187,7 +241,11 @@ mod tests {
 
     #[test]
     fn dot_dot_is_refused_anywhere() {
-        for img in [r"..\x.exe", r"C:\Games\Fixture\..\..\Windows\x.exe", r"C:\a\..\b.exe"] {
+        for img in [
+            r"..\x.exe",
+            r"C:\Games\Fixture\..\..\Windows\x.exe",
+            r"C:\a\..\b.exe",
+        ] {
             let e = classify_image(img, &roots()).unwrap_err();
             assert!(e.contains(".."), "{img}: {e}");
         }
@@ -200,7 +258,13 @@ mod tests {
 
     #[test]
     fn join_location_uses_backslashes_once() {
-        assert_eq!(join_location(r"C:\Games\Fixture", "bin/g.exe"), r"C:\Games\Fixture\bin\g.exe");
-        assert_eq!(join_location(r"C:\Games\Fixture\", "g.exe"), r"C:\Games\Fixture\g.exe");
+        assert_eq!(
+            join_location(r"C:\Games\Fixture", "bin/g.exe"),
+            r"C:\Games\Fixture\bin\g.exe"
+        );
+        assert_eq!(
+            join_location(r"C:\Games\Fixture\", "g.exe"),
+            r"C:\Games\Fixture\g.exe"
+        );
     }
 }

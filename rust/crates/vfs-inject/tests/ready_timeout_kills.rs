@@ -21,7 +21,11 @@ fn a_shim_that_never_reports_ready_gets_the_process_killed() {
     std::fs::create_dir_all(&root).unwrap();
 
     let config_path = base.join("shim.cfg");
-    std::fs::write(&config_path, vfs_shim::encode_config(root.to_str().unwrap())).unwrap();
+    std::fs::write(
+        &config_path,
+        vfs_shim::encode_config(root.to_str().unwrap()),
+    )
+    .unwrap();
     let ready_path = base.join("ready.flag");
     let output_path = base.join("probe-out.bin");
     let probe = env!("CARGO_BIN_EXE_vfs-probe").to_string();
@@ -32,7 +36,10 @@ fn a_shim_that_never_reports_ready_gets_the_process_killed() {
         target_exe: probe,
         current_dir: None,
         args: vec![
-            root.join("does-not-matter.bin").to_str().unwrap().to_string(),
+            root.join("does-not-matter.bin")
+                .to_str()
+                .unwrap()
+                .to_string(),
             output_path.to_str().unwrap().to_string(),
         ],
         dll_path: silent_shim,
@@ -48,7 +55,10 @@ fn a_shim_that_never_reports_ready_gets_the_process_killed() {
         matches!(result, Err(InjectError::Timeout)),
         "expected Err(InjectError::Timeout) from a shim that never wrote the ready file; got {result:?}"
     );
-    assert!(!ready_path.exists(), "the silent shim must not have written a ready file");
+    assert!(
+        !ready_path.exists(),
+        "the silent shim must not have written a ready file"
+    );
     // Before the fix the gate was released on timeout and the probe ran to
     // completion and wrote this file — but after `run_target_with_shim` had
     // already returned, so give a released process time to get there.

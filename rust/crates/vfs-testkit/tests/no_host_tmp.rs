@@ -20,21 +20,57 @@ use std::path::{Path, PathBuf};
 /// Crates that are Windows-only or run under Wine, where `temp_dir()` is the
 /// Wine prefix's Windows temp and not the host's `/tmp`. Each: (crate, reason).
 const EXEMPT_CRATES: &[(&str, &str)] = &[
-    ("vfs-shim", "Windows DLL tests; run under Wine, where temp_dir() is the prefix's temp"),
+    (
+        "vfs-shim",
+        "Windows DLL tests; run under Wine, where temp_dir() is the prefix's temp",
+    ),
     ("vfs-shim-dll", "Windows-only shim DLL"),
     ("vfs-inject", "Windows injector tests; run under Wine"),
     ("vfs-payload", "Windows-only injected payload"),
-    ("vfs-redirect", "Windows-only path redirection; tests use Win32 and run on Windows"),
-    ("vfs-win", "Windows-only crate (Win32 file mappings and volumes)"),
-    ("vfs-fixture-escape", "Windows fixture executable, runs under Wine"),
-    ("vfs-fixture-nvapi", "Windows fixture executable, runs under Wine"),
-    ("vfs-fixture-prefs", "Windows fixture executable, runs under Wine"),
-    ("vfs-fixture-read", "Windows fixture executable, runs under Wine"),
-    ("vfs-fixture-registry", "Windows fixture executable, runs under Wine"),
-    ("vfs-fixture-staticimp", "Windows fixture executable, runs under Wine"),
-    ("vfs-fixture-steam", "Windows fixture executable, runs under Wine"),
-    ("vfs-fixture-vproxy", "Windows fixture executable, runs under Wine"),
-    ("vfs-fixture-writepath", "Windows fixture executable, runs under Wine"),
+    (
+        "vfs-redirect",
+        "Windows-only path redirection; tests use Win32 and run on Windows",
+    ),
+    (
+        "vfs-win",
+        "Windows-only crate (Win32 file mappings and volumes)",
+    ),
+    (
+        "vfs-fixture-escape",
+        "Windows fixture executable, runs under Wine",
+    ),
+    (
+        "vfs-fixture-nvapi",
+        "Windows fixture executable, runs under Wine",
+    ),
+    (
+        "vfs-fixture-prefs",
+        "Windows fixture executable, runs under Wine",
+    ),
+    (
+        "vfs-fixture-read",
+        "Windows fixture executable, runs under Wine",
+    ),
+    (
+        "vfs-fixture-registry",
+        "Windows fixture executable, runs under Wine",
+    ),
+    (
+        "vfs-fixture-staticimp",
+        "Windows fixture executable, runs under Wine",
+    ),
+    (
+        "vfs-fixture-steam",
+        "Windows fixture executable, runs under Wine",
+    ),
+    (
+        "vfs-fixture-vproxy",
+        "Windows fixture executable, runs under Wine",
+    ),
+    (
+        "vfs-fixture-writepath",
+        "Windows fixture executable, runs under Wine",
+    ),
 ];
 
 /// Real exceptions: (path relative to `crates/`, a distinctive substring of the
@@ -91,7 +127,9 @@ fn offences(line: &str) -> Vec<&'static str> {
 }
 
 fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for e in entries.flatten() {
         let p = e.path();
         if p.is_dir() {
@@ -110,7 +148,9 @@ fn starts_a_module(rest: &[&str]) -> bool {
     rest.iter()
         .map(|l| l.trim_start())
         .find(|l| !l.starts_with("#[") && !l.starts_with("//"))
-        .is_some_and(|l| l.starts_with("mod ") || l.starts_with("pub mod ") || l.starts_with("pub(crate) mod "))
+        .is_some_and(|l| {
+            l.starts_with("mod ") || l.starts_with("pub mod ") || l.starts_with("pub(crate) mod ")
+        })
 }
 
 /// Scan one file's text; `(line number, pattern, line)` for each offence.
@@ -136,7 +176,9 @@ fn scan(scope: Scope, text: &str) -> Vec<(usize, &'static str, String)> {
 
 #[test]
 fn no_host_side_test_uses_the_host_temp_dir() {
-    let crates = Path::new(env!("CARGO_MANIFEST_DIR")).parent().expect("crates dir");
+    let crates = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("crates dir");
     let mut files = Vec::new();
     rust_files(crates, &mut files);
     let mut bad: Vec<String> = Vec::new();
@@ -145,7 +187,12 @@ fn no_host_side_test_uses_the_host_temp_dir() {
     for path in &files {
         let rel = path.strip_prefix(crates).unwrap();
         let mut comps = rel.components();
-        let krate = comps.next().unwrap().as_os_str().to_string_lossy().into_owned();
+        let krate = comps
+            .next()
+            .unwrap()
+            .as_os_str()
+            .to_string_lossy()
+            .into_owned();
         if EXEMPT_CRATES.iter().any(|(c, _)| *c == krate) {
             continue;
         }
@@ -154,13 +201,16 @@ fn no_host_side_test_uses_the_host_temp_dir() {
         if krate == "vfs-testkit" && in_crate.ends_with("no_host_tmp.rs") {
             continue;
         }
-        let Ok(text) = std::fs::read_to_string(path) else { continue };
+        let Ok(text) = std::fs::read_to_string(path) else {
+            continue;
+        };
         scanned += 1;
         for (line_no, pat, line) in scan(scope_of(&in_crate), &text) {
             let rel_s = rel.to_string_lossy().replace('\\', "/");
-            let allowed = ALLOW.iter().enumerate().find(|(_, (f, sub, _))| {
-                *f == rel_s && line.contains(sub)
-            });
+            let allowed = ALLOW
+                .iter()
+                .enumerate()
+                .find(|(_, (f, sub, _))| *f == rel_s && line.contains(sub));
             if let Some((idx, _)) = allowed {
                 used_allow[idx] = true;
                 continue;
@@ -168,7 +218,10 @@ fn no_host_side_test_uses_the_host_temp_dir() {
             bad.push(format!("{}:{line_no}: {pat}: {line}", path.display()));
         }
     }
-    assert!(scanned > 100, "scanned only {scanned} files; did the walk break?");
+    assert!(
+        scanned > 100,
+        "scanned only {scanned} files; did the walk break?"
+    );
     assert!(
         bad.is_empty(),
         "host-side tests must not use the host's temp dir (a RAM tmpfs here). Use \
@@ -176,7 +229,10 @@ fn no_host_side_test_uses_the_host_temp_dir() {
         bad.join("\n  ")
     );
     for (used, (f, sub, _)) in used_allow.iter().zip(ALLOW) {
-        assert!(*used, "stale ALLOW entry ({f}, {sub}): nothing matches it any more");
+        assert!(
+            *used,
+            "stale ALLOW entry ({f}, {sub}): nothing matches it any more"
+        );
     }
 }
 

@@ -62,7 +62,9 @@ fn transitive_crate_dirs(crate_dir: &Path) -> Vec<PathBuf> {
             }
         }
         for table in dep_tables {
-            let Some(table) = table.as_table() else { continue };
+            let Some(table) = table.as_table() else {
+                continue;
+            };
             for spec in table.values() {
                 if let Some(rel) = spec.get("path").and_then(|p| p.as_str()) {
                     queue.push_back(dir.join(rel));
@@ -79,7 +81,9 @@ fn newest_mtime(dir: &Path) -> Option<SystemTime> {
     let mut newest: Option<SystemTime> = None;
     let mut stack = vec![dir.to_path_buf()];
     while let Some(d) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&d) else { continue };
+        let Ok(entries) = std::fs::read_dir(&d) else {
+            continue;
+        };
         for entry in entries.flatten() {
             let path = entry.path();
             if matches!(entry.file_name().to_str(), Some("target") | Some(".git")) {
@@ -256,7 +260,10 @@ pub fn ensure_inject_artifacts() {
     move_locked_artifacts_aside(&needed);
 
     let main_stale = main_artifact_crates.iter().any(|(artifact, crate_name)| {
-        artifact_is_stale(&profile.join(artifact), &workspace.join("crates").join(crate_name))
+        artifact_is_stale(
+            &profile.join(artifact),
+            &workspace.join("crates").join(crate_name),
+        )
     });
     if main_stale {
         let status = std::process::Command::new(&cargo)

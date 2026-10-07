@@ -169,7 +169,7 @@ impl BlockStore {
         &self,
         classify: impl Fn(&[u8]) -> Option<K>,
     ) -> Result<std::collections::HashMap<K, Usage>> {
-        use crate::manifest::{MISSING, decode_ids};
+        use crate::manifest::{decode_ids, MISSING};
         let _guard = self.tracker.enter();
         let r = self.index.read()?;
         let mut seen: std::collections::HashMap<K, std::collections::HashSet<u64>> =

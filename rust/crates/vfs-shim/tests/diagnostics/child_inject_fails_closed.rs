@@ -24,7 +24,7 @@ use std::time::Duration;
 use vfs_shim::{child_inject_refused_total, install};
 use windows_sys::Win32::Foundation::{CloseHandle, ERROR_PROCESS_ABORTED, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
-    CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
+    CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
 };
 
 /// The processes whose parent is this one.
@@ -43,7 +43,11 @@ fn children() -> Vec<(u32, String)> {
         let mut ok = Process32FirstW(snap, &mut e);
         while ok != 0 {
             if e.th32ParentProcessID == me {
-                let n = e.szExeFile.iter().position(|&c| c == 0).unwrap_or(e.szExeFile.len());
+                let n = e
+                    .szExeFile
+                    .iter()
+                    .position(|&c| c == 0)
+                    .unwrap_or(e.szExeFile.len());
                 found.push((e.th32ProcessID, String::from_utf16_lossy(&e.szExeFile[..n])));
             }
             ok = Process32NextW(snap, &mut e);
@@ -102,7 +106,10 @@ fn a_child_that_cannot_be_injected_is_killed_and_its_spawn_fails() {
     let line = log.lines().next().expect("a line");
     assert_eq!(log.lines().count(), 1, "{log:?}");
     let (image, reason) = line.rsplit_once(' ').expect("`<image> <reason>`");
-    assert!(image.to_lowercase().contains("cmd"), "image {image:?} in {line:?}");
+    assert!(
+        image.to_lowercase().contains("cmd"),
+        "image {image:?} in {line:?}"
+    );
     assert!(
         vfs_shim::child_inject_refused_count(reason) >= 1,
         "reason {reason:?} in {line:?} is not one the counter knows"
@@ -118,7 +125,10 @@ fn a_child_that_cannot_be_injected_is_killed_and_its_spawn_fails() {
         std::thread::sleep(Duration::from_millis(50));
         left = children();
     }
-    assert!(left.is_empty(), "child processes still alive after the refused spawn: {left:?}");
+    assert!(
+        left.is_empty(),
+        "child processes still alive after the refused spawn: {left:?}"
+    );
 
     std::thread::sleep(Duration::from_millis(500));
     assert!(!marker.exists(), "the refused child ran: {marker:?} exists");

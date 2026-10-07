@@ -127,7 +127,7 @@ impl Provider for ReadOnlyProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vfs_provider::{Access, RwMemFixture, ST_READ_ONLY, OPEN_READ};
+    use vfs_provider::{Access, RwMemFixture, OPEN_READ, ST_READ_ONLY};
 
     fn ro() -> ReadOnlyProvider {
         ReadOnlyProvider::new(Arc::new(RwMemFixture::new()))
@@ -188,7 +188,10 @@ mod tests {
         assert_eq!(p.set_len(1, 0).err(), Some(ST_READ_ONLY));
         assert_eq!(p.mkdir(f).err(), Some(ST_READ_ONLY));
         assert_eq!(p.remove(f).err(), Some(ST_READ_ONLY));
-        assert_eq!(p.rename(f, VPath::at_default("b.txt")).err(), Some(ST_READ_ONLY));
+        assert_eq!(
+            p.rename(f, VPath::at_default("b.txt")).err(),
+            Some(ST_READ_ONLY)
+        );
         assert_eq!(p.set_attr(f, SetAttr::default()).err(), Some(ST_READ_ONLY));
     }
 
@@ -198,9 +201,14 @@ mod tests {
         // pass every assertion above. This is the one that would catch it.
         let inner: Arc<dyn Provider> = Arc::new(RwMemFixture::new());
         let p = ReadOnlyProvider::new(Arc::clone(&inner));
-        assert!(p.open(VPath::at_default("new.txt"), OPEN_WRITE | OPEN_CREATE).is_err());
+        assert!(p
+            .open(VPath::at_default("new.txt"), OPEN_WRITE | OPEN_CREATE)
+            .is_err());
         assert!(
-            inner.getattr(VPath::at_default("new.txt")).unwrap().is_none(),
+            inner
+                .getattr(VPath::at_default("new.txt"))
+                .unwrap()
+                .is_none(),
             "the refused create must not have reached the inner provider"
         );
     }

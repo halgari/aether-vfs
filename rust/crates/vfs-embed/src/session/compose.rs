@@ -7,7 +7,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use vfs_compose::MountGraph;
-use vfs_provider::{Access, Provider, RootId, bad_request, exists, map_io_err};
+use vfs_provider::{bad_request, exists, map_io_err, Access, Provider, RootId};
 
 use super::Session;
 
@@ -418,23 +418,21 @@ mod root_ownership_tests {
         // freeze.
         s.mount("", Arc::new(DiskProvider::new(&session_layer)))
             .unwrap();
-        assert!(
-            s.kernel()
-                .getattr(RootId::DEFAULT, "session.txt")
-                .unwrap()
-                .is_some()
-        );
+        assert!(s
+            .kernel()
+            .getattr(RootId::DEFAULT, "session.txt")
+            .unwrap()
+            .is_some());
 
         // And the root can be handed over deliberately.
         s.clear_root(RootId(1)).unwrap();
         s.mount_at(RootId(1), "", Arc::new(DiskProvider::new(&session_layer)))
             .expect("an unmounted root may be taken over");
-        assert!(
-            s.kernel()
-                .getattr(RootId(1), "session.txt")
-                .unwrap()
-                .is_some()
-        );
+        assert!(s
+            .kernel()
+            .getattr(RootId(1), "session.txt")
+            .unwrap()
+            .is_some());
         assert!(
             s.kernel()
                 .getattr(RootId(1), "hand.txt")
@@ -493,12 +491,11 @@ mod root_ownership_tests {
         )
         .unwrap();
 
-        assert!(
-            s.kernel()
-                .getattr(RootId(2), "first.txt")
-                .unwrap()
-                .is_some()
-        );
+        assert!(s
+            .kernel()
+            .getattr(RootId(2), "first.txt")
+            .unwrap()
+            .is_some());
         assert!(
             s.has_write_layer(RootId(2)),
             "the write layer must survive a later set_root_mounts"

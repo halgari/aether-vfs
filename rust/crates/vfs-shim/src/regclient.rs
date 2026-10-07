@@ -26,13 +26,14 @@ use std::hash::Hash;
 use std::sync::{Mutex, OnceLock};
 
 use vfs_protocol::{
-    OP_REG_CHANGED, OP_REG_CREATE_KEY, OP_REG_DELETE_KEY, OP_REG_DELETE_VALUE, OP_REG_KEY,
-    OP_REG_LOOKUP, OP_REG_RENAME_KEY, OP_REG_SET_VALUE, ST_BAD_REQUEST, ST_EXISTS, ST_IO_ERROR,
-    ST_NOT_FOUND, ST_NOT_SUPPORTED, decode_reg_changed_reply, decode_reg_key_reply,
-    decode_reg_lookup_reply, decode_reg_version_reply, encode_reg_changed, encode_reg_create_key,
-    encode_reg_delete_value, encode_reg_path, encode_reg_rename_key, encode_reg_set_value,
+    decode_reg_changed_reply, decode_reg_key_reply, decode_reg_lookup_reply,
+    decode_reg_version_reply, encode_reg_changed, encode_reg_create_key, encode_reg_delete_value,
+    encode_reg_path, encode_reg_rename_key, encode_reg_set_value, OP_REG_CHANGED,
+    OP_REG_CREATE_KEY, OP_REG_DELETE_KEY, OP_REG_DELETE_VALUE, OP_REG_KEY, OP_REG_LOOKUP,
+    OP_REG_RENAME_KEY, OP_REG_SET_VALUE, ST_BAD_REQUEST, ST_EXISTS, ST_IO_ERROR, ST_NOT_FOUND,
+    ST_NOT_SUPPORTED,
 };
-use vfs_registry::{Lookup, Node, path::fold};
+use vfs_registry::{path::fold, Lookup, Node};
 
 use crate::director::{self, FuseClient};
 

@@ -14,8 +14,8 @@ use std::path::Path;
 
 use vfs_control::SourceSpec;
 use vfs_director::stage::ImageSource;
-use vfs_embed::{LaunchOpts, RootId, StageOpts, KIND_FILE};
 use vfs_directord::SessionRegistry;
+use vfs_embed::{LaunchOpts, RootId, StageOpts, KIND_FILE};
 use vfs_source::build_provider;
 
 /// Minimal PE: MZ header, e_lfanew, PE32+ optional header, no imports —
@@ -48,7 +48,11 @@ fn staged_launch_artifacts_resolve_through_the_provider_graph() {
     // different from the staged copy below so a later assertion can tell
     // which one actually answered.
     let content_dir = vfs_testkit::tempdir().unwrap();
-    std::fs::write(content_dir.path().join("SkyrimSE.exe"), bare_pe(b"REAL-CONTENT")).unwrap();
+    std::fs::write(
+        content_dir.path().join("SkyrimSE.exe"),
+        bare_pe(b"REAL-CONTENT"),
+    )
+    .unwrap();
 
     let reg = SessionRegistry::new();
     let summary = reg.create("stage-test".into()).unwrap();
@@ -100,7 +104,10 @@ fn staged_launch_artifacts_resolve_through_the_provider_graph() {
             )
         })
         .expect("stage_launch");
-    assert!(staged_exe.is_file(), "CreateProcess still needs a real on-disk image");
+    assert!(
+        staged_exe.is_file(),
+        "CreateProcess still needs a real on-disk image"
+    );
 
     // The launcher: reachable ONLY via staging — no content provider ever
     // served it. This is exactly what would go invisible once the
@@ -118,7 +125,11 @@ fn staged_launch_artifacts_resolve_through_the_provider_graph() {
         let (fh, size, is_dir) = live
             .session
             .kernel()
-            .open(RootId::DEFAULT, "skse64_loader.exe", vfs_director::OPEN_READ)
+            .open(
+                RootId::DEFAULT,
+                "skse64_loader.exe",
+                vfs_director::OPEN_READ,
+            )
             .expect("open must succeed through the provider graph");
         assert!(!is_dir);
         assert_eq!(size, st.size);
@@ -144,7 +155,12 @@ fn staged_launch_artifacts_resolve_through_the_provider_graph() {
     // The spawn target: content already serves `SkyrimSE.exe` at the same
     // path the staging provider now also covers. Real content must win.
     reg.with_session_mut(&summary.id, |live| {
-        assert!(live.session.kernel().getattr(RootId::DEFAULT, "SkyrimSE.exe").unwrap().is_some());
+        assert!(live
+            .session
+            .kernel()
+            .getattr(RootId::DEFAULT, "SkyrimSE.exe")
+            .unwrap()
+            .is_some());
         let bytes = live.session.read_file("SkyrimSE.exe").unwrap();
         assert_eq!(
             bytes,
@@ -273,7 +289,12 @@ fn production_launch_leaves_an_absolute_image_untouched() {
     // mounted — still knows nothing about this path. Confirms staging was
     // correctly skipped rather than silently failing to serve it.
     reg.with_session_mut(&summary.id, |live| {
-        assert!(live.session.kernel().getattr(RootId::DEFAULT, "already-staged.exe").unwrap().is_none());
+        assert!(live
+            .session
+            .kernel()
+            .getattr(RootId::DEFAULT, "already-staged.exe")
+            .unwrap()
+            .is_none());
         Ok(())
     })
     .unwrap();

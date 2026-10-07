@@ -2,17 +2,17 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 use super::{
-    HANDLES, TRAMP_DELETE, TRAMP_SETINFO, fuse_root_directory, in_hook_reenter, object_name_str,
-    parse_rename_target, path_is_ours, path_of_handle, path_of_tracked, redirected_oa, to_nt_path,
-    under_root_path,
+    fuse_root_directory, in_hook_reenter, object_name_str, parse_rename_target, path_is_ours,
+    path_of_handle, path_of_tracked, redirected_oa, to_nt_path, under_root_path, HANDLES,
+    TRAMP_DELETE, TRAMP_SETINFO,
 };
 use crate::ntdef::{
+    FileEndOfFileInformation, FilePositionInformation, NtDeleteFileFn, ObjectAttributes,
     FILE_DISPOSITION_DELETE, FILE_DISPOSITION_INFORMATION, FILE_DISPOSITION_INFORMATION_EX,
     FILE_END_OF_FILE_INFORMATION, FILE_LINK_INFORMATION, FILE_LINK_INFORMATION_EX,
-    FILE_POSITION_INFORMATION, FILE_RENAME_INFORMATION,
-    FILE_RENAME_INFORMATION_EX, FileEndOfFileInformation, FilePositionInformation, NtDeleteFileFn,
-    ObjectAttributes, STATUS_ACCESS_DENIED, STATUS_FILE_IS_A_DIRECTORY,
-    STATUS_OBJECT_NAME_NOT_FOUND, STATUS_SUCCESS, STATUS_UNSUCCESSFUL,
+    FILE_POSITION_INFORMATION, FILE_RENAME_INFORMATION, FILE_RENAME_INFORMATION_EX,
+    STATUS_ACCESS_DENIED, STATUS_FILE_IS_A_DIRECTORY, STATUS_OBJECT_NAME_NOT_FOUND, STATUS_SUCCESS,
+    STATUS_UNSUCCESSFUL,
 };
 use crate::synth_file::FileView;
 use core::ffi::c_void;

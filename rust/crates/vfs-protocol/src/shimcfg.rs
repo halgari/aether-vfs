@@ -106,7 +106,9 @@ pub fn encode_config_full(root: &str, static_imports: &[StaticImport]) -> Vec<u8
 }
 
 fn read_u32(b: &[u8], off: usize) -> Option<u32> {
-    Some(u32::from_le_bytes(b.get(off..off.checked_add(4)?)?.try_into().ok()?))
+    Some(u32::from_le_bytes(
+        b.get(off..off.checked_add(4)?)?.try_into().ok()?,
+    ))
 }
 
 fn read_field(b: &[u8], off: usize) -> Option<(String, usize)> {
@@ -127,7 +129,10 @@ pub fn decode_config(bytes: &[u8]) -> Result<ShimConfig, ConfigError> {
     }
     let found = read_u32(bytes, 4).ok_or(ConfigError::Malformed)?;
     if found != CONFIG_VERSION {
-        return Err(ConfigError::Version { found, expected: CONFIG_VERSION });
+        return Err(ConfigError::Version {
+            found,
+            expected: CONFIG_VERSION,
+        });
     }
     decode_v2_body(&bytes[8..]).ok_or(ConfigError::Malformed)
 }
@@ -141,9 +146,15 @@ fn decode_v2_body(b: &[u8]) -> Option<ShimConfig> {
         let (dll_name, o1) = read_field(b, off)?;
         let (backing_path, o2) = read_field(b, o1)?;
         off = o2;
-        static_imports.push(StaticImport { dll_name, backing_path });
+        static_imports.push(StaticImport {
+            dll_name,
+            backing_path,
+        });
     }
-    (off == b.len()).then_some(ShimConfig { root, static_imports })
+    (off == b.len()).then_some(ShimConfig {
+        root,
+        static_imports,
+    })
 }
 
 #[cfg(test)]
@@ -158,7 +169,10 @@ mod tests {
     fn encode_config_full_layout_is_unchanged() {
         let out = encode_config_full(
             "R",
-            &[StaticImport { dll_name: "a".into(), backing_path: "bb".into() }],
+            &[StaticImport {
+                dll_name: "a".into(),
+                backing_path: "bb".into(),
+            }],
         );
         let mut want = Vec::new();
         want.extend_from_slice(b"VFSC");
@@ -176,11 +190,23 @@ mod tests {
     #[test]
     fn config_round_trips() {
         let statics = vec![
-            StaticImport { dll_name: "d3d11.dll".into(), backing_path: r"C:\M\d3d11.dll".into() },
-            StaticImport { dll_name: "dxgi.dll".into(), backing_path: r"\??\C:\M\dxgi.dll".into() },
+            StaticImport {
+                dll_name: "d3d11.dll".into(),
+                backing_path: r"C:\M\d3d11.dll".into(),
+            },
+            StaticImport {
+                dll_name: "dxgi.dll".into(),
+                backing_path: r"\??\C:\M\dxgi.dll".into(),
+            },
         ];
         let got = decode_config(&encode_config_full(r"C:\Game", &statics)).unwrap();
-        assert_eq!(got, ShimConfig { root: r"C:\Game".into(), static_imports: statics });
+        assert_eq!(
+            got,
+            ShimConfig {
+                root: r"C:\Game".into(),
+                static_imports: statics
+            }
+        );
         let bare = decode_config(&encode_config(r"C:\Game")).unwrap();
         assert!(bare.static_imports.is_empty());
     }
@@ -203,19 +229,35 @@ mod tests {
         let mut bytes = encode_config("R");
         bytes[4..8].copy_from_slice(&3u32.to_le_bytes());
         let err = decode_config(&bytes).unwrap_err();
-        assert_eq!(err, ConfigError::Version { found: 3, expected: CONFIG_VERSION });
+        assert_eq!(
+            err,
+            ConfigError::Version {
+                found: 3,
+                expected: CONFIG_VERSION
+            }
+        );
         let msg = err.to_string();
-        assert!(msg.contains("version 3") && msg.contains("version 2"), "{msg}");
+        assert!(
+            msg.contains("version 3") && msg.contains("version 2"),
+            "{msg}"
+        );
     }
 
     #[test]
     fn truncated_and_trailing_bytes_are_malformed() {
         let good = encode_config_full(
             "R",
-            &[StaticImport { dll_name: "a".into(), backing_path: "b".into() }],
+            &[StaticImport {
+                dll_name: "a".into(),
+                backing_path: "b".into(),
+            }],
         );
         for n in 8..good.len() {
-            assert_eq!(decode_config(&good[..n]), Err(ConfigError::Malformed), "len {n}");
+            assert_eq!(
+                decode_config(&good[..n]),
+                Err(ConfigError::Malformed),
+                "len {n}"
+            );
         }
         let mut long = good.clone();
         long.push(0);

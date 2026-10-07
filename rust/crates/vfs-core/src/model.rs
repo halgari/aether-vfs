@@ -105,7 +105,10 @@ mod tests {
             size: 10,
             mtime: 42,
         };
-        let _layer = Layer { id: LayerId(0), entries: vec![e] };
+        let _layer = Layer {
+            id: LayerId(0),
+            entries: vec![e],
+        };
         let _r = Resolution::NotFound;
         assert_eq!(_r, Resolution::NotFound);
     }

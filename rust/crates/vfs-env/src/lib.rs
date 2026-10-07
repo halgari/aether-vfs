@@ -495,106 +495,446 @@ pub struct Var {
 
 /// Every switch. The drift test asserts the source reads nothing outside this.
 pub const ALL: &[Var] = &[
-    Var { name: RING_SECTION, kind: Kind::Handshake, default: "required by the shim" },
-    Var { name: RING_PATH, kind: Kind::Handshake, default: "none (named section via VFS_RING_SECTION)" },
-    Var { name: RING_BYTES, kind: Kind::Handshake, default: "ring default" },
-    Var { name: RING_PAYLOAD_CAP, kind: Kind::Handshake, default: "ring default" },
-    Var { name: ARENA_OFFSET, kind: Kind::Handshake, default: "ring default" },
-    Var { name: ARENA_LEN, kind: Kind::Handshake, default: "ring default" },
-    Var { name: SERVER_EV, kind: Kind::Handshake, default: "no server wake" },
-    Var { name: CLIENT_EV, kind: Kind::Handshake, default: "no client wake" },
-    Var { name: FUSE_CFG, kind: Kind::Handshake, default: "none" },
-    Var { name: RING_SPIN_US, kind: Kind::Behaviour, default: "400" },
-    Var { name: VIRTUAL_DIR, kind: Kind::Handshake, default: r"C:\GameLayers\runtime (see audit §2.6)" },
-    Var { name: VIRTUAL_ROOTS, kind: Kind::Handshake, default: "none (root 0 only)" },
-    Var { name: STATE_DIR, kind: Kind::Handshake, default: "session state dir" },
-    Var { name: HOME, kind: Kind::Handshake, default: "$XDG_DATA_HOME/aether-vfs" },
-    Var { name: STORAGE_DIR, kind: Kind::Behaviour, default: "$VFS_HOME/storage" },
-    Var { name: LAUNCH_IMAGE, kind: Kind::Handshake, default: "none; staging derives it" },
-    Var { name: DISCOVERY_PATH, kind: Kind::Handshake, default: "platform default" },
-    Var { name: WINDOWS_ARTIFACTS, kind: Kind::Behaviour, default: "beside the running executable" },
-    Var { name: READY_TIMEOUT_SECS, kind: Kind::Behaviour, default: "180 (DEFAULT_READY_TIMEOUT_SECS)" },
-    Var { name: INJECT_CWD, kind: Kind::Handshake, default: "the injector's own directory" },
-    Var { name: INJECT_STEAM_HELPER, kind: Kind::Handshake, default: "no Steam helper" },
-    Var { name: SHIM_CONFIG, kind: Kind::Handshake, default: "required by the shim" },
-    Var { name: SHIM_READY, kind: Kind::Handshake, default: "no ready signal" },
-    Var { name: PAYLOAD_PATH, kind: Kind::Handshake, default: "resolved beside the shim" },
-    Var { name: PAYLOAD_CFG_FILE, kind: Kind::Handshake, default: "none" },
-    Var { name: DUAL_LAYER, kind: Kind::Handshake, default: "unset" },
-    Var { name: CHILD_REFUSED_LOG, kind: Kind::Handshake, default: "unset: refusals are only counted" },
-    Var { name: TEST_FUSE_INIT_FAIL, kind: Kind::Fixture, default: "false (FUSE inits normally)" },
-    Var { name: ALLOW_DISK_FALLTHROUGH, kind: Kind::Behaviour, default: "false (root stays sealed)" },
-    Var { name: DISK_ONLY_ROOT, kind: Kind::Behaviour, default: "false" },
-    Var { name: CHILD_CWD_ROOT, kind: Kind::Behaviour, default: "true" },
-    Var { name: REJECT_FUSE_SECTION, kind: Kind::Behaviour, default: "false" },
-    Var { name: REJECT_FUSE_DATA_SECTION, kind: Kind::Behaviour, default: "false" },
-    Var { name: LAZY_NO_VEH, kind: Kind::Behaviour, default: "false (VEH installed)" },
-    Var { name: SHIM_READ_CACHE, kind: Kind::Behaviour, default: "on" },
-    Var { name: SHIM_READ_CACHE_MIB, kind: Kind::Behaviour, default: "256" },
-    Var { name: REGISTRY, kind: Kind::Handshake, default: "false (registry not virtualised)" },
-    Var { name: WAIT, kind: Kind::Behaviour, default: "false (detach)" },
-    Var { name: BENCH, kind: Kind::Behaviour, default: "false" },
-    Var { name: SHIM_STATS_LOG, kind: Kind::Diagnostic, default: "off" },
-    Var { name: SHIM_STATS_INTERVAL_MS, kind: Kind::Diagnostic, default: "250" },
-    Var { name: DIRECTOR_OPEN_LOG, kind: Kind::Diagnostic, default: "off" },
-    Var { name: DRM_EXE_LOG, kind: Kind::Diagnostic, default: "off" },
-    Var { name: SECTION_FILL_LOG, kind: Kind::Diagnostic, default: "off" },
-    Var { name: SHIM_PANIC_LOG, kind: Kind::Diagnostic, default: "state dir" },
-    Var { name: SHIM_BREADCRUMB, kind: Kind::Diagnostic, default: "off (no breadcrumb)" },
-    Var { name: BENCH_LABEL, kind: Kind::Diagnostic, default: "\"run\"" },
-    Var { name: SKYRIM_ZIP, kind: Kind::Harness, default: r"C:\tmp\skyrimse.zip" },
-    Var { name: SKYRIM_DATA, kind: Kind::Harness, default: r"C:\tmp\skyrim-data" },
-    Var { name: SKYRIM_ROOT, kind: Kind::Harness, default: r"C:\tmp\skyrim-runtime" },
-    Var { name: SKYRIM_MODS, kind: Kind::Harness, default: "no overlay" },
-    Var { name: SKYRIM_LAUNCH, kind: Kind::Harness, default: "SkyrimSE.exe" },
-    Var { name: SKYRIM_DISK, kind: Kind::Harness, default: "use the archive" },
+    Var {
+        name: RING_SECTION,
+        kind: Kind::Handshake,
+        default: "required by the shim",
+    },
+    Var {
+        name: RING_PATH,
+        kind: Kind::Handshake,
+        default: "none (named section via VFS_RING_SECTION)",
+    },
+    Var {
+        name: RING_BYTES,
+        kind: Kind::Handshake,
+        default: "ring default",
+    },
+    Var {
+        name: RING_PAYLOAD_CAP,
+        kind: Kind::Handshake,
+        default: "ring default",
+    },
+    Var {
+        name: ARENA_OFFSET,
+        kind: Kind::Handshake,
+        default: "ring default",
+    },
+    Var {
+        name: ARENA_LEN,
+        kind: Kind::Handshake,
+        default: "ring default",
+    },
+    Var {
+        name: SERVER_EV,
+        kind: Kind::Handshake,
+        default: "no server wake",
+    },
+    Var {
+        name: CLIENT_EV,
+        kind: Kind::Handshake,
+        default: "no client wake",
+    },
+    Var {
+        name: FUSE_CFG,
+        kind: Kind::Handshake,
+        default: "none",
+    },
+    Var {
+        name: RING_SPIN_US,
+        kind: Kind::Behaviour,
+        default: "400",
+    },
+    Var {
+        name: VIRTUAL_DIR,
+        kind: Kind::Handshake,
+        default: r"C:\GameLayers\runtime (see audit §2.6)",
+    },
+    Var {
+        name: VIRTUAL_ROOTS,
+        kind: Kind::Handshake,
+        default: "none (root 0 only)",
+    },
+    Var {
+        name: STATE_DIR,
+        kind: Kind::Handshake,
+        default: "session state dir",
+    },
+    Var {
+        name: HOME,
+        kind: Kind::Handshake,
+        default: "$XDG_DATA_HOME/aether-vfs",
+    },
+    Var {
+        name: STORAGE_DIR,
+        kind: Kind::Behaviour,
+        default: "$VFS_HOME/storage",
+    },
+    Var {
+        name: LAUNCH_IMAGE,
+        kind: Kind::Handshake,
+        default: "none; staging derives it",
+    },
+    Var {
+        name: DISCOVERY_PATH,
+        kind: Kind::Handshake,
+        default: "platform default",
+    },
+    Var {
+        name: WINDOWS_ARTIFACTS,
+        kind: Kind::Behaviour,
+        default: "beside the running executable",
+    },
+    Var {
+        name: READY_TIMEOUT_SECS,
+        kind: Kind::Behaviour,
+        default: "180 (DEFAULT_READY_TIMEOUT_SECS)",
+    },
+    Var {
+        name: INJECT_CWD,
+        kind: Kind::Handshake,
+        default: "the injector's own directory",
+    },
+    Var {
+        name: INJECT_STEAM_HELPER,
+        kind: Kind::Handshake,
+        default: "no Steam helper",
+    },
+    Var {
+        name: SHIM_CONFIG,
+        kind: Kind::Handshake,
+        default: "required by the shim",
+    },
+    Var {
+        name: SHIM_READY,
+        kind: Kind::Handshake,
+        default: "no ready signal",
+    },
+    Var {
+        name: PAYLOAD_PATH,
+        kind: Kind::Handshake,
+        default: "resolved beside the shim",
+    },
+    Var {
+        name: PAYLOAD_CFG_FILE,
+        kind: Kind::Handshake,
+        default: "none",
+    },
+    Var {
+        name: DUAL_LAYER,
+        kind: Kind::Handshake,
+        default: "unset",
+    },
+    Var {
+        name: CHILD_REFUSED_LOG,
+        kind: Kind::Handshake,
+        default: "unset: refusals are only counted",
+    },
+    Var {
+        name: TEST_FUSE_INIT_FAIL,
+        kind: Kind::Fixture,
+        default: "false (FUSE inits normally)",
+    },
+    Var {
+        name: ALLOW_DISK_FALLTHROUGH,
+        kind: Kind::Behaviour,
+        default: "false (root stays sealed)",
+    },
+    Var {
+        name: DISK_ONLY_ROOT,
+        kind: Kind::Behaviour,
+        default: "false",
+    },
+    Var {
+        name: CHILD_CWD_ROOT,
+        kind: Kind::Behaviour,
+        default: "true",
+    },
+    Var {
+        name: REJECT_FUSE_SECTION,
+        kind: Kind::Behaviour,
+        default: "false",
+    },
+    Var {
+        name: REJECT_FUSE_DATA_SECTION,
+        kind: Kind::Behaviour,
+        default: "false",
+    },
+    Var {
+        name: LAZY_NO_VEH,
+        kind: Kind::Behaviour,
+        default: "false (VEH installed)",
+    },
+    Var {
+        name: SHIM_READ_CACHE,
+        kind: Kind::Behaviour,
+        default: "on",
+    },
+    Var {
+        name: SHIM_READ_CACHE_MIB,
+        kind: Kind::Behaviour,
+        default: "256",
+    },
+    Var {
+        name: REGISTRY,
+        kind: Kind::Handshake,
+        default: "false (registry not virtualised)",
+    },
+    Var {
+        name: WAIT,
+        kind: Kind::Behaviour,
+        default: "false (detach)",
+    },
+    Var {
+        name: BENCH,
+        kind: Kind::Behaviour,
+        default: "false",
+    },
+    Var {
+        name: SHIM_STATS_LOG,
+        kind: Kind::Diagnostic,
+        default: "off",
+    },
+    Var {
+        name: SHIM_STATS_INTERVAL_MS,
+        kind: Kind::Diagnostic,
+        default: "250",
+    },
+    Var {
+        name: DIRECTOR_OPEN_LOG,
+        kind: Kind::Diagnostic,
+        default: "off",
+    },
+    Var {
+        name: DRM_EXE_LOG,
+        kind: Kind::Diagnostic,
+        default: "off",
+    },
+    Var {
+        name: SECTION_FILL_LOG,
+        kind: Kind::Diagnostic,
+        default: "off",
+    },
+    Var {
+        name: SHIM_PANIC_LOG,
+        kind: Kind::Diagnostic,
+        default: "state dir",
+    },
+    Var {
+        name: SHIM_BREADCRUMB,
+        kind: Kind::Diagnostic,
+        default: "off (no breadcrumb)",
+    },
+    Var {
+        name: BENCH_LABEL,
+        kind: Kind::Diagnostic,
+        default: "\"run\"",
+    },
+    Var {
+        name: SKYRIM_ZIP,
+        kind: Kind::Harness,
+        default: r"C:\tmp\skyrimse.zip",
+    },
+    Var {
+        name: SKYRIM_DATA,
+        kind: Kind::Harness,
+        default: r"C:\tmp\skyrim-data",
+    },
+    Var {
+        name: SKYRIM_ROOT,
+        kind: Kind::Harness,
+        default: r"C:\tmp\skyrim-runtime",
+    },
+    Var {
+        name: SKYRIM_MODS,
+        kind: Kind::Harness,
+        default: "no overlay",
+    },
+    Var {
+        name: SKYRIM_LAUNCH,
+        kind: Kind::Harness,
+        default: "SkyrimSE.exe",
+    },
+    Var {
+        name: SKYRIM_DISK,
+        kind: Kind::Harness,
+        default: "use the archive",
+    },
     Var {
         name: SKYRIM_NO_PROFILE_SEED,
         kind: Kind::Harness,
         default: "false (the harness seeds SkyrimPrefs.ini)",
     },
-    Var { name: FIXTURE_PATH, kind: Kind::Fixture, default: "fixture-specific" },
-    Var { name: FIXTURE_EXPECT, kind: Kind::Fixture, default: "none" },
-    Var { name: FIXTURE_FILL, kind: Kind::Fixture, default: "none" },
-    Var { name: FIXTURE_WRITE_PATH, kind: Kind::Fixture, default: "unset: no write" },
-    Var { name: FIXTURE_WRITE_DATA, kind: Kind::Fixture, default: "written" },
-    Var { name: FIXTURE_CACHE_PATH, kind: Kind::Fixture, default: "unset: no cache phase" },
-    Var { name: FIXTURE_CACHE_RW_PATH, kind: Kind::Fixture, default: "unset: no rewrite" },
-    Var { name: FIXTURE_CACHE_RW_DATA, kind: Kind::Fixture, default: "fresh" },
-    Var { name: FIXTURE_LINGER_MS, kind: Kind::Fixture, default: "0" },
-    Var { name: FIXTURE_SPAWN_CHILD, kind: Kind::Fixture, default: "unset: no child" },
-    Var { name: FIXTURE_SLOW_PATH, kind: Kind::Fixture, default: "unset: no slow reads" },
-    Var { name: FIXTURE_SLOW_THREADS, kind: Kind::Fixture, default: "1" },
-    Var { name: FIXTURE_SLOW_STARTED, kind: Kind::Fixture, default: "unset: no wait" },
-    Var { name: FIXTURE_SLOW_RELEASE, kind: Kind::Fixture, default: "unset: no cue" },
-    Var { name: FIXTURE_THREADS, kind: Kind::Fixture, default: "4" },
-    Var { name: FIXTURE_ROUNDS, kind: Kind::Fixture, default: "50" },
-    Var { name: FIXTURE_NAMES, kind: Kind::Fixture, default: "unset: no names phase" },
-    Var { name: FIXTURE_NAME_PREFIXES, kind: Kind::Fixture, default: "none" },
-    Var { name: FIXTURE_NAME_LISTS, kind: Kind::Fixture, default: "none" },
-    Var { name: FIXTURE_NAME_CREATES, kind: Kind::Fixture, default: "none" },
-    Var { name: FIXTURE_NAME_RENAMES, kind: Kind::Fixture, default: "none" },
+    Var {
+        name: FIXTURE_PATH,
+        kind: Kind::Fixture,
+        default: "fixture-specific",
+    },
+    Var {
+        name: FIXTURE_EXPECT,
+        kind: Kind::Fixture,
+        default: "none",
+    },
+    Var {
+        name: FIXTURE_FILL,
+        kind: Kind::Fixture,
+        default: "none",
+    },
+    Var {
+        name: FIXTURE_WRITE_PATH,
+        kind: Kind::Fixture,
+        default: "unset: no write",
+    },
+    Var {
+        name: FIXTURE_WRITE_DATA,
+        kind: Kind::Fixture,
+        default: "written",
+    },
+    Var {
+        name: FIXTURE_CACHE_PATH,
+        kind: Kind::Fixture,
+        default: "unset: no cache phase",
+    },
+    Var {
+        name: FIXTURE_CACHE_RW_PATH,
+        kind: Kind::Fixture,
+        default: "unset: no rewrite",
+    },
+    Var {
+        name: FIXTURE_CACHE_RW_DATA,
+        kind: Kind::Fixture,
+        default: "fresh",
+    },
+    Var {
+        name: FIXTURE_LINGER_MS,
+        kind: Kind::Fixture,
+        default: "0",
+    },
+    Var {
+        name: FIXTURE_SPAWN_CHILD,
+        kind: Kind::Fixture,
+        default: "unset: no child",
+    },
+    Var {
+        name: FIXTURE_SLOW_PATH,
+        kind: Kind::Fixture,
+        default: "unset: no slow reads",
+    },
+    Var {
+        name: FIXTURE_SLOW_THREADS,
+        kind: Kind::Fixture,
+        default: "1",
+    },
+    Var {
+        name: FIXTURE_SLOW_STARTED,
+        kind: Kind::Fixture,
+        default: "unset: no wait",
+    },
+    Var {
+        name: FIXTURE_SLOW_RELEASE,
+        kind: Kind::Fixture,
+        default: "unset: no cue",
+    },
+    Var {
+        name: FIXTURE_THREADS,
+        kind: Kind::Fixture,
+        default: "4",
+    },
+    Var {
+        name: FIXTURE_ROUNDS,
+        kind: Kind::Fixture,
+        default: "50",
+    },
+    Var {
+        name: FIXTURE_NAMES,
+        kind: Kind::Fixture,
+        default: "unset: no names phase",
+    },
+    Var {
+        name: FIXTURE_NAME_PREFIXES,
+        kind: Kind::Fixture,
+        default: "none",
+    },
+    Var {
+        name: FIXTURE_NAME_LISTS,
+        kind: Kind::Fixture,
+        default: "none",
+    },
+    Var {
+        name: FIXTURE_NAME_CREATES,
+        kind: Kind::Fixture,
+        default: "none",
+    },
+    Var {
+        name: FIXTURE_NAME_RENAMES,
+        kind: Kind::Fixture,
+        default: "none",
+    },
     Var {
         name: FIXTURE_COW_PATH,
         kind: Kind::Fixture,
         default: "unset (the in-place-edit step does not run)",
     },
-    Var { name: ESCAPE_ONLY_VECTOR, kind: Kind::Fixture, default: "unset (every vector runs)" },
-    Var { name: ESCAPE_ACCESS, kind: Kind::Fixture, default: "read" },
+    Var {
+        name: ESCAPE_ONLY_VECTOR,
+        kind: Kind::Fixture,
+        default: "unset (every vector runs)",
+    },
+    Var {
+        name: ESCAPE_ACCESS,
+        kind: Kind::Fixture,
+        default: "read",
+    },
     Var {
         name: ESCAPE_VECTOR7_LINK_DIR,
         kind: Kind::Fixture,
         default: "unset (vector 7 constructs its own junction)",
     },
-    Var { name: FIXTURE_INI_PATH, kind: Kind::Fixture, default: "none (required)" },
-    Var { name: FIXTURE_INI_OUT, kind: Kind::Fixture, default: "unset (results go to stdout)" },
-    Var { name: FIXTURE_INI_WRITE, kind: Kind::Fixture, default: "unset (read-only run)" },
-    Var { name: FIXTURE_INI_SECTION, kind: Kind::Fixture, default: "Display" },
-    Var { name: FIXTURE_INI_KEY, kind: Kind::Fixture, default: "sTest" },
-    Var { name: FIXTURE_STEAM_API_DLL, kind: Kind::Fixture, default: "steam_api64.dll" },
-    Var { name: FIXTURE_STEAM_OUT, kind: Kind::Fixture, default: "unset (stdout only)" },
-    Var { name: FIXTURE_STEAM_INPUT, kind: Kind::Fixture, default: "on" },
-    Var { name: FIXTURE_STEAM_MANIFEST, kind: Kind::Fixture, default: "unset (not called)" },
+    Var {
+        name: FIXTURE_INI_PATH,
+        kind: Kind::Fixture,
+        default: "none (required)",
+    },
+    Var {
+        name: FIXTURE_INI_OUT,
+        kind: Kind::Fixture,
+        default: "unset (results go to stdout)",
+    },
+    Var {
+        name: FIXTURE_INI_WRITE,
+        kind: Kind::Fixture,
+        default: "unset (read-only run)",
+    },
+    Var {
+        name: FIXTURE_INI_SECTION,
+        kind: Kind::Fixture,
+        default: "Display",
+    },
+    Var {
+        name: FIXTURE_INI_KEY,
+        kind: Kind::Fixture,
+        default: "sTest",
+    },
+    Var {
+        name: FIXTURE_STEAM_API_DLL,
+        kind: Kind::Fixture,
+        default: "steam_api64.dll",
+    },
+    Var {
+        name: FIXTURE_STEAM_OUT,
+        kind: Kind::Fixture,
+        default: "unset (stdout only)",
+    },
+    Var {
+        name: FIXTURE_STEAM_INPUT,
+        kind: Kind::Fixture,
+        default: "on",
+    },
+    Var {
+        name: FIXTURE_STEAM_MANIFEST,
+        kind: Kind::Fixture,
+        default: "unset (not called)",
+    },
 ];
 
 /// Is `name` a known switch?
@@ -628,7 +968,10 @@ pub fn opt_in(name: &str) -> bool {
 /// crates. Naming the intent makes the call site say which one it wants.
 pub fn opt_out(name: &str) -> bool {
     match std::env::var(name) {
-        Ok(v) => !matches!(v.to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off"),
+        Ok(v) => !matches!(
+            v.to_ascii_lowercase().as_str(),
+            "0" | "false" | "no" | "off"
+        ),
         Err(_) => true,
     }
 }
@@ -655,13 +998,22 @@ pub fn path(name: &str) -> Option<PathBuf> {
 
 /// A numeric switch, falling back to `default` when unset or unparsable.
 pub fn parsed_or<T: std::str::FromStr>(name: &str, default: T) -> T {
-    std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 
 /// The whole surface as a human-readable table, for `--help`-style output.
 pub fn describe() -> String {
     let mut out = String::from("VFS environment switches:\n");
-    for kind in [Kind::Handshake, Kind::Behaviour, Kind::Diagnostic, Kind::Harness, Kind::Fixture] {
+    for kind in [
+        Kind::Handshake,
+        Kind::Behaviour,
+        Kind::Diagnostic,
+        Kind::Harness,
+        Kind::Fixture,
+    ] {
         out.push_str(&format!("\n  {kind:?}\n"));
         for v in ALL.iter().filter(|v| v.kind == kind) {
             out.push_str(&format!("    {:<32} {}\n", v.name, v.default));
@@ -734,8 +1086,14 @@ pub mod handshake {
     /// The names a Wine launch must remove from the child's inherited
     /// environment: every [`TRANSPORT`] and [`INJECT`] name `is_set` says the
     /// launch did not set itself.
-    pub fn stale<'a>(is_set: impl Fn(&str) -> bool + 'a) -> impl Iterator<Item = &'static str> + 'a {
-        TRANSPORT.iter().chain(INJECT).copied().filter(move |n| !is_set(n))
+    pub fn stale<'a>(
+        is_set: impl Fn(&str) -> bool + 'a,
+    ) -> impl Iterator<Item = &'static str> + 'a {
+        TRANSPORT
+            .iter()
+            .chain(INJECT)
+            .copied()
+            .filter(move |n| !is_set(n))
     }
 
     /// The `id=location;id=location` encoding of `VFS_VIRTUAL_ROOTS`, or `None`
@@ -770,7 +1128,10 @@ pub mod handshake {
             table.dedup();
             assert_eq!(n, table.len(), "a name is in two handshake tables");
             listed.sort_unstable();
-            assert_eq!(table, listed, "handshake tables and Kind::Handshake disagree");
+            assert_eq!(
+                table, listed,
+                "handshake tables and Kind::Handshake disagree"
+            );
         }
 
         #[test]
@@ -809,7 +1170,11 @@ mod tests {
     fn every_name_is_unique_and_prefixed() {
         let mut seen = std::collections::BTreeSet::new();
         for v in ALL {
-            assert!(v.name.starts_with("VFS_"), "{} is not VFS_-prefixed", v.name);
+            assert!(
+                v.name.starts_with("VFS_"),
+                "{} is not VFS_-prefixed",
+                v.name
+            );
             assert!(seen.insert(v.name), "{} listed twice", v.name);
         }
     }
@@ -891,7 +1256,10 @@ mod tests {
                 }
             }
         });
-        assert!(files > 20, "scanned only {files} files — did the walk break?");
+        assert!(
+            files > 20,
+            "scanned only {files} files — did the walk break?"
+        );
         assert!(
             unknown.is_empty(),
             "these VFS_* names are read but not registered in vfs-env::ALL:\n  {}",
@@ -908,10 +1276,12 @@ mod tests {
             let start = i + rel;
             let mut end = start + 4;
             // Part of a longer identifier (`AETHER_VFS_…`), not a switch of ours.
-            let embedded = start > 0
-                && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_');
+            let embedded =
+                start > 0 && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_');
             while end < bytes.len()
-                && (bytes[end].is_ascii_uppercase() || bytes[end].is_ascii_digit() || bytes[end] == b'_')
+                && (bytes[end].is_ascii_uppercase()
+                    || bytes[end].is_ascii_digit()
+                    || bytes[end] == b'_')
             {
                 end += 1;
             }
@@ -928,11 +1298,17 @@ mod tests {
     }
 
     fn visit(dir: &std::path::Path, f: &mut impl FnMut(&std::path::Path, &str)) {
-        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
         for e in entries.flatten() {
             let p = e.path();
             if p.is_dir() {
-                let name = p.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                let name = p
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned();
                 if name == "target" {
                     continue;
                 }

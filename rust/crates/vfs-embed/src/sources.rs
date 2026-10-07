@@ -84,7 +84,10 @@ impl RootSources {
         if !self.layers.is_empty() {
             let stack: Vec<Arc<dyn Provider>> =
                 self.layers.iter().map(|(_, b)| Arc::clone(b)).collect();
-            mounts.push((String::new(), stack_layers(stack).map_err(|e| e.to_string())?));
+            mounts.push((
+                String::new(),
+                stack_layers(stack).map_err(|e| e.to_string())?,
+            ));
         }
         for (pfx, be) in &self.prefix_mounts {
             mounts.push((pfx.clone(), Arc::clone(be)));
@@ -122,7 +125,11 @@ mod tests {
         rs.add("\\", 5, inline("only-mid.txt", b"MID"));
 
         let mounts = rs.mounts().unwrap();
-        assert_eq!(mounts.len(), 1, "layered sources collapse to one root mount");
+        assert_eq!(
+            mounts.len(),
+            1,
+            "layered sources collapse to one root mount"
+        );
         assert_eq!(mounts[0].0, "", "collapsed at the root prefix");
         assert_eq!(read(&mounts[0].1, RootId::DEFAULT, "shared.txt"), b"TOP");
         assert_eq!(

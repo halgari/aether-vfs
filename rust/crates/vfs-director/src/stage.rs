@@ -281,7 +281,10 @@ fn remove_staged_dir(dir: &Path) -> Result<(), String> {
         .and_then(|s| s.to_str())
         .is_some_and(|n| n.starts_with(STAGE_PREFIX));
     if !is_ours {
-        return Err(format!("refusing to remove non-staging dir {}", dir.display()));
+        return Err(format!(
+            "refusing to remove non-staging dir {}",
+            dir.display()
+        ));
     }
     if !dir.exists() {
         return Ok(());
@@ -366,7 +369,9 @@ fn safe_parent(exe_vpath: &str) -> Result<PathBuf, String> {
     parts.pop(); // the file name
     for p in parts {
         if p == ".." || p == "." || p.contains(':') {
-            return Err(format!("refusing to stage {exe_vpath}: unsafe path component {p:?}"));
+            return Err(format!(
+                "refusing to stage {exe_vpath}: unsafe path component {p:?}"
+            ));
         }
         out.push(p);
     }
@@ -725,7 +730,11 @@ mod tests {
             dir_path = staged.dir().to_path_buf();
             assert!(staged.exe().is_file());
             assert_eq!(staged.exe().file_name().unwrap(), "SkyrimSE.exe");
-            assert!(dir_path.file_name().unwrap().to_string_lossy().starts_with(STAGE_PREFIX));
+            assert!(dir_path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with(STAGE_PREFIX));
         }
         assert!(!dir_path.exists(), "staging dir must be removed on drop");
         let _ = std::fs::remove_dir_all(&root);
@@ -751,7 +760,10 @@ mod tests {
         )
         .expect("stage");
 
-        assert_eq!(staged.exe(), root.join("bin").join("x64").join("Cyberpunk2077.exe"));
+        assert_eq!(
+            staged.exe(),
+            root.join("bin").join("x64").join("Cyberpunk2077.exe")
+        );
         assert!(staged.exe().is_file());
         assert!(root.join("tools/redmod/bin/redMod.exe").is_file());
         // Flattening would have put it here, where `exeDir/../..` is wrong.
@@ -768,8 +780,12 @@ mod tests {
         let root = tmp_root("into");
         // Pre-existing content: the managed root already holds DirectX DLLs
         // and steam_appid.txt before any launch.
-        std::fs::write(root.join("steam_appid.txt"), b"489830
-").unwrap();
+        std::fs::write(
+            root.join("steam_appid.txt"),
+            b"489830
+",
+        )
+        .unwrap();
         std::fs::create_dir_all(root.join("bin")).unwrap();
         std::fs::write(root.join("bin").join("keepme.txt"), b"x").unwrap();
 
@@ -778,18 +794,28 @@ mod tests {
         let src = Fake(m);
 
         {
-            let staged = stage_launch_into(&src, "bin/x64/game.exe", &[], &root, &[]).expect("stage");
+            let staged =
+                stage_launch_into(&src, "bin/x64/game.exe", &[], &root, &[]).expect("stage");
             assert!(staged.exe().is_file());
             assert_eq!(staged.dir(), root.as_path());
         }
 
         assert!(root.is_dir(), "must not delete the caller's directory");
-        assert!(root.join("steam_appid.txt").is_file(), "must not touch pre-existing files");
+        assert!(
+            root.join("steam_appid.txt").is_file(),
+            "must not touch pre-existing files"
+        );
         assert!(root.join("bin").join("keepme.txt").is_file());
-        assert!(!root.join("bin").join("x64").join("game.exe").exists(), "staged file must go");
+        assert!(
+            !root.join("bin").join("x64").join("game.exe").exists(),
+            "staged file must go"
+        );
         // `bin/x64` was created by staging, so it is pruned; `bin` existed
         // already and still holds a file, so it stays.
-        assert!(!root.join("bin").join("x64").exists(), "created dir must be pruned");
+        assert!(
+            !root.join("bin").join("x64").exists(),
+            "created dir must be pruned"
+        );
         assert!(root.join("bin").is_dir(), "pre-existing dir must survive");
 
         let _ = std::fs::remove_dir_all(&root);
@@ -812,16 +838,18 @@ mod tests {
         let src = Fake(m);
 
         for launch in 1..=2 {
-            let staged =
-                stage_launch_into(&src, "SkyrimSE.exe", &["X3DAudio1_7.dll"], &root, &[])
-                    .unwrap_or_else(|e| panic!("launch {launch}: {e}"));
+            let staged = stage_launch_into(&src, "SkyrimSE.exe", &["X3DAudio1_7.dll"], &root, &[])
+                .unwrap_or_else(|e| panic!("launch {launch}: {e}"));
             assert!(staged.exe().is_file());
             drop(staged);
             assert!(
                 root.join("X3DAudio1_7.dll").is_file(),
                 "launch {launch} deleted a file staging did not create"
             );
-            assert!(!root.join("SkyrimSE.exe").exists(), "staged exe must be cleaned up");
+            assert!(
+                !root.join("SkyrimSE.exe").exists(),
+                "staged exe must be cleaned up"
+            );
         }
 
         let _ = std::fs::remove_dir_all(&root);
@@ -859,7 +887,10 @@ mod tests {
         .expect("stage");
 
         assert_eq!(staged.exe().file_name().unwrap(), "skse64_loader.exe");
-        assert!(staged.dir().join("SkyrimSE.exe").is_file(), "target must be staged too");
+        assert!(
+            staged.dir().join("SkyrimSE.exe").is_file(),
+            "target must be staged too"
+        );
         assert!(staged.staged().iter().any(|s| s == "SkyrimSE.exe"));
         let _ = std::fs::remove_dir_all(&root);
     }

@@ -373,7 +373,13 @@ impl<'a, N: Notifier> RingServer<'a, N> {
         };
         let (opcode, flags, req_id, payload) =
             ring::read_request(self.seg, &self.geom, slot).ok_or(IpcError::BadResponse)?;
-        let req = Request { slot, opcode, flags, req_id, payload };
+        let req = Request {
+            slot,
+            opcode,
+            flags,
+            req_id,
+            payload,
+        };
         let (status, resp) = handler(&req);
         // Delivered, or dropped because the client had stopped waiting: either
         // way this request is done and the slot is no longer this thread's.

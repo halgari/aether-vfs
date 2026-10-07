@@ -60,15 +60,29 @@ pub async fn run_escape_fixture(
     target: &Path,
     out_file: &Path,
     only_vector: Option<&str>,
-) -> (i32, Vec<EscapeLine>, std::collections::BTreeSet<String>, bool) {
+) -> (
+    i32,
+    Vec<EscapeLine>,
+    std::collections::BTreeSet<String>,
+    bool,
+) {
     use vfs_control::pb::LaunchReq;
-    let EscapeFixtureCtx { session_id, fixture, stats_log, vector7_link_dir, write_access } = *ctx;
+    let EscapeFixtureCtx {
+        session_id,
+        fixture,
+        stats_log,
+        vector7_link_dir,
+        write_access,
+    } = *ctx;
 
     let _ = std::fs::remove_file(stats_log);
     let _ = std::fs::remove_file(out_file);
 
     let mut env = std::collections::HashMap::new();
-    env.insert("VFS_SHIM_STATS_LOG".to_string(), stats_log.to_string_lossy().into_owned());
+    env.insert(
+        "VFS_SHIM_STATS_LOG".to_string(),
+        stats_log.to_string_lossy().into_owned(),
+    );
     if let Some(dir) = vector7_link_dir {
         env.insert("VFS_ESCAPE_VECTOR7_LINK_DIR".to_string(), dir.to_string());
     }

@@ -10,14 +10,15 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use vfs_block_store::{ClassWriteStats, CompactOptions, Usage, WriteClass, WriteStats};
 use vfs_provider::{
-    is_overlay_marker, Provider, SetAttr, VPath, KIND_DIR, KIND_FILE, OPEN_CREATE, OPEN_READ, OPEN_TRUNC, OPEN_WRITE,
+    is_overlay_marker, Provider, SetAttr, VPath, KIND_DIR, KIND_FILE, OPEN_CREATE, OPEN_READ,
+    OPEN_TRUNC, OPEN_WRITE,
 };
 
 use crate::cached::CacheStats;
-use crate::util::lock;
 use crate::ids::{classify_store_id, layer_file_id, Guid, StoreIdKind};
 use crate::layer::LayerProvider;
 use crate::storage::{Storage, StorageError};
+use crate::util::lock;
 
 /// Bytes moved per read or write when exporting or importing.
 const CHUNK: usize = 1 << 20;
@@ -611,7 +612,9 @@ mod tests {
         let want: Vec<_> = tree(&upper, "")
             .into_iter()
             .filter(|(p, ..)| {
-                !p.rsplit('/').next().is_some_and(vfs_provider::is_overlay_marker)
+                !p.rsplit('/')
+                    .next()
+                    .is_some_and(vfs_provider::is_overlay_marker)
             })
             .collect();
 

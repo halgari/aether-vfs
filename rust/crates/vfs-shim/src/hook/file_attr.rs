@@ -2,8 +2,8 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 use super::{
-    BASIC_LEN, NETWORK_OPEN_LEN, TRAMP_QATTR, TRAMP_QFULL, TRAMP_QIBN, allow_disk_fallthrough,
-    attributes, caller_buf, in_hook_reenter, path_file_id, path_of, put_basic, put_network_open,
+    allow_disk_fallthrough, attributes, caller_buf, in_hook_reenter, path_file_id, path_of,
+    put_basic, put_network_open, BASIC_LEN, NETWORK_OPEN_LEN, TRAMP_QATTR, TRAMP_QFULL, TRAMP_QIBN,
 };
 use crate::ntdef::{
     FileBasicInformation, FileNetworkOpenInformation, ObjectAttributes,

@@ -36,5 +36,7 @@ impl LPath {
 /// metadata question the overlay above passes down — nearly always for a
 /// path this layer does not hold — so it is kept to two allocations.
 pub(super) fn folded_path(rel: &str) -> Result<String, i32> {
-    normalize_rel(rel).map(|joined| fold(&joined)).map_err(|_| bad_request())
+    normalize_rel(rel)
+        .map(|joined| fold(&joined))
+        .map_err(|_| bad_request())
 }

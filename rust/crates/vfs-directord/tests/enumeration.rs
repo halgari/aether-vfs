@@ -13,7 +13,7 @@ use vfs_control::pb::director_server::DirectorServer;
 use vfs_directord::{connect, DirectorService, SessionRegistry};
 
 mod support;
-use support::{escape::*, launch::*, artifacts::*};
+use support::{artifacts::*, escape::*, launch::*};
 
 /// Gate 4, Task 8b: **a directory listing under a managed root never reveals
 /// a real, unserved file.**
@@ -168,7 +168,10 @@ async fn directory_enumeration_under_a_managed_root_hides_an_unserved_real_file(
     )
     .await;
 
-    assert_eq!(exit, 0, "the enumeration fixture must exit 0. Lines: {lines:?}");
+    assert_eq!(
+        exit, 0,
+        "the enumeration fixture must exit 0. Lines: {lines:?}"
+    );
     let line = lines
         .iter()
         .find(|l| l.vector == "enum")
@@ -181,7 +184,11 @@ async fn directory_enumeration_under_a_managed_root_hides_an_unserved_real_file(
         line.note
     );
 
-    let listed: Vec<String> = line.note.split('|').filter(|s| !s.is_empty()).collect::<Vec<_>>()
+    let listed: Vec<String> = line
+        .note
+        .split('|')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
         .into_iter()
         .map(|s| s.to_ascii_lowercase())
         .collect();

@@ -17,11 +17,11 @@
 //! runs it.
 #![cfg(unix)]
 
-use vfs_testkit::zip::write_stored_zip;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
+use vfs_testkit::zip::write_stored_zip;
 
 const WAIT: Duration = Duration::from_secs(300);
 

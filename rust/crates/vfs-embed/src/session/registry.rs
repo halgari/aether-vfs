@@ -114,8 +114,8 @@ mod registry_layer_tests {
     use std::path::{Path, PathBuf};
     #[cfg(unix)]
     use vfs_proton::launch::{LaunchFiles, RingGeometry, WineLaunch};
-    use vfs_provider::OPEN_READ;
     use vfs_provider::VPath;
+    use vfs_provider::OPEN_READ;
 
     const KEY: &str = r"\Registry\Machine\Software\Mod";
 
@@ -223,12 +223,10 @@ mod registry_layer_tests {
         host.set_value(KEY, "v", 1, b"six\0").unwrap();
         let (dir2, other) = storage_layer("flush2");
         s.set_registry_layer(Some(other), None).unwrap();
-        assert!(
-            read(&layer, "overlay.reg")
-                .unwrap()
-                .windows(3)
-                .any(|w| w == b"six")
-        );
+        assert!(read(&layer, "overlay.reg")
+            .unwrap()
+            .windows(3)
+            .any(|w| w == b"six"));
         let _ = std::fs::remove_dir_all(dir);
         let _ = std::fs::remove_dir_all(dir2);
     }

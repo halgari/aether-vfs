@@ -5,7 +5,7 @@
 
 use core::ffi::c_void;
 
-use crate::hook::{HookGuard, InstallError, install, install_late};
+use crate::hook::{install, install_late, HookGuard, InstallError};
 use vfs_inject::PayloadConfig;
 use vfs_protocol::shimcfg::{self, ConfigError, StaticImport};
 
@@ -21,7 +21,7 @@ fn payload_cfg_usable(p: *mut PayloadConfig) -> bool {
     unsafe {
         use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
         use windows_sys::Win32::System::Memory::{
-            MEM_COMMIT, MEMORY_BASIC_INFORMATION, VirtualQuery,
+            VirtualQuery, MEMORY_BASIC_INFORMATION, MEM_COMMIT,
         };
         let mut mbi = core::mem::MaybeUninit::<MEMORY_BASIC_INFORMATION>::uninit();
         let n = VirtualQuery(
@@ -331,14 +331,20 @@ mod tests {
         v1.extend_from_slice(&0u32.to_le_bytes());
         std::fs::write(&path, &v1).unwrap();
         let r = bootstrap_from_config_path(path.to_str().unwrap());
-        assert!(matches!(r, Err(BootstrapError::Config(ConfigError::Unversioned))));
+        assert!(matches!(
+            r,
+            Err(BootstrapError::Config(ConfigError::Unversioned))
+        ));
         let mut v3 = shimcfg::encode_config("R");
         v3[4..8].copy_from_slice(&3u32.to_le_bytes());
         std::fs::write(&path, &v3).unwrap();
         let r = bootstrap_from_config_path(path.to_str().unwrap());
         assert!(matches!(
             r,
-            Err(BootstrapError::Config(ConfigError::Version { found: 3, .. }))
+            Err(BootstrapError::Config(ConfigError::Version {
+                found: 3,
+                ..
+            }))
         ));
         let _ = std::fs::remove_file(&path);
     }
@@ -347,10 +353,19 @@ mod tests {
     /// (not the director's), carrying the message that names both versions.
     #[test]
     fn a_config_refusal_is_spelled_for_the_ready_file() {
-        let e = BootstrapError::Config(ConfigError::Version { found: 3, expected: 2 });
+        let e = BootstrapError::Config(ConfigError::Version {
+            found: 3,
+            expected: 2,
+        });
         let content = bootstrap_failed_content(&e);
-        assert!(content.starts_with(vfs_env::READY_BOOTSTRAP_FAILED_PREFIX), "{content}");
-        assert!(content.contains("version 3") && content.contains("version 2"), "{content}");
+        assert!(
+            content.starts_with(vfs_env::READY_BOOTSTRAP_FAILED_PREFIX),
+            "{content}"
+        );
+        assert!(
+            content.contains("version 3") && content.contains("version 2"),
+            "{content}"
+        );
         assert!(!content.starts_with(vfs_env::READY_FUSE_FAILED_PREFIX));
         let io = bootstrap_failed_content(&BootstrapError::Io);
         assert_eq!(io, format!("{}Io", vfs_env::READY_BOOTSTRAP_FAILED_PREFIX));

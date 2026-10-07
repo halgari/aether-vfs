@@ -339,8 +339,7 @@ fn many_threads_reading_many_files_stay_correct_and_under_the_cap() {
                     x ^= x >> 7;
                     x ^= x << 17;
                     let file = (x % 6) as usize;
-                    let f =
-                        c.register(0, &format!("f{file}"), data.len() as u64, 1, true, false);
+                    let f = c.register(0, &format!("f{file}"), data.len() as u64, 1, true, false);
                     let off = (x >> 8) % (data.len() as u64);
                     let len = 1 + ((x >> 40) % 1000) as usize;
                     let mut buf = vec![0u8; len];

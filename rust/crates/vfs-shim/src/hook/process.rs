@@ -1,14 +1,14 @@
 //! `CreateProcessInternalW`: injecting the shim into child processes.
 #![deny(unsafe_op_in_unsafe_fn)]
 
-use super::{TRAMP_CPIW, child_cwd_root};
-use crate::child::{ChildInjectError, child_ready_timeout_ms, inject_child, re_suspend};
+use super::{child_cwd_root, TRAMP_CPIW};
+use crate::child::{child_ready_timeout_ms, inject_child, re_suspend, ChildInjectError};
 use core::ffi::c_void;
 use std::sync::OnceLock;
-use windows_sys::Win32::Foundation::{CloseHandle, ERROR_PROCESS_ABORTED, HANDLE, SetLastError};
+use windows_sys::Win32::Foundation::{CloseHandle, SetLastError, ERROR_PROCESS_ABORTED, HANDLE};
 use windows_sys::Win32::System::Threading::{
-    CREATE_SUSPENDED, PROCESS_INFORMATION, ResumeThread, STARTUPINFOW, TerminateProcess,
-    WaitForSingleObject,
+    ResumeThread, TerminateProcess, WaitForSingleObject, CREATE_SUSPENDED, PROCESS_INFORMATION,
+    STARTUPINFOW,
 };
 
 /// `kernelbase!CreateProcessInternalW` — the funnel under all CreateProcess*.
@@ -186,7 +186,11 @@ fn log_refusal(image: &str, reason: &str) {
     let Some(path) = vfs_env::text(vfs_env::CHILD_REFUSED_LOG) else {
         return;
     };
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
         // One write, so concurrent refusals do not interleave within a line.
         let _ = f.write_all(format!("{image} {reason}\n").as_bytes());
     }
@@ -216,10 +220,16 @@ unsafe fn child_image(app: *const u16, cmd: *const u16) -> String {
     if w.is_empty() {
         let c = read(cmd);
         w = match c.first() {
-            Some(&q) if q == u16::from(b'"') => {
-                c[1..].iter().copied().take_while(|&x| x != u16::from(b'"')).collect()
-            }
-            _ => c.iter().copied().take_while(|&x| x != u16::from(b' ')).collect(),
+            Some(&q) if q == u16::from(b'"') => c[1..]
+                .iter()
+                .copied()
+                .take_while(|&x| x != u16::from(b'"'))
+                .collect(),
+            _ => c
+                .iter()
+                .copied()
+                .take_while(|&x| x != u16::from(b' '))
+                .collect(),
         };
     }
     String::from_utf16_lossy(&w).replace(['\r', '\n'], " ")

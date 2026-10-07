@@ -14,8 +14,7 @@ use std::sync::{Arc, Mutex};
 // (bottom of this file) keeps it that way. Storage too: `vfs_embed::Storage`
 // is `vfs-storage`'s, re-exported.
 use vfs_embed::{
-    LaunchOpts, Provider, RootId, RootSources, Session, SourceKey, Storage,
-    StorageError,
+    LaunchOpts, Provider, RootId, RootSources, Session, SourceKey, Storage, StorageError,
 };
 
 /// Build the composed provider each root in a [`vfs_control::SessionConfig`]

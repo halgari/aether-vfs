@@ -384,7 +384,11 @@ pub(crate) fn nt_query_full_attributes_relative(dir: *mut c_void, rel: &str) -> 
 
 /// `(status, EndOfFile)` for the by-name stat classes, or `None` when the export
 /// is absent (pre-1709 Windows).
-pub(crate) fn nt_query_by_name_relative(dir: *mut c_void, rel: &str, class: u32) -> Option<(i32, i64)> {
+pub(crate) fn nt_query_by_name_relative(
+    dir: *mut c_void,
+    rel: &str,
+    class: u32,
+) -> Option<(i32, i64)> {
     let p = ntdll_proc("NtQueryInformationByName")?;
     let f: NtQueryInformationByNameFn = unsafe { core::mem::transmute(p) };
     let n = rel_name(dir, rel);

@@ -31,7 +31,10 @@ pub(crate) fn fold_strip_prefix<'k>(key: &'k str, query: &[String]) -> Option<&'
     if kc.len() <= query.len() {
         return None;
     }
-    let matches = kc[..query.len()].iter().zip(query).all(|(c, q)| vfs_core::fold(c) == *q);
+    let matches = kc[..query.len()]
+        .iter()
+        .zip(query)
+        .all(|(c, q)| vfs_core::fold(c) == *q);
     if !matches {
         return None;
     }

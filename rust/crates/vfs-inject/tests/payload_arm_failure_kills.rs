@@ -23,7 +23,11 @@ fn a_payload_that_cannot_be_armed_gets_the_process_killed() {
     let payload = base.join("not-a-pe.dll");
     std::fs::write(&payload, b"this is not a PE image").unwrap();
     let config_path = base.join("shim.cfg");
-    std::fs::write(&config_path, vfs_shim::encode_config(root.to_str().unwrap())).unwrap();
+    std::fs::write(
+        &config_path,
+        vfs_shim::encode_config(root.to_str().unwrap()),
+    )
+    .unwrap();
     let output_path = base.join("probe-out.bin");
 
     let result = run_target_with_shim(RunConfig {
@@ -43,7 +47,10 @@ fn a_payload_that_cannot_be_armed_gets_the_process_killed() {
     });
 
     assert!(
-        matches!(result, Err(InjectError::PeParse) | Err(InjectError::PayloadRead)),
+        matches!(
+            result,
+            Err(InjectError::PeParse) | Err(InjectError::PayloadRead)
+        ),
         "expected an arming error; got {result:?}"
     );
     for _ in 0..40 {
@@ -52,7 +59,10 @@ fn a_payload_that_cannot_be_armed_gets_the_process_killed() {
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    assert!(!output_path.exists(), "the target was resumed after arming failed");
+    assert!(
+        !output_path.exists(),
+        "the target was resumed after arming failed"
+    );
     // Not merely unrun: gone. A parked process satisfies the check above.
     common::assert_no_child_processes();
     let _ = std::fs::remove_dir_all(&base);

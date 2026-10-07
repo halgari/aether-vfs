@@ -20,9 +20,9 @@ use std::sync::Arc;
 use vfs_block_store::CompactOptions;
 
 use crate::cached::sub_logical;
-use crate::util::{lock, now_minute};
 use crate::ids::{cache_file_id, classify_store_id, StoreIdKind};
 use crate::storage::{Storage, StorageError};
+use crate::util::{lock, now_minute};
 
 /// Eviction stops once cached logical bytes are at or below this share of the
 /// budget, so it does not run again on the very next miss.
@@ -245,8 +245,8 @@ mod tests {
 
     use super::*;
     use crate::cached::tests::{
-        key, pattern, read_all, slow, small_cfg, temp_storage_with, write_layer_file, MapSource, BS,
-        slow_fixture, temp_storage,
+        key, pattern, read_all, slow, slow_fixture, small_cfg, temp_storage, temp_storage_with,
+        write_layer_file, MapSource, BS,
     };
     use crate::config::StorageConfig;
     use crate::ids::layer_file_id;

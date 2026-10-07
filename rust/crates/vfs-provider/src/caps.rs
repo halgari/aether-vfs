@@ -88,18 +88,29 @@ impl Capabilities {
 
     /// Capabilities of `seekable(self)`: sequential becomes positional.
     pub fn seekable(self) -> Self {
-        let access = if self.access == Access::SeqRead { Access::Read } else { self.access };
+        let access = if self.access == Access::SeqRead {
+            Access::Read
+        } else {
+            self.access
+        };
         Capabilities { access, ..self }
     }
 
     /// Capabilities of `cached(self)`: access passes through, slow is answered.
     pub fn cached(self) -> Self {
-        Capabilities { slow: false, ..self }
+        Capabilities {
+            slow: false,
+            ..self
+        }
     }
 
     /// Capabilities of `readonly(self)`: write access is demoted.
     pub fn read_only_clamp(self) -> Self {
-        let access = if self.access == Access::ReadWrite { Access::Read } else { self.access };
+        let access = if self.access == Access::ReadWrite {
+            Access::Read
+        } else {
+            self.access
+        };
         Capabilities { access, ..self }
     }
 
@@ -135,7 +146,11 @@ mod tests {
 
     #[test]
     fn read_write_plus_immutable_is_rejected() {
-        let c = Capabilities { access: Access::ReadWrite, immutable: true, ..Capabilities::read_only() };
+        let c = Capabilities {
+            access: Access::ReadWrite,
+            immutable: true,
+            ..Capabilities::read_only()
+        };
         assert!(c.validate().is_err());
     }
 
@@ -146,32 +161,52 @@ mod tests {
 
     #[test]
     fn seekable_promotes_sequential_to_positional() {
-        let seq = Capabilities { access: Access::SeqRead, ..Capabilities::read_only() };
+        let seq = Capabilities {
+            access: Access::SeqRead,
+            ..Capabilities::read_only()
+        };
         assert_eq!(seq.seekable().access, Access::Read);
     }
 
     #[test]
     fn seekable_leaves_an_already_positional_provider_alone() {
-        let rw = Capabilities { access: Access::ReadWrite, ..Capabilities::read_only() };
+        let rw = Capabilities {
+            access: Access::ReadWrite,
+            ..Capabilities::read_only()
+        };
         assert_eq!(rw.seekable().access, Access::ReadWrite);
     }
 
     #[test]
     fn caching_clears_the_slow_marker() {
-        let slow = Capabilities { slow: true, ..Capabilities::read_only() };
+        let slow = Capabilities {
+            slow: true,
+            ..Capabilities::read_only()
+        };
         assert!(!slow.cached().slow);
     }
 
     #[test]
     fn read_only_clamp_demotes_write_access() {
-        let rw = Capabilities { access: Access::ReadWrite, ..Capabilities::read_only() };
+        let rw = Capabilities {
+            access: Access::ReadWrite,
+            ..Capabilities::read_only()
+        };
         assert_eq!(rw.read_only_clamp().access, Access::Read);
     }
 
     #[test]
     fn weakest_takes_the_lowest_access_and_ands_immutability() {
-        let rw = Capabilities { access: Access::ReadWrite, immutable: false, ..Capabilities::read_only() };
-        let ro = Capabilities { access: Access::Read, immutable: true, ..Capabilities::read_only() };
+        let rw = Capabilities {
+            access: Access::ReadWrite,
+            immutable: false,
+            ..Capabilities::read_only()
+        };
+        let ro = Capabilities {
+            access: Access::Read,
+            immutable: true,
+            ..Capabilities::read_only()
+        };
         let w = Capabilities::weakest([rw, ro]);
         assert_eq!(w.access, Access::Read);
         assert!(!w.immutable);
@@ -185,7 +220,10 @@ mod tests {
     #[test]
     fn weakest_marks_slow_if_any_child_is_slow() {
         let fast = Capabilities::read_only();
-        let slow = Capabilities { slow: true, ..Capabilities::read_only() };
+        let slow = Capabilities {
+            slow: true,
+            ..Capabilities::read_only()
+        };
         assert!(Capabilities::weakest([fast, slow]).slow);
     }
 
@@ -200,7 +238,10 @@ mod tests {
     #[test]
     fn weakest_is_case_sensitive_if_any_child_is() {
         let ins = Capabilities::read_only();
-        let sen = Capabilities { case: CaseMatch::Sensitive, ..Capabilities::read_only() };
+        let sen = Capabilities {
+            case: CaseMatch::Sensitive,
+            ..Capabilities::read_only()
+        };
         assert_eq!(Capabilities::weakest([ins, sen]).case, CaseMatch::Sensitive);
         assert_eq!(Capabilities::weakest([sen, ins]).case, CaseMatch::Sensitive);
     }
@@ -208,13 +249,19 @@ mod tests {
     #[test]
     fn weakest_stays_insensitive_when_all_children_are() {
         let ins = Capabilities::read_only();
-        assert_eq!(Capabilities::weakest([ins, ins]).case, CaseMatch::Insensitive);
+        assert_eq!(
+            Capabilities::weakest([ins, ins]).case,
+            CaseMatch::Insensitive
+        );
     }
 
     /// The combinators that pass access through must not silently reset case.
     #[test]
     fn the_passthrough_combinators_preserve_the_case_declaration() {
-        let sen = Capabilities { case: CaseMatch::Sensitive, ..Capabilities::read_only() };
+        let sen = Capabilities {
+            case: CaseMatch::Sensitive,
+            ..Capabilities::read_only()
+        };
         assert_eq!(sen.seekable().case, CaseMatch::Sensitive);
         assert_eq!(sen.cached().case, CaseMatch::Sensitive);
         assert_eq!(sen.read_only_clamp().case, CaseMatch::Sensitive);

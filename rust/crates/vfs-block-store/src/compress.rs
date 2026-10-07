@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use rayon::prelude::*;
 
 use crate::class::WriteClass;
-use crate::codec::{EncodedBlock, Hash128, encode_block};
+use crate::codec::{encode_block, EncodedBlock, Hash128};
 use crate::config::{BulkCompression, StoreConfig};
 use crate::stats::{ClassWriteStats, WriteStats};
 
@@ -216,10 +216,10 @@ fn install<R: Send>(pool: Option<&rayon::ThreadPool>, f: impl FnOnce() -> R + Se
 
 #[cfg(test)]
 mod tests {
-    use crate::class::{WriteClass, with_write_class};
+    use crate::class::{with_write_class, WriteClass};
     use crate::config::{BulkCompression, StoreConfig};
+    use crate::store::tests::{random_bytes, read_all, test_config, BS};
     use crate::store::BlockStore;
-    use crate::store::tests::{BS, random_bytes, read_all, test_config};
 
     /// Text-like bytes: compress well at any level.
     fn texty(seed: u64, len: usize) -> Vec<u8> {

@@ -198,7 +198,7 @@ fn find_window(pid: u32) -> Option<(u32, u32)> {
 fn find_pid(image_name: &str) -> Option<u32> {
     use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
-        CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
         TH32CS_SNAPPROCESS,
     };
     // SAFETY: standard snapshot walk; handle closed on every path.

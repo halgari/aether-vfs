@@ -247,7 +247,7 @@ pub(crate) async fn wait_for_daemon(
 mod tests {
     use super::*;
     use crate::serve_daemon_until;
-    use crate::{DEFAULT_BIND, SessionRegistry};
+    use crate::{SessionRegistry, DEFAULT_BIND};
 
     /// Two spawns that each truncate the log: the first daemon's later
     /// writes land at the end of the file, never past a hole of NULs.

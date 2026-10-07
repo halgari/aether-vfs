@@ -48,7 +48,8 @@ pub fn write_discovery(path: &Path, d: &Discovery) -> Result<(), String> {
 }
 
 pub fn read_discovery(path: &Path) -> Result<Discovery, String> {
-    let text = std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    let text =
+        std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
     serde_json::from_str(&text).map_err(|e| format!("parse discovery: {e}"))
 }
 

@@ -59,8 +59,8 @@ async fn configure_session(
     cfg: &vfs_control::SessionConfig,
 ) -> Result<Option<i32>, String> {
     use vfs_control::pb::{
-        AddSourceReq, DeclareRootReq, DiskSource, HttpSource, LayerSource, RemoteSource,
-        SourceSpec as PbSource, ZipSource, source_spec,
+        source_spec, AddSourceReq, DeclareRootReq, DiskSource, HttpSource, LayerSource,
+        RemoteSource, SourceSpec as PbSource, ZipSource,
     };
     let session_id = session_id.to_string();
 
@@ -189,7 +189,7 @@ pub async fn run_launch(
     session_id: &str,
     launch: &vfs_control::LaunchConfig,
 ) -> Result<Option<i32>, String> {
-    use vfs_control::pb::{LaunchReq, launch_event};
+    use vfs_control::pb::{launch_event, LaunchReq};
 
     let mut stream = client
         .launch(LaunchReq {

@@ -5,8 +5,8 @@ use super::{
     close_hook_body, compress_key_hook_body, cpiw_hook_body, create_hook_body,
     create_key_hook_body, create_key_tx_hook_body, create_section_hook_body, delete_hook_body,
     delete_key_hook_body, delete_value_key_hook_body, dup_hook_body, enum_key_hook_body,
-    enum_value_hook_body, flush_hook_body, flush_key_hook_body, load_key_ex_hook_body,
-    load_key_hook_body, load_key2_hook_body, load_key3_hook_body, lock_hook_body,
+    enum_value_hook_body, flush_hook_body, flush_key_hook_body, load_key2_hook_body,
+    load_key3_hook_body, load_key_ex_hook_body, load_key_hook_body, lock_hook_body,
     lock_registry_key_hook_body, map_view_hook_body, notify_key_hook_body,
     notify_multiple_hook_body, open_hook_body, open_key_ex_hook_body, open_key_hook_body,
     open_key_tx_ex_hook_body, open_key_tx_hook_body, qattr_hook_body, qdir_hook_body,
@@ -15,12 +15,12 @@ use super::{
     qvol_hook_body, read_hook_body, rename_key_hook_body, replace_key_hook_body,
     restore_key_hook_body, save_key_ex_hook_body, save_key_hook_body, save_merged_hook_body,
     set_info_key_hook_body, set_info_object_hook_body, set_security_hook_body,
-    set_value_key_hook_body, setinfo_hook_body, unload_key_ex_hook_body, unload_key_hook_body,
-    unload_key2_hook_body, unlock_hook_body, unmap_view_hook_body, write_hook_body,
+    set_value_key_hook_body, setinfo_hook_body, unload_key2_hook_body, unload_key_ex_hook_body,
+    unload_key_hook_body, unlock_hook_body, unmap_view_hook_body, write_hook_body,
 };
 use crate::ntdef::{
-    FileBasicInformation, FileNetworkOpenInformation, ObjectAttributes, STATUS_UNSUCCESSFUL,
-    UnicodeString,
+    FileBasicInformation, FileNetworkOpenInformation, ObjectAttributes, UnicodeString,
+    STATUS_UNSUCCESSFUL,
 };
 use core::cell::Cell;
 use core::ffi::c_void;

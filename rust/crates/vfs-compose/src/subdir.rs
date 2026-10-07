@@ -268,8 +268,10 @@ mod tests {
     /// must honour it rather than pass it on unearned.
     #[test]
     fn the_prefix_is_matched_fold_equally() {
-        let inner: Arc<dyn Provider> =
-            Arc::new(InlineProvider::from_files([("Root/Data/A.esp", &b"body"[..])]));
+        let inner: Arc<dyn Provider> = Arc::new(InlineProvider::from_files([(
+            "Root/Data/A.esp",
+            &b"body"[..],
+        )]));
         let s = SubdirProvider::new(inner, "Root");
 
         for spelling in ["Data/A.esp", "data/a.esp", "DATA/A.ESP"] {

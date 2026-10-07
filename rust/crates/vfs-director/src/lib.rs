@@ -36,17 +36,21 @@ pub mod ring_dispatch;
 pub mod stage;
 
 pub use director::{Director, OpenInfo};
+pub use io_stats::{
+    mark_launch as io_mark_launch, reset as io_stats_reset, snapshot_report as io_stats_report,
+};
 pub use ipc::IpcServe;
-pub use io_stats::{mark_launch as io_mark_launch, reset as io_stats_reset, snapshot_report as io_stats_report};
-pub use vfs_provider::{Provider, Handle, DirEntry, RootId, Stat, KIND_DIR, KIND_FILE, OPEN_READ, OPEN_WRITE};
 pub use registry::{RegistryGenSink, RegistryGeneration};
+pub use vfs_provider::{
+    DirEntry, Handle, Provider, RootId, Stat, KIND_DIR, KIND_FILE, OPEN_READ, OPEN_WRITE,
+};
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vfs_compose::DiskProvider;
     use std::io::Write;
     use std::sync::Arc;
+    use vfs_compose::DiskProvider;
 
     #[test]
     fn disk_provider_open_read() {
@@ -58,7 +62,8 @@ mod tests {
             f.write_all(b"hello-director").unwrap();
         }
         let d = Director::new();
-        d.mount(RootId::DEFAULT, Arc::new(DiskProvider::new(&dir))).unwrap();
+        d.mount(RootId::DEFAULT, Arc::new(DiskProvider::new(&dir)))
+            .unwrap();
         let st = d.getattr(RootId::DEFAULT, "hello.txt").unwrap().unwrap();
         assert_eq!(st.kind, KIND_FILE);
         assert_eq!(st.size, 14);
@@ -82,7 +87,8 @@ mod tests {
         let _ = std::fs::create_dir_all(&dir);
         std::fs::write(dir.join("x.txt"), b"x").unwrap();
         let d = Director::new();
-        d.mount(RootId::DEFAULT, Arc::new(DiskProvider::new(&dir))).unwrap();
+        d.mount(RootId::DEFAULT, Arc::new(DiskProvider::new(&dir)))
+            .unwrap();
         assert!(d.getattr(RootId::DEFAULT, "x.txt").unwrap().is_some());
         d.unmount(RootId::DEFAULT).unwrap();
         assert!(d.getattr(RootId::DEFAULT, "x.txt").unwrap().is_none());

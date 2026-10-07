@@ -2,17 +2,17 @@
 //! the real one (`#[ignore]`d: run with `--features gpu-zstd -- --ignored` on a machine with a
 //! GPU).
 
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::Duration;
 
-use crate::class::{WriteClass, with_write_class};
-use crate::codec::{FLAG_COMPRESSED, HEADER_LEN, RecordHeader};
+use crate::class::{with_write_class, WriteClass};
+use crate::codec::{RecordHeader, FLAG_COMPRESSED, HEADER_LEN};
 use crate::config::{BulkCompression, StoreConfig};
-use crate::gpu::tests::{Fake, fake_factory, test_cfg};
+use crate::gpu::tests::{fake_factory, test_cfg, Fake};
 use crate::gpu::{GpuConfig, GpuLevel};
-use crate::store::BlockStore;
 use crate::store::tests::{random_bytes, read_all};
+use crate::store::BlockStore;
 
 const BS: usize = 64 * 1024;
 

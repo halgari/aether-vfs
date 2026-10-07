@@ -2,22 +2,44 @@ use super::*;
 
 #[test]
 fn write_opcode_round_trips_through_dispatch() {
-    use vfs_protocol::{encode_open_req, encode_write_req, decode_open_resp, decode_write_resp,
-                       WriteReq, OP_OPEN, OP_WRITE, OPEN_CREATE, OPEN_WRITE, ST_OK};
+    use vfs_protocol::{
+        decode_open_resp, decode_write_resp, encode_open_req, encode_write_req, WriteReq,
+        OPEN_CREATE, OPEN_WRITE, OP_OPEN, OP_WRITE, ST_OK,
+    };
     let dir = vfs_testkit::scratch_path("vfs-rdw");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let d = Director::new();
-    d.mount(RootId::DEFAULT, std::sync::Arc::new(vfs_compose::DiskProvider::new(&dir))).unwrap();
+    d.mount(
+        RootId::DEFAULT,
+        std::sync::Arc::new(vfs_compose::DiskProvider::new(&dir)),
+    )
+    .unwrap();
 
     let (st, payload) = dispatch_director(
-        &d, OP_OPEN, &encode_open_req(0, OPEN_WRITE | OPEN_CREATE, "w.txt"), 0, 4096, None);
+        &d,
+        OP_OPEN,
+        &encode_open_req(0, OPEN_WRITE | OPEN_CREATE, "w.txt"),
+        0,
+        4096,
+        None,
+    );
     assert_eq!(st, ST_OK, "open for write must succeed through dispatch");
     let fh = decode_open_resp(&payload).unwrap().fh;
 
-    let req = WriteReq { fh, offset: 0, len: 5 };
+    let req = WriteReq {
+        fh,
+        offset: 0,
+        len: 5,
+    };
     let (st, payload) = dispatch_director(
-        &d, OP_WRITE, &encode_write_req(&req, b"hello"), 0, 4096, None);
+        &d,
+        OP_WRITE,
+        &encode_write_req(&req, b"hello"),
+        0,
+        4096,
+        None,
+    );
     assert_eq!(st, ST_OK, "write must succeed through dispatch");
     assert_eq!(decode_write_resp(&payload).unwrap(), 5);
 
@@ -78,18 +100,31 @@ fn delete_opcode_removes_the_file() {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("gone.txt"), b"x").unwrap();
     let d = Director::new();
-    d.mount(RootId::DEFAULT, std::sync::Arc::new(vfs_compose::DiskProvider::new(&dir))).unwrap();
+    d.mount(
+        RootId::DEFAULT,
+        std::sync::Arc::new(vfs_compose::DiskProvider::new(&dir)),
+    )
+    .unwrap();
 
     let (st, _) = dispatch_director(
-        &d, OP_DELETE, &encode_path_req(0, "gone.txt"), 0, 4096, None);
+        &d,
+        OP_DELETE,
+        &encode_path_req(0, "gone.txt"),
+        0,
+        4096,
+        None,
+    );
     assert_eq!(st, ST_OK);
-    assert!(!dir.join("gone.txt").exists(), "OP_DELETE did not remove the file");
+    assert!(
+        !dir.join("gone.txt").exists(),
+        "OP_DELETE did not remove the file"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn open_write_against_a_read_only_provider_is_read_only_not_bad_request() {
-    use vfs_protocol::{encode_open_req, OP_OPEN, OPEN_WRITE, ST_READ_ONLY};
+    use vfs_protocol::{encode_open_req, OPEN_WRITE, OP_OPEN, ST_READ_ONLY};
     let d = Director::new();
     // InlineProvider is Access::Read: the mount itself has no writable
     // backend, so the director (not this dispatch arm) must be the one
@@ -104,7 +139,13 @@ fn open_write_against_a_read_only_provider_is_read_only_not_bad_request() {
     .unwrap();
 
     let (st, _) = dispatch_director(
-        &d, OP_OPEN, &encode_open_req(0, OPEN_WRITE, "f"), 0, 4096, None);
+        &d,
+        OP_OPEN,
+        &encode_open_req(0, OPEN_WRITE, "f"),
+        0,
+        4096,
+        None,
+    );
     assert_eq!(
         st, ST_READ_ONLY,
         "OP_OPEN with OPEN_WRITE against a read-only mount must surface ST_READ_ONLY, not a blanket ST_BAD_REQUEST"
@@ -124,8 +165,8 @@ fn open_write_against_a_read_only_provider_is_read_only_not_bad_request() {
 #[test]
 fn different_roots_resolve_the_same_path_to_different_content_via_dispatch() {
     use vfs_protocol::{
-        decode_open_resp, decode_read_resp, encode_open_req, encode_read_req, ReadReq,
-        OP_OPEN, OP_READ, OPEN_READ, ST_OK,
+        decode_open_resp, decode_read_resp, encode_open_req, encode_read_req, ReadReq, OPEN_READ,
+        OP_OPEN, OP_READ, ST_OK,
     };
     let d = Director::new();
     d.mount(
@@ -147,13 +188,23 @@ fn different_roots_resolve_the_same_path_to_different_content_via_dispatch() {
 
     let read_via = |root: u32| -> Vec<u8> {
         let (st, payload) = dispatch_director(
-            &d, OP_OPEN, &encode_open_req(root, OPEN_READ, "a.txt"), 0, 4096, None);
+            &d,
+            OP_OPEN,
+            &encode_open_req(root, OPEN_READ, "a.txt"),
+            0,
+            4096,
+            None,
+        );
         assert_eq!(st, ST_OK);
         let fh = decode_open_resp(&payload).unwrap().fh;
         let (st, payload) = dispatch_director(
             &d,
             OP_READ,
-            &encode_read_req(&ReadReq { fh, offset: 0, len: 64 }),
+            &encode_read_req(&ReadReq {
+                fh,
+                offset: 0,
+                len: 64,
+            }),
             0,
             4096,
             None,
@@ -181,8 +232,8 @@ fn different_roots_resolve_the_same_path_to_different_content_via_dispatch() {
 #[test]
 fn the_wire_root_alone_selects_the_provider() {
     use vfs_protocol::{
-        decode_open_resp, decode_read_resp, encode_open_req, encode_read_req, ReadReq,
-        OP_OPEN, OP_READ, OPEN_READ, ST_OK,
+        decode_open_resp, decode_read_resp, encode_open_req, encode_read_req, ReadReq, OPEN_READ,
+        OP_OPEN, OP_READ, ST_OK,
     };
     let d = Director::new();
     for (root, bytes) in [(0u32, b"ZERO".as_slice()), (1u32, b"ONE!".as_slice())] {
@@ -195,7 +246,10 @@ fn the_wire_root_alone_selects_the_provider() {
 
     let zero = encode_open_req(0, OPEN_READ, "a.txt");
     let one = encode_open_req(1, OPEN_READ, "a.txt");
-    assert_ne!(zero, one, "the two payloads must differ only in the root field");
+    assert_ne!(
+        zero, one,
+        "the two payloads must differ only in the root field"
+    );
     assert_eq!(&zero[4..], &one[4..], "…and in nothing else");
 
     let read = |payload: &[u8]| -> Vec<u8> {
@@ -205,7 +259,11 @@ fn the_wire_root_alone_selects_the_provider() {
         let (st, resp) = dispatch_director(
             &d,
             OP_READ,
-            &encode_read_req(&ReadReq { fh, offset: 0, len: 64 }),
+            &encode_read_req(&ReadReq {
+                fh,
+                offset: 0,
+                len: 64,
+            }),
             0,
             4096,
             None,
@@ -223,7 +281,10 @@ fn the_wire_root_alone_selects_the_provider() {
     let mut stale = OPEN_READ.to_le_bytes().to_vec();
     stale.extend_from_slice(b"a.txt");
     let (st, _) = dispatch_director(&d, OP_OPEN, &stale, 0, 4096, None);
-    assert_ne!(st, ST_OK, "a pre-task-5 OPEN payload must not silently succeed");
+    assert_ne!(
+        st, ST_OK,
+        "a pre-task-5 OPEN payload must not silently succeed"
+    );
 }
 
 // ---- registry overlay opcodes (15-22) ----
@@ -522,12 +583,8 @@ mod registry_ops {
             &encode_reg_set_value(&deep, "y", 1, b""),
         );
         let ask = |p: &str, sub: bool, since: u64| {
-            decode_reg_changed_reply(&ok(
-                &d,
-                OP_REG_CHANGED,
-                &encode_reg_changed(p, sub, since),
-            ))
-            .unwrap()
+            decode_reg_changed_reply(&ok(&d, OP_REG_CHANGED, &encode_reg_changed(p, sub, since)))
+                .unwrap()
         };
         assert_eq!(ask(K, false, v1), (false, v2), "only below K");
         assert_eq!(ask(K, true, v1), (true, v2));
@@ -637,9 +694,8 @@ mod registry_ops {
                             assert!(v >= last, "version went backwards");
                             last = v;
                             if let (true, Some(n)) = (strict, node) {
-                                let got = u64::from_le_bytes(
-                                    n.values[0].data[..].try_into().unwrap(),
-                                );
+                                let got =
+                                    u64::from_le_bytes(n.values[0].data[..].try_into().unwrap());
                                 assert_eq!(got, v, "value and version from different states");
                             }
                             let r = ok(&d, OP_REG_LOOKUP, &encode_reg_path(K));
@@ -696,8 +752,7 @@ mod registry_ops {
             decode_reg_lookup_reply(&ok(&d, OP_REG_LOOKUP, &encode_reg_path(K))).unwrap();
         assert_eq!(v, 900, "every write bumped the version exactly once");
         for p in [K, k2.as_str()] {
-            let (n, _) =
-                decode_reg_key_reply(&ok(&d, OP_REG_KEY, &encode_reg_path(p))).unwrap();
+            let (n, _) = decode_reg_key_reply(&ok(&d, OP_REG_KEY, &encode_reg_path(p))).unwrap();
             assert_eq!(n.unwrap().values[0].data, 299u64.to_le_bytes());
         }
     }

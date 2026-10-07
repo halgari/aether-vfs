@@ -5,4 +5,6 @@ pub mod artifacts;
 pub mod scratch;
 pub mod zip;
 
-pub use scratch::{scratch_dir, scratch_path, scratch_root, tempdir, use_scratch_as_tmpdir, Scratch};
+pub use scratch::{
+    scratch_dir, scratch_path, scratch_root, tempdir, use_scratch_as_tmpdir, Scratch,
+};

@@ -19,10 +19,10 @@ use core::ffi::c_void;
 use windows_sys::Win32::Foundation::NTSTATUS;
 
 use crate::ntdef::{
-    OBJ_CASE_INSENSITIVE, ObjectAttributes, STATUS_ACCESS_VIOLATION, STATUS_OBJECT_NAME_INVALID,
-    UnicodeString,
+    ObjectAttributes, UnicodeString, OBJ_CASE_INSENSITIVE, STATUS_ACCESS_VIOLATION,
+    STATUS_OBJECT_NAME_INVALID,
 };
-use vfs_redirect::{CountedErr, counted_units, utf16_to_string};
+use vfs_redirect::{counted_units, utf16_to_string, CountedErr};
 
 /// The status NT gives for a `UNICODE_STRING` header that fails the rule above.
 fn counted_status(e: CountedErr) -> NTSTATUS {

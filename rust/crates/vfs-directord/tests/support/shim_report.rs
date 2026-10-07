@@ -191,7 +191,10 @@ impl Reconciliation {
     /// the guard — `write_seal.rs` holds the other half, asserting the counter
     /// still exists at all.
     pub fn write_fallback(&self) -> u64 {
-        self.fell_through.get(WRITE_FALLBACK_LABEL).copied().unwrap_or(0)
+        self.fell_through
+            .get(WRITE_FALLBACK_LABEL)
+            .copied()
+            .unwrap_or(0)
     }
 }
 
@@ -243,7 +246,12 @@ pub fn parse_outcomes(text: &str) -> Outcomes {
     let mut unrouted_director_opens = 0u64;
     let mut fell_through = BTreeMap::new();
     let Some(idx) = text.find(OUTCOMES_HEADER) else {
-        return Outcomes { routed, unrouted_director_opens, fell_through, found: false };
+        return Outcomes {
+            routed,
+            unrouted_director_opens,
+            fell_through,
+            found: false,
+        };
     };
     // The outcomes section is rendered last in the report
     // (`hookstats::start_reporter`'s concatenation order), so it runs to
@@ -261,7 +269,12 @@ pub fn parse_outcomes(text: &str) -> Outcomes {
             fell_through.insert(label, count);
         }
     }
-    Outcomes { routed, unrouted_director_opens, fell_through, found: true }
+    Outcomes {
+        routed,
+        unrouted_director_opens,
+        fell_through,
+        found: true,
+    }
 }
 
 /// A nested per-path breakdown line under one outcome's summary row
@@ -380,10 +393,18 @@ pub fn parse_readdirs(text: &str) -> Vec<ReadDirRecord> {
         let Some(source) = it.next() else { continue };
         let Some(rest) = it.next() else { continue };
         let rest = rest.trim_start();
-        let Some((count_str, rest)) = rest.split_once(' ') else { continue };
-        let Ok(count) = count_str.parse::<u64>() else { continue };
-        let Some(rest) = rest.trim_start().strip_prefix("entries") else { continue };
-        let Some(rest) = rest.trim_start().strip_prefix("filter=") else { continue };
+        let Some((count_str, rest)) = rest.split_once(' ') else {
+            continue;
+        };
+        let Ok(count) = count_str.parse::<u64>() else {
+            continue;
+        };
+        let Some(rest) = rest.trim_start().strip_prefix("entries") else {
+            continue;
+        };
+        let Some(rest) = rest.trim_start().strip_prefix("filter=") else {
+            continue;
+        };
         // The filter field is left-padded to 16 and the directory follows it,
         // so the *first* run of whitespace after the filter token separates
         // them. This is genuinely ambiguous for a wildcard containing a space
@@ -392,7 +413,9 @@ pub fn parse_readdirs(text: &str) -> Vec<ReadDirRecord> {
         // change: the only caller matches `dir` with `ends_with`, so an
         // over-long `dir` still matches, and the wildcards this project's
         // fixtures produce are `*`.
-        let Some((filter, dir)) = rest.split_once(char::is_whitespace) else { continue };
+        let Some((filter, dir)) = rest.split_once(char::is_whitespace) else {
+            continue;
+        };
         out.push(ReadDirRecord {
             source: source.to_string(),
             count,

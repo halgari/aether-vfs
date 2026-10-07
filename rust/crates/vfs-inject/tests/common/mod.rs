@@ -174,7 +174,11 @@ pub fn assert_no_child_processes() {
             let mut ok = Process32FirstW(snap, &mut e);
             while ok != 0 {
                 if e.th32ParentProcessID == me {
-                    let n = e.szExeFile.iter().position(|&c| c == 0).unwrap_or(e.szExeFile.len());
+                    let n = e
+                        .szExeFile
+                        .iter()
+                        .position(|&c| c == 0)
+                        .unwrap_or(e.szExeFile.len());
                     found.push((e.th32ProcessID, String::from_utf16_lossy(&e.szExeFile[..n])));
                 }
                 ok = Process32NextW(snap, &mut e);
@@ -191,5 +195,8 @@ pub fn assert_no_child_processes() {
         std::thread::sleep(std::time::Duration::from_millis(50));
         left = children();
     }
-    assert!(left.is_empty(), "child processes still alive after the launch failed: {left:?}");
+    assert!(
+        left.is_empty(),
+        "child processes still alive after the launch failed: {left:?}"
+    );
 }

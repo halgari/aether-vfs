@@ -5,10 +5,10 @@ use std::collections::{HashMap, HashSet};
 use rayon::prelude::*;
 
 use crate::class::WriteClass;
-use crate::codec::{EncodedBlock, HEADER_LEN, Hash128, hash128};
+use crate::codec::{hash128, EncodedBlock, Hash128, HEADER_LEN};
 use crate::error::{Error, Result};
 use crate::index::{BlockLoc, PackState, Tables};
-use crate::manifest::{MISSING, block_count, block_len};
+use crate::manifest::{block_count, block_len, MISSING};
 use crate::store::BlockStore;
 use crate::{crash, files};
 
@@ -333,8 +333,8 @@ mod tests {
     use crate::error::Error;
     use crate::index::{Index, PackInfo, PackState};
     use crate::pack::pack_path;
+    use crate::store::tests::{put, random_bytes, read_all, test_config, BS};
     use crate::store::BlockStore;
-    use crate::store::tests::{BS, put, random_bytes, read_all, test_config};
 
     #[test]
     fn validation() {

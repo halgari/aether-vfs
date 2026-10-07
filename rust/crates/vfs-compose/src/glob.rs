@@ -7,10 +7,7 @@
 pub fn matches(pattern: &str, path: &str) -> bool {
     let pat = normalize(pattern);
     let pth = normalize(path);
-    match_segments(
-        &split_segs(&pat),
-        &split_segs(&pth),
-    )
+    match_segments(&split_segs(&pat), &split_segs(&pth))
 }
 
 /// Folded with [`vfs_core::fold`], the same fold the shim applies to vpath
@@ -114,7 +111,13 @@ mod tests {
         // The shim folds with `vfs_core::fold`, so a route whose pattern has
         // a non-ASCII-cased component must still match the folded vpath the
         // router receives.
-        assert!(matches("/Data/ÜBER/**", &vfs_core::fold("/Data/ÜBER/a.esp")));
-        assert!(matches("/Data/Мод/*.esp", &vfs_core::fold("/Data/МОД/A.ESP")));
+        assert!(matches(
+            "/Data/ÜBER/**",
+            &vfs_core::fold("/Data/ÜBER/a.esp")
+        ));
+        assert!(matches(
+            "/Data/Мод/*.esp",
+            &vfs_core::fold("/Data/МОД/A.ESP")
+        ));
     }
 }

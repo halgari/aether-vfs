@@ -207,11 +207,11 @@ pub use vfs_provider::{assert_conformance, write_fixture_tree, FIXTURE_FILES};
 // decision (a host hands mounts to `mount_at`/`set_root_mounts` and never
 // builds one). Re-exporting a type nothing can reach is not neutral: it
 // advertises a supported surface.
+pub use vfs_compose::DiskProvider;
 pub use vfs_compose::{
     stack_layers, InlineProvider, LayeredProvider, MemoryProvider, OverlayProvider,
     ReadOnlyProvider, Route, RouterProvider, SeekableProvider, SubdirProvider,
 };
-pub use vfs_compose::DiskProvider;
 #[cfg(feature = "zip")]
 pub use vfs_zip::ZipProvider;
 
@@ -234,13 +234,13 @@ pub use vfs_storage::{
 // The kernel, for the cases a host genuinely needs it: reading back through
 // the same graph the injected process sees, and staging a launch image.
 // ---------------------------------------------------------------------------
+pub use vfs_director::stage;
+pub use vfs_director::Director;
 /// Where a root's shim-local overlay writes actually land on disk — see
 /// [`Session::overlay_layer_dir`], which is the same thing bound to a session.
 /// The free function exists for a host that must write into that directory
 /// *before* a `Session` exists.
 pub use vfs_provider::overlay_layer_dir;
-pub use vfs_director::stage;
-pub use vfs_director::Director;
 
 /// Every write refused because no `ReadWrite` provider served that path, as
 /// `(path, count)`.

@@ -39,11 +39,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use vfs_protocol::encode_reg_key_reply;
 use vfs_provider::{
-    OPEN_CREATE, OPEN_READ, OPEN_TRUNC, OPEN_WRITE, Provider, ST_BAD_REQUEST, ST_EXISTS,
-    ST_IO_ERROR, ST_NOT_FOUND, VPath, map_io_err,
+    map_io_err, Provider, VPath, OPEN_CREATE, OPEN_READ, OPEN_TRUNC, OPEN_WRITE, ST_BAD_REQUEST,
+    ST_EXISTS, ST_IO_ERROR, ST_NOT_FOUND,
 };
 pub use vfs_registry::Lookup;
-use vfs_registry::{Node, Overlay, RegError, path as regpath};
+use vfs_registry::{path as regpath, Node, Overlay, RegError};
 
 /// The registry layer's one file (plan ruling R3).
 pub const OVERLAY_FILE: &str = "overlay.reg";
@@ -585,7 +585,7 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
-    use vfs_provider::{OPEN_READ, Provider, RwMemFixture, ST_NOT_FOUND, VPath};
+    use vfs_provider::{Provider, RwMemFixture, VPath, OPEN_READ, ST_NOT_FOUND};
 
     const K: &str = r"\Registry\Machine\Software\Mod";
 

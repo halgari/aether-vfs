@@ -110,7 +110,10 @@ mod tests {
 
     #[test]
     fn folds_separators_and_trims() {
-        assert_eq!(normalize_vpath("data\\meshes\\a.nif").unwrap(), "data/meshes/a.nif");
+        assert_eq!(
+            normalize_vpath("data\\meshes\\a.nif").unwrap(),
+            "data/meshes/a.nif"
+        );
         assert_eq!(normalize_vpath("/data/").unwrap(), "data");
         assert_eq!(normalize_vpath("data//meshes").unwrap(), "data/meshes");
     }
@@ -131,7 +134,10 @@ mod tests {
     #[test]
     fn dotdot_escaping_root_errors() {
         assert_eq!(normalize_vpath("..").unwrap_err(), PathError::EscapesRoot);
-        assert_eq!(normalize_vpath("data/../..").unwrap_err(), PathError::EscapesRoot);
+        assert_eq!(
+            normalize_vpath("data/../..").unwrap_err(),
+            PathError::EscapesRoot
+        );
     }
 
     #[test]

@@ -16,7 +16,7 @@ use fakedirector::{Fake, ReadStyle};
 use std::ffi::c_void;
 use vfs_shim::install;
 use windows_sys::Win32::Storage::FileSystem::{
-    FILE_ATTRIBUTE_DIRECTORY, GetFileAttributesExW, GetFileAttributesW, GetFileExInfoStandard,
+    GetFileAttributesExW, GetFileAttributesW, GetFileExInfoStandard, FILE_ATTRIBUTE_DIRECTORY,
     INVALID_FILE_ATTRIBUTES, WIN32_FILE_ATTRIBUTE_DATA,
 };
 

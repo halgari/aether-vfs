@@ -1,7 +1,7 @@
 //! Per-handle tracking tables: directory cursors and paths of open handles.
 #![deny(unsafe_op_in_unsafe_fn)]
 
-use super::{DirTracked, path_is_ours};
+use super::{path_is_ours, DirTracked};
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 use windows_sys::Win32::Foundation::{HANDLE, NTSTATUS};

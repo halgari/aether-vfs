@@ -110,7 +110,10 @@ fn a_staged_copy_must_not_shadow_curated_content_at_the_same_path() {
             },
         )
         .expect("stage");
-    assert!(exe.is_file(), "CreateProcess still needs a real on-disk image");
+    assert!(
+        exe.is_file(),
+        "CreateProcess still needs a real on-disk image"
+    );
 
     assert_eq!(
         marker(&s.read_file("game.exe").unwrap()),
@@ -139,7 +142,10 @@ fn a_staged_copy_must_not_shadow_curated_content_at_the_same_path() {
     // knock staging out of the graph, and must not promote it either.
     s.set_root_mounts(
         RootId::DEFAULT,
-        vec![(String::new(), inline(&[("game.exe", &bare_pe(b"CURATED-2"))]))],
+        vec![(
+            String::new(),
+            inline(&[("game.exe", &bare_pe(b"CURATED-2"))]),
+        )],
     )
     .unwrap();
     assert_eq!(
@@ -208,9 +214,8 @@ fn launch_stages_companion_images_at_their_vpath_inside_the_root() {
         .expect_err("a bare_pe is not a runnable image");
     assert!(!err.is_empty());
 
-    let listing = || {
-        std::fs::read_dir(&root).map(|rd| rd.flatten().map(|e| e.path()).collect::<Vec<_>>())
-    };
+    let listing =
+        || std::fs::read_dir(&root).map(|rd| rd.flatten().map(|e| e.path()).collect::<Vec<_>>());
     assert!(
         root.join("loader.exe").is_file(),
         "the launcher itself must be staged into the root: {:?}",
@@ -285,17 +290,32 @@ fn ensure_fixtures() {
 
         // Build for the profile this test runs in: `profile_dir()` is that profile's
         // directory, so a debug build under `cargo test --release` would land elsewhere.
-        let release: &[&str] = if cfg!(debug_assertions) { &[] } else { &["--release"] };
+        let release: &[&str] = if cfg!(debug_assertions) {
+            &[]
+        } else {
+            &["--release"]
+        };
         let status = std::process::Command::new(&cargo)
             .current_dir(&workspace)
             .args([
-                "build", "-p", "vfs-shim-dll", "-p", "vfs-inject", "--bin", "vfs-probe",
-                "-p", "vfs-fixture-read", "--quiet",
+                "build",
+                "-p",
+                "vfs-shim-dll",
+                "-p",
+                "vfs-inject",
+                "--bin",
+                "vfs-probe",
+                "-p",
+                "vfs-fixture-read",
+                "--quiet",
             ])
             .args(release)
             .status()
             .expect("spawn cargo to build shim + vfs-probe + vfs-fixture-read");
-        assert!(status.success(), "shim/vfs-probe/vfs-fixture-read build failed: {status}");
+        assert!(
+            status.success(),
+            "shim/vfs-probe/vfs-fixture-read build failed: {status}"
+        );
 
         let target_dir = workspace.join("target");
         let status = std::process::Command::new(&cargo)
@@ -428,8 +448,7 @@ fn an_image_only_the_provider_graph_holds_launches_from_an_empty_managed_root() 
     assert!(
         std::fs::read_dir(&root).unwrap().next().is_none(),
         "staging must not outlive the session: {:?}",
-        std::fs::read_dir(&root)
-            .map(|rd| rd.flatten().map(|e| e.path()).collect::<Vec<_>>())
+        std::fs::read_dir(&root).map(|rd| rd.flatten().map(|e| e.path()).collect::<Vec<_>>())
     );
 
     let _ = std::fs::remove_dir_all(&root);
@@ -452,8 +471,11 @@ fn an_absolute_image_inside_root_zero_that_only_the_graph_holds_is_staged_and_la
     ensure_fixtures();
 
     let content = tmp("abs-content");
-    std::fs::copy(locate_artifact("vfs-fixture-read.exe"), content.join("vfs-fixture-read.exe"))
-        .expect("copy vfs-fixture-read.exe into the content dir");
+    std::fs::copy(
+        locate_artifact("vfs-fixture-read.exe"),
+        content.join("vfs-fixture-read.exe"),
+    )
+    .expect("copy vfs-fixture-read.exe into the content dir");
     std::fs::write(content.join("hello.txt"), b"hello").unwrap();
     let root = tmp("abs-root");
     let state = tmp("abs-state");
@@ -486,8 +508,14 @@ fn an_absolute_image_inside_root_zero_that_only_the_graph_holds_is_staged_and_la
             ..Default::default()
         })
         .expect("an absolute image inside root 0 that the graph serves must launch");
-    assert_eq!(code, 0, "the child must read root 0's hello.txt (5 bytes) through the ring");
-    assert!(image.is_file(), "the image must have been staged into root 0 at its vpath");
+    assert_eq!(
+        code, 0,
+        "the child must read root 0's hello.txt (5 bytes) through the ring"
+    );
+    assert!(
+        image.is_file(),
+        "the image must have been staged into root 0 at its vpath"
+    );
 
     s.stop_serve();
     drop(s);

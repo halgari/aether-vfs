@@ -291,7 +291,8 @@ mod stored_name_forwarding_tests {
     }
 
     fn ask(p: &dyn Provider, rel: &str) -> Option<String> {
-        p.stored_name(VPath::at_default(rel)).expect("forwarded, not unsupported")
+        p.stored_name(VPath::at_default(rel))
+            .expect("forwarded, not unsupported")
     }
 
     #[test]

@@ -1,13 +1,13 @@
 //! Directory enumeration: `NtQueryDirectoryFile` and `NtQueryDirectoryFileEx`.
 #![deny(unsafe_op_in_unsafe_fn)]
 
-use super::{HANDLES, TRAMP_QDIR, TRAMP_QDIREX, path_of_handle, strip_whiteout_markers};
+use super::{path_of_handle, strip_whiteout_markers, HANDLES, TRAMP_QDIR, TRAMP_QDIREX};
 use crate::ntdef::{
-    SL_RESTART_SCAN, SL_RETURN_SINGLE_ENTRY, STATUS_BUFFER_OVERFLOW, STATUS_NO_MORE_FILES,
-    STATUS_SUCCESS, STATUS_UNSUCCESSFUL, UnicodeString,
+    UnicodeString, SL_RESTART_SCAN, SL_RETURN_SINGLE_ENTRY, STATUS_BUFFER_OVERFLOW,
+    STATUS_NO_MORE_FILES, STATUS_SUCCESS, STATUS_UNSUCCESSFUL,
 };
 use core::ffi::c_void;
-use vfs_ntlayout::{DirInfoClass, DirItem, DirStatus, write_dir_info};
+use vfs_ntlayout::{write_dir_info, DirInfoClass, DirItem, DirStatus};
 use windows_sys::Win32::Foundation::{HANDLE, NTSTATUS};
 
 /// Per-handle enumeration cursor over a built directory listing.

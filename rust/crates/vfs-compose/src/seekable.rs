@@ -274,7 +274,10 @@ mod tests {
         // grew a `read_at` and the wrapper is doing nothing.
         let seq = SeqFixture::new();
         let (h, _, _) = seq.open(VPath::at_default("a.txt"), OPEN_READ).unwrap();
-        assert_eq!(seq.read_at(h, 0, &mut [0u8; 4]).err(), Some(ST_NOT_SUPPORTED));
+        assert_eq!(
+            seq.read_at(h, 0, &mut [0u8; 4]).err(),
+            Some(ST_NOT_SUPPORTED)
+        );
         seq.close(h).unwrap();
     }
 
@@ -382,7 +385,11 @@ mod tests {
             }
             fn getattr(&self, p: VPath) -> Result<Option<Stat>, i32> {
                 Ok(if p.rel == "big.bin" {
-                    Some(Stat { kind: vfs_provider::KIND_FILE, size: self.body.len() as u64, mtime: 0 })
+                    Some(Stat {
+                        kind: vfs_provider::KIND_FILE,
+                        size: self.body.len() as u64,
+                        mtime: 0,
+                    })
                 } else {
                     None
                 })

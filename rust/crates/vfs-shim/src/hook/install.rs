@@ -2,18 +2,18 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 use super::{
-    CreateProcessInternalWFn, SELF_DLL, close_hook, compress_key_hook, cpiw_hook, create_hook,
-    create_key_hook, create_key_tx_hook, create_section_hook, delete_hook, delete_key_hook,
-    delete_value_key_hook, dup_hook, enum_key_hook, enum_value_hook, flush_hook, flush_key_hook,
-    host_name_convention, install_panic_hook, load_key_ex_hook, load_key_hook, load_key2_hook,
-    load_key3_hook, lock_hook, lock_registry_key_hook, map_view_hook, notify_key_hook,
-    notify_multiple_hook, open_hook, open_key_ex_hook, open_key_hook, open_key_tx_ex_hook,
-    open_key_tx_hook, qattr_hook, qdir_hook, qdirex_hook, qfull_hook, qibn_hook, qif_hook,
-    qobj_hook, query_key_hook, query_multiple_hook, query_security_hook, query_value_hook,
-    qvol_hook, read_hook, rename_key_hook, replace_key_hook, restore_key_hook, save_key_ex_hook,
-    save_key_hook, save_merged_hook, set_info_key_hook, set_info_object_hook, set_security_hook,
-    set_value_key_hook, setinfo_hook, unload_key_ex_hook, unload_key_hook, unload_key2_hook,
-    unlock_hook, unmap_view_hook, write_hook,
+    close_hook, compress_key_hook, cpiw_hook, create_hook, create_key_hook, create_key_tx_hook,
+    create_section_hook, delete_hook, delete_key_hook, delete_value_key_hook, dup_hook,
+    enum_key_hook, enum_value_hook, flush_hook, flush_key_hook, host_name_convention,
+    install_panic_hook, load_key2_hook, load_key3_hook, load_key_ex_hook, load_key_hook, lock_hook,
+    lock_registry_key_hook, map_view_hook, notify_key_hook, notify_multiple_hook, open_hook,
+    open_key_ex_hook, open_key_hook, open_key_tx_ex_hook, open_key_tx_hook, qattr_hook, qdir_hook,
+    qdirex_hook, qfull_hook, qibn_hook, qif_hook, qobj_hook, query_key_hook, query_multiple_hook,
+    query_security_hook, query_value_hook, qvol_hook, read_hook, rename_key_hook, replace_key_hook,
+    restore_key_hook, save_key_ex_hook, save_key_hook, save_merged_hook, set_info_key_hook,
+    set_info_object_hook, set_security_hook, set_value_key_hook, setinfo_hook, unload_key2_hook,
+    unload_key_ex_hook, unload_key_hook, unlock_hook, unmap_view_hook, write_hook,
+    CreateProcessInternalWFn, SELF_DLL,
 };
 use crate::child::self_dll_path;
 use crate::ntdef::{
@@ -34,8 +34,8 @@ use crate::ntdef::{
 use crate::tramp::{RawTramp, Tramp};
 use retour::RawDetour;
 use std::collections::BTreeSet;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 use windows_sys::Win32::Foundation::HMODULE;
 use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
 

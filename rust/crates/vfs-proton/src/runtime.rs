@@ -65,7 +65,10 @@ pub fn verify_ge(dir: &Path) -> Result<String, VerifyError> {
         Err(e) => return Err(VerifyError::Unreadable(e)),
     };
     let trimmed = contents.trim();
-    let tag = match trimmed.split_whitespace().find(|tok| tok.starts_with("GE-Proton")) {
+    let tag = match trimmed
+        .split_whitespace()
+        .find(|tok| tok.starts_with("GE-Proton"))
+    {
         Some(tag) => tag.to_string(),
         None => return Err(VerifyError::NotGe(trimmed.to_string())),
     };
@@ -83,8 +86,11 @@ fn check_ffmpeg(dir: &Path) -> Result<(), VerifyError> {
     }
     let has = std::fs::read_dir(files.join("lib/x86_64-linux-gnu"))
         .map(|rd| {
-            rd.flatten()
-                .any(|e| e.file_name().to_string_lossy().starts_with("libavformat.so."))
+            rd.flatten().any(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("libavformat.so.")
+            })
         })
         .unwrap_or(false);
     if has {
@@ -122,7 +128,10 @@ pub fn runtime_lib_env(
     }
     let mut out = Vec::new();
     if inherited_orig_ld.is_none() {
-        out.push(("ORIG_LD_LIBRARY_PATH".to_string(), ld_in.unwrap_or_default()));
+        out.push((
+            "ORIG_LD_LIBRARY_PATH".to_string(),
+            ld_in.unwrap_or_default(),
+        ));
     }
     out.push(("LD_LIBRARY_PATH".to_string(), ld));
     out.push(("WINEDLLPATH".to_string(), dll));
@@ -218,8 +227,7 @@ mod tests {
     use super::*;
 
     fn tmpdir(tag: &str) -> std::path::PathBuf {
-        let d = crate::test_tmp::dir()
-            .join(format!("vfs-proton-rt-{}-{tag}", std::process::id()));
+        let d = crate::test_tmp::dir().join(format!("vfs-proton-rt-{}-{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
@@ -303,23 +311,32 @@ mod tests {
             "/rt/files/lib/x86_64-linux-gnu:/rt/files/lib/i386-linux-gnu:/host/lib"
         );
         assert_eq!(m["ORIG_LD_LIBRARY_PATH"], "/host/lib");
-        assert_eq!(m["WINEDLLPATH"], "/rt/files/lib/vkd3d:/rt/files/lib/wine:/host/dll");
+        assert_eq!(
+            m["WINEDLLPATH"],
+            "/rt/files/lib/vkd3d:/rt/files/lib/wine:/host/dll"
+        );
     }
 
     #[test]
     fn runtime_lib_env_without_host_values_and_with_orig_present() {
         let m: std::collections::HashMap<_, _> =
-            runtime_lib_env(Path::new("/rt"), None, None, None).into_iter().collect();
+            runtime_lib_env(Path::new("/rt"), None, None, None)
+                .into_iter()
+                .collect();
         assert_eq!(
             m["LD_LIBRARY_PATH"],
             "/rt/files/lib/x86_64-linux-gnu:/rt/files/lib/i386-linux-gnu"
         );
         assert_eq!(m["ORIG_LD_LIBRARY_PATH"], "");
         assert_eq!(m["WINEDLLPATH"], "/rt/files/lib/vkd3d:/rt/files/lib/wine");
-        let m: std::collections::HashMap<_, _> =
-            runtime_lib_env(Path::new("/rt"), Some(OsStr::new("/x")), Some(OsStr::new("/o")), None)
-                .into_iter()
-                .collect();
+        let m: std::collections::HashMap<_, _> = runtime_lib_env(
+            Path::new("/rt"),
+            Some(OsStr::new("/x")),
+            Some(OsStr::new("/o")),
+            None,
+        )
+        .into_iter()
+        .collect();
         assert!(!m.contains_key("ORIG_LD_LIBRARY_PATH"));
     }
 
@@ -328,7 +345,10 @@ mod tests {
         // "GE-Proton11-6" < "GE-Proton9-1" as strings, which would make 9 newer
         // than 11 and pick the wrong default runtime.
         assert_eq!(cmp_tags("GE-Proton11-6", "GE-Proton9-1"), Ordering::Greater);
-        assert_eq!(cmp_tags("GE-Proton11-10", "GE-Proton11-9"), Ordering::Greater);
+        assert_eq!(
+            cmp_tags("GE-Proton11-10", "GE-Proton11-9"),
+            Ordering::Greater
+        );
         assert_eq!(cmp_tags("GE-Proton11-6", "GE-Proton11-6"), Ordering::Equal);
     }
 
@@ -340,8 +360,8 @@ mod tests {
         for (tag, body) in [
             ("GE-Proton11-6", "1 GE-Proton11-6\n"),
             ("GE-Proton9-1", "1 GE-Proton9-1\n"),
-            ("junk-dir", "1 proton-9.0-4\n"),   // not GE -> excluded
-            ("half-extracted", ""),              // no version file -> excluded
+            ("junk-dir", "1 proton-9.0-4\n"), // not GE -> excluded
+            ("half-extracted", ""),           // no version file -> excluded
         ] {
             let d = root.runtime_dir(tag);
             std::fs::create_dir_all(&d).unwrap();

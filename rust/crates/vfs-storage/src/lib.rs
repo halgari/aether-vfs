@@ -31,9 +31,9 @@ pub use config::{Durability, ScratchDir, StorageConfig};
 pub use evict::ClearReport;
 pub use manage::{LayerInfo, SpaceUsage, StorageStats};
 pub use reconcile::ReconcileReport;
+pub use storage::{CloseOutcome, Storage, StorageError};
 #[cfg(all(feature = "test-hooks", not(windows)))]
 pub use test_util::snapshot_as_killed;
-pub use storage::{CloseOutcome, Storage, StorageError};
 // The block store's compression and accounting types, so a host configures
 // and reads them without depending on `vfs-block-store` itself.
 pub use vfs_block_store::{

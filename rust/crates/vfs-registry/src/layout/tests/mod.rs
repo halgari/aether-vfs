@@ -1,5 +1,5 @@
 use super::*;
-use crate::merge::{KeyView, merge};
+use crate::merge::{merge, KeyView};
 use crate::overlay::{Overlay, Value};
 
 mod key;

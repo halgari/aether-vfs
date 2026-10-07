@@ -50,8 +50,8 @@ fn every_registry_call_is_the_real_one() {
     // A volatile scratch key under HKCU, through Win32 (so through `NtCreateKey`): created
     // for real, then deleted for real.
     use windows_sys::Win32::System::Registry::{
-        HKEY, HKEY_CURRENT_USER, KEY_ALL_ACCESS, REG_CREATED_NEW_KEY, REG_OPTION_VOLATILE,
-        RegCloseKey, RegCreateKeyExW, RegDeleteKeyW,
+        RegCloseKey, RegCreateKeyExW, RegDeleteKeyW, HKEY, HKEY_CURRENT_USER, KEY_ALL_ACCESS,
+        REG_CREATED_NEW_KEY, REG_OPTION_VOLATILE,
     };
     let sub: Vec<u16> = r"Software\AetherVfsRegKeysOffTest"
         .encode_utf16()

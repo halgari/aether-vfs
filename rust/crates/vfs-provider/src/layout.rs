@@ -73,7 +73,10 @@ mod marker_tests {
     fn names_round_trip_through_the_prefixes() {
         assert_eq!(whiteout_name("a.txt"), ".wh.a.txt");
         assert_eq!(copy_up_name(7, "a.txt"), ".cu.7.a.txt");
-        assert_eq!(whiteout_name("a.txt").strip_prefix(WHITEOUT_PREFIX), Some("a.txt"));
+        assert_eq!(
+            whiteout_name("a.txt").strip_prefix(WHITEOUT_PREFIX),
+            Some("a.txt")
+        );
         assert!(is_overlay_marker(&whiteout_name("x")));
         assert!(is_overlay_marker(&copy_up_name(1, "x")));
         assert!(!is_overlay_marker("wh.x"));
@@ -92,7 +95,10 @@ mod overlay_layer_dir_tests {
     #[test]
     fn layer_dir_is_root_n_under_the_overlay_root() {
         let base = std::path::Path::new("/srv/ov");
-        assert_eq!(overlay_layer_dir(base, RootId::DEFAULT), base.join("root-0"));
+        assert_eq!(
+            overlay_layer_dir(base, RootId::DEFAULT),
+            base.join("root-0")
+        );
         assert_eq!(overlay_layer_dir(base, RootId(1)), base.join("root-1"));
         assert_eq!(overlay_layer_dir(base, RootId(42)), base.join("root-42"));
     }
@@ -102,6 +108,9 @@ mod overlay_layer_dir_tests {
     #[test]
     fn distinct_roots_get_distinct_directories() {
         let base = std::path::Path::new("/srv/ov");
-        assert_ne!(overlay_layer_dir(base, RootId(0)), overlay_layer_dir(base, RootId(1)));
+        assert_ne!(
+            overlay_layer_dir(base, RootId(0)),
+            overlay_layer_dir(base, RootId(1))
+        );
     }
 }

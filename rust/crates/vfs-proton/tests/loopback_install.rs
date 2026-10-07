@@ -34,12 +34,12 @@
 use std::io::{BufRead as _, BufReader, Write as _};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use sha2::{Digest as _, Sha512};
 use vfs_proton::install::InstallError;
-use vfs_proton::{Release, Root, install_release};
+use vfs_proton::{install_release, Release, Root};
 
 // ─── the loopback server ─────────────────────────────────────────────────────
 

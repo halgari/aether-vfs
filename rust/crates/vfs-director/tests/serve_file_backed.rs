@@ -9,13 +9,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
-use vfs_director::ipc::{clamp_workers, DEFAULT_IO_WORKERS};
 use vfs_compose::DiskProvider;
+use vfs_director::ipc::{clamp_workers, DEFAULT_IO_WORKERS};
 use vfs_director::{DirEntry, Director, Handle, IpcServe, Provider, RootId, Stat};
 use vfs_ipc::{RingClient, SpinNotifier};
 use vfs_protocol::{
     decode_getattr_resp, decode_open_resp, decode_read_resp, encode_open_req, encode_path_req,
-    encode_read_req, ReadReq, OP_GETATTR, OP_OPEN, OP_READ, OPEN_READ, ST_OK,
+    encode_read_req, ReadReq, OPEN_READ, OP_GETATTR, OP_OPEN, OP_READ, ST_OK,
 };
 use vfs_provider::{Capabilities, VPath};
 use vfs_unix::FileMapping;
@@ -63,7 +63,8 @@ fn a_file_backed_serve_answers_a_getattr_and_a_read() {
         FileMapping::open(&ring, serve.map_bytes).expect("a second mapping of the ring file");
     let client = RingClient::new(mapping.seg(), SpinNotifier).expect("client must attach");
     assert_eq!(
-        client.geom().payload_cap, 4096,
+        client.geom().payload_cap,
+        4096,
         "the client reads geometry out of the header the server wrote"
     );
 
@@ -230,7 +231,9 @@ fn requests_blocked_in_a_provider_do_not_stall_the_ring_when_workers_outnumber_t
                 let mapping = FileMapping::open(&ring, map_bytes).unwrap();
                 let client = RingClient::new(mapping.seg(), SpinNotifier).unwrap();
                 let path = format!("block/{i}");
-                let o = client.submit(OP_OPEN, 0, &encode_open_req(0, OPEN_READ, &path)).unwrap();
+                let o = client
+                    .submit(OP_OPEN, 0, &encode_open_req(0, OPEN_READ, &path))
+                    .unwrap();
                 o.status
             })
         })
@@ -244,7 +247,9 @@ fn requests_blocked_in_a_provider_do_not_stall_the_ring_when_workers_outnumber_t
     std::thread::spawn(move || {
         let mapping = FileMapping::open(&ring2, map_bytes).unwrap();
         let client = RingClient::new(mapping.seg(), SpinNotifier).unwrap();
-        let g = client.submit(OP_GETATTR, 0, &encode_path_req(0, VPATH)).unwrap();
+        let g = client
+            .submit(OP_GETATTR, 0, &encode_path_req(0, VPATH))
+            .unwrap();
         let _ = tx.send(g.status);
     });
     let answered = rx.recv_timeout(Duration::from_secs(10));

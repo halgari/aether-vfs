@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 
 use vfs_core::fold;
 use vfs_provider::{
-    Access, Capabilities, CaseMatch, DirEntry, Handle, HandleTable, Provider, Stat, VPath, KIND_DIR,
-    KIND_FILE, OPEN_WRITE,
+    Access, Capabilities, CaseMatch, DirEntry, Handle, HandleTable, Provider, Stat, VPath,
+    KIND_DIR, KIND_FILE, OPEN_WRITE,
 };
 use vfs_provider::{ST_BAD_FH, ST_BAD_REQUEST, ST_IO_ERROR, ST_NOT_A_DIRECTORY, ST_NOT_FOUND};
 
@@ -168,9 +168,10 @@ impl Provider for ZipProvider {
         if rel.is_empty() {
             return Ok(None);
         }
-        Ok(self.by_fold.get(&fold(rel)).map(|canon| {
-            vfs_core::split_parent(canon).1.to_string()
-        }))
+        Ok(self
+            .by_fold
+            .get(&fold(rel))
+            .map(|canon| vfs_core::split_parent(canon).1.to_string()))
     }
 
     fn readdir(&self, p: VPath) -> Result<Vec<DirEntry>, i32> {
@@ -341,7 +342,12 @@ mod tests {
             buf.extend_from_slice(name_bytes);
             buf.extend_from_slice(content);
 
-            records.push(CdRecord { name: name.to_string(), crc, size: content.len() as u32, offset });
+            records.push(CdRecord {
+                name: name.to_string(),
+                crc,
+                size: content.len() as u32,
+                offset,
+            });
         }
 
         let cd_start = buf.len() as u32;
@@ -377,7 +383,10 @@ mod tests {
         buf.extend_from_slice(&cd_start.to_le_bytes());
         buf.extend_from_slice(&0u16.to_le_bytes()); // comment len
 
-        std::fs::File::create(path).unwrap().write_all(&buf).unwrap();
+        std::fs::File::create(path)
+            .unwrap()
+            .write_all(&buf)
+            .unwrap();
     }
 
     /// Write the `vfs-provider` conformance reference tree as a Stored zip:
@@ -399,7 +408,8 @@ mod tests {
         assert_eq!(caps.access, Access::Read);
         assert!(caps.immutable, "a zip container never changes under us");
         assert!(!caps.slow);
-        caps.validate().expect("declaration must be self-consistent");
+        caps.validate()
+            .expect("declaration must be self-consistent");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -424,7 +434,10 @@ mod tests {
         let dir = vfs_testkit::scratch_path("vfs-zipname");
         let _ = std::fs::create_dir_all(&dir);
         let zip = dir.join("t.zip");
-        write_zip(&zip, &[("Meshes/Armor/Iron.NIF", b"x"), ("Data/Skyrim.ESM", b"y")]);
+        write_zip(
+            &zip,
+            &[("Meshes/Armor/Iron.NIF", b"x"), ("Data/Skyrim.ESM", b"y")],
+        );
         let p = ZipProvider::open(&zip).expect("open zip");
         let name = |q: &str| p.stored_name(VPath::at_default(q)).unwrap();
 

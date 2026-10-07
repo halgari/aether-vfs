@@ -160,8 +160,15 @@ fn session(tag: &str, home: &Path) -> (Session, PathBuf, String) {
         std::fs::write(art.join(f), b"MZ").unwrap();
     }
     s.serve().unwrap();
-    let shim = art.join(vfs_proton::artifacts::SHIM_DLL).to_string_lossy().into_owned();
-    let pfx = home.join("sessions").join("fake").join("compat").join("pfx");
+    let shim = art
+        .join(vfs_proton::artifacts::SHIM_DLL)
+        .to_string_lossy()
+        .into_owned();
+    let pfx = home
+        .join("sessions")
+        .join("fake")
+        .join("compat")
+        .join("pfx");
     (s, pfx, shim)
 }
 
@@ -171,8 +178,11 @@ fn opts(shim: &str, mode: &str, wait: bool) -> LaunchOpts {
         wait,
         shim_dll: Some(shim.into()),
         payload_dll: Some(
-            shim.replace(vfs_proton::artifacts::SHIM_DLL, vfs_proton::artifacts::PAYLOAD_DLL)
-                .into(),
+            shim.replace(
+                vfs_proton::artifacts::SHIM_DLL,
+                vfs_proton::artifacts::PAYLOAD_DLL,
+            )
+            .into(),
         ),
         env: BTreeMap::from([("FAKE_WINE_MODE".to_string(), mode.to_string())]),
         ..Default::default()
@@ -194,8 +204,16 @@ fn a_launch_sets_up_and_uses_a_proton_prefix() {
     let home = fake_home("pfx");
     let (s, pfx, shim) = session("pfx", &home);
     assert_eq!(s.launch(&opts(&shim, "ok", true)).unwrap(), 0);
-    assert!(pfx.join("drive_c").join("windows").join("system32").is_dir());
-    assert_eq!(Path::new(&child_env(&pfx)["WINEPREFIX"]), pfx, "wine ran in compat/pfx");
+    assert!(pfx
+        .join("drive_c")
+        .join("windows")
+        .join("system32")
+        .is_dir());
+    assert_eq!(
+        Path::new(&child_env(&pfx)["WINEPREFIX"]),
+        pfx,
+        "wine ran in compat/pfx"
+    );
     assert!(
         pfx.join("drive_c").join("Games").join("Fake").is_symlink(),
         "root 0 is linked into the Proton prefix"
@@ -204,12 +222,16 @@ fn a_launch_sets_up_and_uses_a_proton_prefix() {
 
 #[test]
 fn the_launch_environment_is_the_childs_alone() {
-    assert!(std::env::var_os("SteamAppId").is_none(), "run without SteamAppId in the test env");
+    assert!(
+        std::env::var_os("SteamAppId").is_none(),
+        "run without SteamAppId in the test env"
+    );
     let home = fake_home("env");
     let (s, pfx, shim) = session("env", &home);
     let mut o = opts(&shim, "ok", true);
     o.env.insert("SteamAppId".into(), "489830".into());
-    o.env.insert("WINEDLLOVERRIDES".into(), "d3dx9_42=n,b".into());
+    o.env
+        .insert("WINEDLLOVERRIDES".into(), "d3dx9_42=n,b".into());
     o.ready_timeout = Some(Duration::from_secs(240));
     assert_eq!(s.launch(&o).unwrap(), 0);
 
@@ -217,9 +239,15 @@ fn the_launch_environment_is_the_childs_alone() {
     assert_eq!(env["SteamAppId"], "489830");
     assert_eq!(env["WINEDLLOVERRIDES"], "mscoree=d;mshtml=d;d3dx9_42=n,b");
     assert_eq!(env["WINEDEBUG"], "-all");
-    assert_eq!(env["VFS_INJECT_CWD"], ROOT0, "the image's directory is the default cwd");
+    assert_eq!(
+        env["VFS_INJECT_CWD"], ROOT0,
+        "the image's directory is the default cwd"
+    );
     assert_eq!(env["VFS_READY_TIMEOUT_SECS"], "240");
-    assert!(std::env::var_os("SteamAppId").is_none(), "this process's environment is untouched");
+    assert!(
+        std::env::var_os("SteamAppId").is_none(),
+        "this process's environment is untouched"
+    );
     let args = std::fs::read_to_string(pfx.join("fake-wine.args")).unwrap();
     assert!(args.contains(r"C:\Games\Fake\game.exe"), "{args}");
 }
@@ -268,7 +296,8 @@ fn a_reserved_name_in_the_launch_env_is_refused() {
     let home = fake_home("reserved");
     let (s, _pfx, shim) = session("reserved", &home);
     let mut o = opts(&shim, "ok", true);
-    o.env.insert("VFS_VIRTUAL_DIR".into(), r"C:\elsewhere".into());
+    o.env
+        .insert("VFS_VIRTUAL_DIR".into(), r"C:\elsewhere".into());
     let e = s.launch(&o).unwrap_err();
     assert!(e.contains("VFS_VIRTUAL_DIR"), "{e}");
 }
@@ -280,7 +309,10 @@ fn a_relative_cwd_is_under_root_zero() {
     let mut o = opts(&shim, "ok", true);
     o.cwd = Some("Data/SKSE".into());
     s.launch(&o).unwrap();
-    assert_eq!(child_env(&pfx)["VFS_INJECT_CWD"], r"C:\Games\Fake\Data\SKSE");
+    assert_eq!(
+        child_env(&pfx)["VFS_INJECT_CWD"],
+        r"C:\Games\Fake\Data\SKSE"
+    );
 }
 
 #[test]
@@ -288,7 +320,10 @@ fn the_injectors_reason_reaches_the_caller() {
     let home = fake_home("fail");
     let (s, _pfx, shim) = session("fail", &home);
     let e = s.launch(&opts(&shim, "fail", true)).unwrap_err();
-    assert!(e.contains("0xc0000135") && e.contains("STATUS_DLL_NOT_FOUND"), "{e}");
+    assert!(
+        e.contains("0xc0000135") && e.contains("STATUS_DLL_NOT_FOUND"),
+        "{e}"
+    );
 }
 
 /// A running "Steam client": a process named `steam`, and the state
@@ -408,10 +443,19 @@ fn with_a_running_steam_client_the_launch_asks_for_the_helper_and_sets_steams_en
     let args = std::fs::read_to_string(pfx.join("fake-wine.args")).unwrap();
     let args: Vec<&str> = args.split_whitespace().collect();
     assert_eq!(args.len(), 6, "{args:?}");
-    assert!(args[0].ends_with(vfs_proton::artifacts::INJECTOR), "{args:?}");
+    assert!(
+        args[0].ends_with(vfs_proton::artifacts::INJECTOR),
+        "{args:?}"
+    );
     assert_eq!(args[1], r"C:\Games\Fake\game.exe");
-    assert!(args[2].ends_with(vfs_proton::artifacts::SHIM_DLL), "{args:?}");
-    assert!(args[3].ends_with(vfs_proton::artifacts::PAYLOAD_DLL), "{args:?}");
+    assert!(
+        args[2].ends_with(vfs_proton::artifacts::SHIM_DLL),
+        "{args:?}"
+    );
+    assert!(
+        args[3].ends_with(vfs_proton::artifacts::PAYLOAD_DLL),
+        "{args:?}"
+    );
     assert!(args[4].ends_with("shim.cfg"), "{args:?}");
     assert!(args[5].ends_with("ready.flag"), "{args:?}");
 
@@ -568,7 +612,10 @@ fn a_detached_launch_is_held_by_the_session_and_stopped_by_stop_launch() {
     let t = Instant::now();
     assert!(s.stop_launch().unwrap());
     assert!(t.elapsed() < Duration::from_secs(10), "{:?}", t.elapsed());
-    assert!(wineserver_was_killed(&pfx), "the stop must reach this prefix's own wineserver");
+    assert!(
+        wineserver_was_killed(&pfx),
+        "the stop must reach this prefix's own wineserver"
+    );
     assert!(!s.stop_launch().unwrap(), "already stopped");
     // The prefix lock went with it: another launch can start.
     assert_eq!(s.launch(&opts(&shim, "ok", true)).unwrap(), 0);
@@ -600,8 +647,15 @@ fn a_second_launch_while_one_is_running_is_refused_before_staging_can_clobber_it
         std::fs::write(art.join(f), b"MZ").unwrap();
     }
     s.serve().unwrap();
-    let shim = art.join(vfs_proton::artifacts::SHIM_DLL).to_string_lossy().into_owned();
-    let pfx = home.join("sessions").join("fake").join("compat").join("pfx");
+    let shim = art
+        .join(vfs_proton::artifacts::SHIM_DLL)
+        .to_string_lossy()
+        .into_owned();
+    let pfx = home
+        .join("sessions")
+        .join("fake")
+        .join("compat")
+        .join("pfx");
 
     assert_eq!(s.launch(&opts(&shim, "sleep", false)).unwrap(), 0);
     wait_for(&pfx.join("fake-wine.pid"));
@@ -615,8 +669,14 @@ fn a_second_launch_while_one_is_running_is_refused_before_staging_can_clobber_it
 
     let e = s.launch(&opts(&shim, "ok", true)).unwrap_err();
     assert!(e.contains("already running"), "{e}");
-    assert!(Path::new(&format!("/proc/{pid}")).exists(), "the first launch is still running");
-    assert!(staged.is_file(), "the refused second launch must not delete the running one's staging");
+    assert!(
+        Path::new(&format!("/proc/{pid}")).exists(),
+        "the first launch is still running"
+    );
+    assert!(
+        staged.is_file(),
+        "the refused second launch must not delete the running one's staging"
+    );
 
     assert!(s.stop_launch().unwrap());
 }
@@ -633,7 +693,10 @@ fn a_waiting_launch_is_stopped_from_another_thread() {
     wait_for(&pfx.join("fake-wine.pid"));
     assert!(s.stop_launch().unwrap());
     assert_eq!(launcher.join().unwrap().unwrap(), STOPPED_EXIT_CODE);
-    assert!(wineserver_was_killed(&pfx), "the stop must reach this prefix's own wineserver");
+    assert!(
+        wineserver_was_killed(&pfx),
+        "the stop must reach this prefix's own wineserver"
+    );
 }
 
 #[test]
@@ -649,7 +712,10 @@ fn a_launch_handle_reports_its_end_and_stops_when_dropped() {
     assert_eq!(h.try_wait().unwrap(), None);
     let pid = h.pid();
     drop(h);
-    assert!(!Path::new(&format!("/proc/{pid}")).exists(), "dropping a running handle stops it");
+    assert!(
+        !Path::new(&format!("/proc/{pid}")).exists(),
+        "dropping a running handle stops it"
+    );
 
     // Remove the stale pid file and wait for the *new* launch's own pid
     // before stopping it — otherwise `stop` could observe the old (already
@@ -679,7 +745,11 @@ fn a_stale_stopper_cannot_reach_a_later_launch_in_the_same_prefix() {
     wait_for(&pfx.join("fake-wine.pid"));
 
     stale.stop().unwrap();
-    assert_eq!(h2.try_wait().unwrap(), None, "the second launch keeps running");
+    assert_eq!(
+        h2.try_wait().unwrap(),
+        None,
+        "the second launch keeps running"
+    );
 
     assert_eq!(h2.stop().unwrap(), LaunchExit::Stopped);
 }
@@ -698,7 +768,11 @@ fn launcher_exited(pfx: &Path) -> u32 {
     wait_for(&pfx.join("fake-wine.exited"));
     // `fake-wine.exited` is written just before the launcher's `exit`.
     std::thread::sleep(Duration::from_millis(200));
-    std::fs::read_to_string(pfx.join("fake-game.pid")).unwrap().trim().parse().unwrap()
+    std::fs::read_to_string(pfx.join("fake-game.pid"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap()
 }
 
 fn alive(pid: u32) -> bool {
@@ -724,7 +798,11 @@ fn a_launch_runs_until_its_prefix_is_quiet_not_until_its_launcher_exits() {
     let game = launcher_exited(&pfx);
     assert!(alive(game));
     for _ in 0..5 {
-        assert_eq!(h.try_wait().unwrap(), None, "the game still runs in the prefix");
+        assert_eq!(
+            h.try_wait().unwrap(),
+            None,
+            "the game still runs in the prefix"
+        );
         std::thread::sleep(Duration::from_millis(50));
     }
     assert!(h.is_running());
@@ -744,7 +822,11 @@ fn a_launch_runs_until_its_prefix_is_quiet_not_until_its_launcher_exits() {
     assert!(!alive(game));
     assert!(!wineserver_was_killed(&pfx), "a natural end stops nothing");
     drop(h);
-    assert_eq!(s.launch(&opts(&shim, "ok", true)).unwrap(), 0, "the prefix is free again");
+    assert_eq!(
+        s.launch(&opts(&shim, "ok", true)).unwrap(),
+        0,
+        "the prefix is free again"
+    );
 }
 
 #[test]
@@ -758,7 +840,10 @@ fn a_waited_launch_returns_when_the_game_ends_not_the_launcher() {
     };
     let game = launcher_exited(&pfx);
     std::thread::sleep(Duration::from_millis(200));
-    assert!(!launcher.is_finished(), "launch returned while the game still ran");
+    assert!(
+        !launcher.is_finished(),
+        "launch returned while the game still ran"
+    );
     std::fs::remove_file(pfx.join("fake-game.run")).unwrap();
     assert_eq!(launcher.join().unwrap().unwrap(), 5);
     assert!(!alive(game));
@@ -771,8 +856,14 @@ fn stop_launch_stops_the_game_after_its_launcher_exited() {
     assert_eq!(s.launch(&opts(&shim, "game", false)).unwrap(), 0);
     let game = launcher_exited(&pfx);
     std::thread::sleep(Duration::from_millis(100));
-    assert!(s.stop_launch().unwrap(), "the launch is running while the game is");
-    assert!(wineserver_was_killed(&pfx), "the stop must reach this prefix's own wineserver");
+    assert!(
+        s.stop_launch().unwrap(),
+        "the launch is running while the game is"
+    );
+    assert!(
+        wineserver_was_killed(&pfx),
+        "the stop must reach this prefix's own wineserver"
+    );
     wait_gone(game);
     assert!(!s.stop_launch().unwrap(), "already stopped");
     assert_eq!(s.launch(&opts(&shim, "ok", true)).unwrap(), 0);
@@ -785,7 +876,10 @@ fn a_kept_handle_is_stopped_by_stop_launch_after_its_launcher_exited() {
     let mut h = s.launch_detached(&opts(&shim, "game", true)).unwrap();
     let game = launcher_exited(&pfx);
     assert_eq!(h.try_wait().unwrap(), None);
-    assert!(s.stop_launch().unwrap(), "the session sees the handle its caller kept");
+    assert!(
+        s.stop_launch().unwrap(),
+        "the session sees the handle its caller kept"
+    );
     assert_eq!(h.wait().unwrap(), LaunchExit::Stopped);
     assert!(wineserver_was_killed(&pfx));
     assert!(!alive(game));
@@ -818,7 +912,10 @@ fn a_kept_detached_handle_blocks_a_second_launch_and_is_stopped_by_stop_launch()
     s.set_overlay(tmp("kept-overlay"));
     s.declare_root(0, ROOT0);
     s.set_prefix_name("fake").unwrap();
-    s.set_prefix_init(PrefixInit::Proton { steam_client: tmp("kept-steam"), app_id: None });
+    s.set_prefix_init(PrefixInit::Proton {
+        steam_client: tmp("kept-steam"),
+        app_id: None,
+    });
     let content = tmp("kept-content");
     std::fs::write(content.join("game.exe"), bare_pe()).unwrap();
     s.mount("", Arc::new(DiskProvider::new(&content))).unwrap();
@@ -827,8 +924,15 @@ fn a_kept_detached_handle_blocks_a_second_launch_and_is_stopped_by_stop_launch()
         std::fs::write(art.join(f), b"MZ").unwrap();
     }
     s.serve().unwrap();
-    let shim = art.join(vfs_proton::artifacts::SHIM_DLL).to_string_lossy().into_owned();
-    let pfx = home.join("sessions").join("fake").join("compat").join("pfx");
+    let shim = art
+        .join(vfs_proton::artifacts::SHIM_DLL)
+        .to_string_lossy()
+        .into_owned();
+    let pfx = home
+        .join("sessions")
+        .join("fake")
+        .join("compat")
+        .join("pfx");
 
     let mut h = s.launch_detached(&opts(&shim, "sleep", true)).unwrap();
     wait_for(&pfx.join("fake-wine.pid"));
@@ -839,9 +943,15 @@ fn a_kept_detached_handle_blocks_a_second_launch_and_is_stopped_by_stop_launch()
         let e = s.launch(&o).unwrap_err();
         assert!(e.contains("already running"), "{e}");
     }
-    let e = s.launch_detached(&opts(&shim, "ok", true)).err().expect("refused");
+    let e = s
+        .launch_detached(&opts(&shim, "ok", true))
+        .err()
+        .expect("refused");
     assert!(e.contains("already running"), "{e}");
-    assert!(staged.is_file(), "the refused launches must not delete the running one's staging");
+    assert!(
+        staged.is_file(),
+        "the refused launches must not delete the running one's staging"
+    );
     assert_eq!(h.try_wait().unwrap(), None);
 
     assert!(s.stop_launch().unwrap());
@@ -856,7 +966,9 @@ fn a_kept_detached_handle_blocks_a_second_launch_and_is_stopped_by_stop_launch()
 fn a_prefix_in_use_elsewhere_is_not_set_up_under_it() {
     let home = fake_home("inuse");
     let (s, pfx, shim) = session("inuse", &home);
-    let held = vfs_proton::prefix::Prefix { dir: pfx.clone() }.lock().unwrap();
+    let held = vfs_proton::prefix::Prefix { dir: pfx.clone() }
+        .lock()
+        .unwrap();
     let e = s.launch(&opts(&shim, "ok", true)).unwrap_err();
     assert!(e.contains("in use"), "{e}");
     assert!(
@@ -878,9 +990,17 @@ fn prepare_prefix_sets_the_prefix_up_as_a_launch_would_without_serving() {
         steam_client: tmp("prepare-steam"),
         app_id: Some(489830),
     });
-    let pfx = home.join("sessions").join("fake").join("compat").join("pfx");
+    let pfx = home
+        .join("sessions")
+        .join("fake")
+        .join("compat")
+        .join("pfx");
     assert_eq!(s.prepare_prefix().unwrap(), pfx);
-    assert!(pfx.join("drive_c").join("windows").join("system32").is_dir());
+    assert!(pfx
+        .join("drive_c")
+        .join("windows")
+        .join("system32")
+        .is_dir());
     // A prefix the runtime already set up is left as it is, and the lock is
     // not held after the call.
     assert_eq!(s.prepare_prefix().unwrap(), pfx);

@@ -776,7 +776,10 @@ mod tests {
         assert_eq!(decode_path_req(&b), Some((1, "same.txt".to_string())));
 
         let o = encode_open_req(7, OPEN_READ, "same.txt");
-        assert_eq!(decode_open_req(&o), Some((7, OPEN_READ, "same.txt".to_string())));
+        assert_eq!(
+            decode_open_req(&o),
+            Some((7, OPEN_READ, "same.txt".to_string()))
+        );
 
         let m = encode_mkdir_req(2, 493, "sub/dir");
         assert_eq!(decode_mkdir_req(&m), Some((2, 493, "sub/dir".to_string())));
@@ -849,7 +852,10 @@ mod tests {
             Some(&data[..])
         );
         let mut out = [0u8; 8];
-        assert_eq!(decode_read_resp_into(&encode_read_resp(data), &mut out), Some(4));
+        assert_eq!(
+            decode_read_resp_into(&encode_read_resp(data), &mut out),
+            Some(4)
+        );
         assert_eq!(&out[..4], b"abcd");
     }
 
@@ -986,7 +992,11 @@ mod tests {
         let mut s = encode_setattr_req(&SetattrReq { fh: 1, size: 2 });
         s.push(0);
         assert_eq!(decode_setattr_req(&s), Some(SetattrReq { fh: 1, size: 2 }));
-        let req = ReadReq { fh: 1, offset: 2, len: 3 };
+        let req = ReadReq {
+            fh: 1,
+            offset: 2,
+            len: 3,
+        };
         let r = encode_read_req(&req);
         assert_eq!(decode_read_req(&r[..20]), Some(req));
         assert_eq!(decode_write_resp(&encode_write_resp(4)[..4]), Some(4));
@@ -1006,7 +1016,14 @@ mod tests {
         }]);
         d.push(0);
         assert_eq!(decode_readdir_resp(&d).unwrap().len(), 1);
-        let mut w = encode_write_req(&WriteReq { fh: 1, offset: 2, len: 2 }, b"hi");
+        let mut w = encode_write_req(
+            &WriteReq {
+                fh: 1,
+                offset: 2,
+                len: 2,
+            },
+            b"hi",
+        );
         w.extend_from_slice(&[7, 7]);
         let (wr, data) = decode_write_req(&w).unwrap();
         assert_eq!((wr.len, data), (2, b"hi".to_vec()));
@@ -1032,10 +1049,16 @@ mod tests {
         assert!(decode_readdir_resp(&dd).unwrap()[0].is_dir);
         // a READ reply whose data is cut short is still malformed
         assert!(decode_read_resp(&encode_read_resp(b"abc")[..10]).is_none());
-        assert!(decode_write_req(&encode_write_req(
-            &WriteReq { fh: 1, offset: 0, len: 3 },
-            b"abc"
-        )[..25])
+        assert!(decode_write_req(
+            &encode_write_req(
+                &WriteReq {
+                    fh: 1,
+                    offset: 0,
+                    len: 3
+                },
+                b"abc"
+            )[..25]
+        )
         .is_none());
     }
 

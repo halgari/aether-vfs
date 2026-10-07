@@ -8,7 +8,7 @@ use tonic::transport::Server;
 
 use vfs_embed::{CloseOutcome, Storage};
 
-use crate::discovery::{Discovery, read_discovery, write_discovery};
+use crate::discovery::{read_discovery, write_discovery, Discovery};
 use crate::service::DirectorService;
 use crate::sessions::SessionRegistry;
 
@@ -35,7 +35,7 @@ pub async fn serve_daemon(
 async fn shutdown_signal() {
     #[cfg(unix)]
     {
-        use tokio::signal::unix::{SignalKind, signal};
+        use tokio::signal::unix::{signal, SignalKind};
         match (
             signal(SignalKind::terminate()),
             signal(SignalKind::interrupt()),
@@ -143,7 +143,7 @@ mod tests {
     use super::*;
     use crate::client::wait_for_daemon;
     use crate::open_daemon_storage;
-    use crate::{DEFAULT_BIND, SessionRegistry};
+    use crate::{SessionRegistry, DEFAULT_BIND};
     use std::time::Duration;
 
     /// The daemon's shutdown path (what SIGTERM/SIGINT drive in

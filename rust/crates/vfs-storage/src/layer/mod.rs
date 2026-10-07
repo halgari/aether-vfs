@@ -29,8 +29,8 @@ use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard, Weak};
 use vfs_core::fold;
 use vfs_provider::{
     bad_request, exists, is_dir, map_io_err, not_a_dir, not_found, Access, Capabilities, CaseMatch,
-    DirEntry, Handle, HandleTable, Provider, SetAttr, Stat, VPath, KIND_DIR, KIND_FILE, OPEN_CREATE,
-    OPEN_EXCL, OPEN_TRUNC, OPEN_WRITE,
+    DirEntry, Handle, HandleTable, Provider, SetAttr, Stat, VPath, KIND_DIR, KIND_FILE,
+    OPEN_CREATE, OPEN_EXCL, OPEN_TRUNC, OPEN_WRITE,
 };
 
 mod batch;

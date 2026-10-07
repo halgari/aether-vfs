@@ -87,8 +87,8 @@ pub(super) fn seed_fixture(p: &Arc<dyn Provider>) {
     }
 }
 
-mod io;
-mod durability;
 mod concurrency;
+mod durability;
+mod io;
 mod namespace;
 mod overlay;

@@ -37,7 +37,10 @@ fn a_config_version_mismatch_kills_the_process_with_the_message() {
         target_exe: probe,
         current_dir: None,
         args: vec![
-            root.join("does-not-matter.bin").to_str().unwrap().to_string(),
+            root.join("does-not-matter.bin")
+                .to_str()
+                .unwrap()
+                .to_string(),
             output_path.to_str().unwrap().to_string(),
         ],
         dll_path: dll,

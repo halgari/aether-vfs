@@ -11,11 +11,11 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::Mutex;
 
-use windows_sys::Win32::Foundation::{FILETIME, HANDLE, LocalFree};
+use windows_sys::Win32::Foundation::{LocalFree, FILETIME, HANDLE};
 use windows_sys::Win32::System::Registry::{
-    HKEY, HKEY_CURRENT_USER, KEY_ALL_ACCESS, KEY_READ, REG_OPTION_NON_VOLATILE, RegCloseKey,
-    RegCreateKeyExW, RegDeleteTreeW, RegOpenKeyExW, RegQueryInfoKeyW, RegQueryValueExW,
-    RegSetKeySecurity,
+    RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegOpenKeyExW, RegQueryInfoKeyW,
+    RegQueryValueExW, RegSetKeySecurity, HKEY, HKEY_CURRENT_USER, KEY_ALL_ACCESS, KEY_READ,
+    REG_OPTION_NON_VOLATILE,
 };
 
 use super::fakedirector::{self, Fake};
@@ -145,7 +145,7 @@ pub(crate) fn reg_create(sub: &str) -> HKEY {
 /// The current user's SID as a string.
 pub(crate) fn user_sid() -> String {
     use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
-    use windows_sys::Win32::Security::{GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser};
+    use windows_sys::Win32::Security::{GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER};
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
     unsafe {
         let mut token: HANDLE = std::ptr::null_mut();

@@ -10,7 +10,6 @@ use vfs_block_store::BlockStore;
 use vfs_provider::Provider;
 
 use crate::cached::CacheState;
-use crate::util::lock;
 use crate::catalog::Catalog;
 use crate::config::{Durability, StorageConfig};
 use crate::durable::{fold_scratch_dirs, DurableClock};
@@ -18,6 +17,7 @@ use crate::ids::Guid;
 use crate::layer::LayerProvider;
 use crate::ram::RamTier;
 use crate::reconcile::{reconcile, ReconcileReport};
+use crate::util::lock;
 
 /// Errors from `vfs-storage`.
 #[derive(Debug)]

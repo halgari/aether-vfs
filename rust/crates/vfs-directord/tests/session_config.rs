@@ -11,7 +11,6 @@ use vfs_control::pb::director_server::DirectorServer;
 use vfs_control::SessionConfig;
 use vfs_directord::{apply_session_config, connect, DirectorService, SessionRegistry};
 
-
 #[tokio::test(flavor = "multi_thread")]
 async fn apply_session_config_health_and_list() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -55,7 +54,10 @@ async fn apply_session_config_health_and_list() {
         .await
         .unwrap()
         .into_inner();
-    assert!(list.sessions.iter().any(|s| s.id == id && s.name == "list-me"));
+    assert!(list
+        .sessions
+        .iter()
+        .any(|s| s.id == id && s.name == "list-me"));
 
     client
         .teardown_session(vfs_control::pb::TeardownReq { session_id: id })
@@ -84,7 +86,9 @@ async fn launch_and_teardown_address_a_session_by_name() {
     let mut client = connect(&format!("{addr}")).await.unwrap();
 
     let cfg = SessionConfig {
-        session: vfs_control::SessionMeta { name: Some("by-name".into()) },
+        session: vfs_control::SessionMeta {
+            name: Some("by-name".into()),
+        },
         roots: vec![vfs_control::RootEntry {
             id: 0,
             name: "Games".into(),
@@ -101,21 +105,36 @@ async fn launch_and_teardown_address_a_session_by_name() {
         wait: true,
         env: Default::default(),
     };
-    let st = client.launch(launch("no-such", "x.exe")).await.expect_err("unknown session");
+    let st = client
+        .launch(launch("no-such", "x.exe"))
+        .await
+        .expect_err("unknown session");
     assert_eq!(st.code(), tonic::Code::NotFound, "{st:?}");
     assert!(
         st.message().contains("no-such") && st.message().contains("by-name"),
         "the refusal must list what is live: {st:?}"
     );
-    let st = client.launch(launch("by-name", r"{Nope}\x.exe")).await.expect_err("unknown root");
+    let st = client
+        .launch(launch("by-name", r"{Nope}\x.exe"))
+        .await
+        .expect_err("unknown root");
     assert_eq!(st.code(), tonic::Code::InvalidArgument, "{st:?}");
-    assert!(st.message().contains("Nope") && st.message().contains("Games"), "{st:?}");
+    assert!(
+        st.message().contains("Nope") && st.message().contains("Games"),
+        "{st:?}"
+    );
 
     client
-        .teardown_session(vfs_control::pb::TeardownReq { session_id: "by-name".into() })
+        .teardown_session(vfs_control::pb::TeardownReq {
+            session_id: "by-name".into(),
+        })
         .await
         .expect("teardown by name");
-    let list = client.list_sessions(vfs_control::pb::Empty {}).await.unwrap().into_inner();
+    let list = client
+        .list_sessions(vfs_control::pb::Empty {})
+        .await
+        .unwrap()
+        .into_inner();
     assert!(list.sessions.iter().all(|s| s.id != id), "{list:?}");
     server.abort();
 }
@@ -143,7 +162,9 @@ async fn a_failed_apply_leaves_no_session_and_a_live_name_is_not_reused() {
 
     let content = vfs_testkit::tempdir().unwrap();
     let good = SessionConfig {
-        session: vfs_control::SessionMeta { name: Some("half".into()) },
+        session: vfs_control::SessionMeta {
+            name: Some("half".into()),
+        },
         roots: vec![vfs_control::RootEntry {
             id: 0,
             name: "Games".into(),
@@ -180,16 +201,25 @@ async fn a_failed_apply_leaves_no_session_and_a_live_name_is_not_reused() {
     let mut bad_source = good.clone();
     bad_source.sources.push(vfs_control::SourceEntry {
         spec: vfs_control::SourceSpec::Zip {
-            path: content.path().join("missing.zip").to_string_lossy().into_owned(),
+            path: content
+                .path()
+                .join("missing.zip")
+                .to_string_lossy()
+                .into_owned(),
         },
         mount: "/".into(),
         root: 0,
         write_layer: false,
         cache_key: None,
     });
-    let e = apply_session_config(&mut client, &bad_source).await.unwrap_err();
+    let e = apply_session_config(&mut client, &bad_source)
+        .await
+        .unwrap_err();
     assert!(e.contains("AddSource"), "{e}");
-    assert!(live(&mut client).await.is_empty(), "a failed AddSource must not leave a session");
+    assert!(
+        live(&mut client).await.is_empty(),
+        "a failed AddSource must not leave a session"
+    );
 
     // A launch refused before anything is spawned.
     let mut bad_launch = good.clone();
@@ -199,16 +229,29 @@ async fn a_failed_apply_leaves_no_session_and_a_live_name_is_not_reused() {
         wait: true,
         env: Default::default(),
     });
-    let e = apply_session_config(&mut client, &bad_launch).await.unwrap_err();
+    let e = apply_session_config(&mut client, &bad_launch)
+        .await
+        .unwrap_err();
     assert!(e.contains("Nope"), "{e}");
-    assert!(live(&mut client).await.is_empty(), "a failed launch must not leave a session");
+    assert!(
+        live(&mut client).await.is_empty(),
+        "a failed launch must not leave a session"
+    );
 
     // The corrected config applies — its name was not left held.
-    let (id, _) = apply_session_config(&mut client, &good).await.expect("the corrected retry");
+    let (id, _) = apply_session_config(&mut client, &good)
+        .await
+        .expect("the corrected retry");
     // …and applying it again while it is live is refused, naming it.
     let e = apply_session_config(&mut client, &good).await.unwrap_err();
-    assert!(e.contains("AlreadyExists") || e.contains("already named"), "{e}");
-    assert!(e.contains(&id), "the refusal must name the live session: {e}");
+    assert!(
+        e.contains("AlreadyExists") || e.contains("already named"),
+        "{e}"
+    );
+    assert!(
+        e.contains(&id),
+        "the refusal must name the live session: {e}"
+    );
     let sessions = live(&mut client).await;
     assert_eq!(sessions.len(), 1, "{sessions:?}");
 
@@ -260,11 +303,16 @@ async fn a_configs_declared_root_paths_reach_the_live_session() {
     let (game_loc, docs_loc) = if cfg!(windows) {
         (game.path().to_path_buf(), docs.path().to_path_buf())
     } else {
-        (PathBuf::from(r"C:\Games\Game"), PathBuf::from(r"C:\users\steamuser\Docs"))
+        (
+            PathBuf::from(r"C:\Games\Game"),
+            PathBuf::from(r"C:\users\steamuser\Docs"),
+        )
     };
 
     let cfg = SessionConfig {
-        session: vfs_control::SessionMeta { name: Some("two-root-cfg".into()) },
+        session: vfs_control::SessionMeta {
+            name: Some("two-root-cfg".into()),
+        },
         roots: vec![
             vfs_control::RootEntry {
                 id: 0,
@@ -313,8 +361,7 @@ async fn a_configs_declared_root_paths_reach_the_live_session() {
             );
             assert_eq!(declared[0].0, 1);
             assert_eq!(
-                declared[0].1,
-                docs_loc,
+                declared[0].1, docs_loc,
                 "root 1's declared location is not the one the config named"
             );
             // Both providers are mounted too — declaring must not have

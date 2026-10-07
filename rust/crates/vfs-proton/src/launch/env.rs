@@ -3,9 +3,9 @@
 
 use std::collections::BTreeMap;
 
-use super::{LaunchError, WineLaunch, absolute, path_string};
+use super::{absolute, path_string, LaunchError, WineLaunch};
 use crate::runtime::runtime_lib_env;
-use crate::steam::{STEAM_HELPER, STEAM_HELPER_OVERRIDE, SteamSide};
+use crate::steam::{SteamSide, STEAM_HELPER, STEAM_HELPER_OVERRIDE};
 
 /// `WINEDLLOVERRIDES` every launch carries: Mono and Gecko prompts would
 /// otherwise block a launch on a fresh prefix.

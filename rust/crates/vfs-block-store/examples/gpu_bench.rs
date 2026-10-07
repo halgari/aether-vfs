@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use vfs_block_store::{
-    BlockStore, BulkCompression, GpuConfig, GpuLevel, StoreConfig, WriteClass, with_write_class,
+    with_write_class, BlockStore, BulkCompression, GpuConfig, GpuLevel, StoreConfig, WriteClass,
 };
 
 const BS: usize = 64 * 1024;
@@ -244,16 +244,14 @@ fn main() {
         std::thread::scope(|s| {
             for _ in 0..writers {
                 s.spawn(|| {
-                    with_write_class(WriteClass::Bulk, || {
-                        loop {
-                            let i = next.fetch_add(1, Ordering::Relaxed);
-                            let Some(f) = files.get(i) else { break };
-                            let id = format!("f{i}");
-                            for (k, part) in f.chunks(run).enumerate() {
-                                store
-                                    .write_blocks(id.as_bytes(), (k * run / BS) as u64, part)
-                                    .unwrap();
-                            }
+                    with_write_class(WriteClass::Bulk, || loop {
+                        let i = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(f) = files.get(i) else { break };
+                        let id = format!("f{i}");
+                        for (k, part) in f.chunks(run).enumerate() {
+                            store
+                                .write_blocks(id.as_bytes(), (k * run / BS) as u64, part)
+                                .unwrap();
                         }
                     })
                 });

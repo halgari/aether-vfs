@@ -9,8 +9,8 @@ use std::sync::Mutex;
 
 use vfs_provider::{
     bad_request, exists, map_io_err, not_a_dir, not_found, Access, Capabilities, CaseMatch,
-    DirEntry, Handle, Provider, SetAttr, Stat, VPath, KIND_DIR, KIND_FILE, OPEN_CREATE,
-    OPEN_EXCL, OPEN_TRUNC, OPEN_WRITE,
+    DirEntry, Handle, Provider, SetAttr, Stat, VPath, KIND_DIR, KIND_FILE, OPEN_CREATE, OPEN_EXCL,
+    OPEN_TRUNC, OPEN_WRITE,
 };
 
 pub struct DiskProvider {
@@ -357,7 +357,11 @@ impl Provider for DiskProvider {
         // succeeds by creating exactly that path. A plain write-open of an
         // already-existing file has no such hazard and resolves lazily,
         // same as the read branch above.
-        let mut p = if creating { self.resolve_case_aware(path)? } else { self.resolve(path)? };
+        let mut p = if creating {
+            self.resolve_case_aware(path)?
+        } else {
+            self.resolve(path)?
+        };
 
         if creating {
             if let Some(parent) = p.parent() {
@@ -442,7 +446,10 @@ impl Provider for DiskProvider {
                 // falling back, so a real file-removal failure is reported
                 // as its own status instead of being replaced by whatever
                 // remove_dir happens to return for a path that isn't one.
-                if !std::fs::metadata(&path).map(|m| m.is_dir()).unwrap_or(false) {
+                if !std::fs::metadata(&path)
+                    .map(|m| m.is_dir())
+                    .unwrap_or(false)
+                {
                     return Err(map_io_err());
                 }
                 std::fs::remove_dir(&path).map_err(|e| {
@@ -476,7 +483,10 @@ impl Provider for DiskProvider {
             Ok(f) => f,
             Err(_) => {
                 let folded = self.resolve_fold_fallback(p.rel, exact);
-                File::options().write(true).open(&folded).map_err(|_| map_io_err())?
+                File::options()
+                    .write(true)
+                    .open(&folded)
+                    .map_err(|_| map_io_err())?
             }
         };
         if let Some(size) = attr.size {
@@ -520,7 +530,8 @@ mod tests {
     fn disk_provider_passes_write_conformance() {
         let dir = vfs_testkit::scratch_path("vfs-diskwconf");
         vfs_provider::write_fixture_tree(&dir);
-        let p: std::sync::Arc<dyn vfs_provider::Provider> = std::sync::Arc::new(DiskProvider::new(&dir));
+        let p: std::sync::Arc<dyn vfs_provider::Provider> =
+            std::sync::Arc::new(DiskProvider::new(&dir));
         vfs_provider::assert_conformance(p);
         let _ = std::fs::remove_dir_all(&dir);
     }

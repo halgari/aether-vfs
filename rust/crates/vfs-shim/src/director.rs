@@ -13,11 +13,12 @@ use std::sync::OnceLock;
 
 use vfs_ipc::{DataGate, Geom, ReadPlan, RingClient};
 use vfs_protocol::{
-    AttrResp, DirEntryWire, OP_CLOSE, OP_DELETE, OP_GETATTR, OP_HEARTBEAT, OP_MKDIR, OP_OPEN,
-    OP_READDIR, OP_RENAME, OP_SETATTR, OP_STORED_NAMES, OP_WRITE, OPEN_READ, OPEN_WRITE, OpenResp,
-    ST_OK, SetattrReq, WriteReq, decode_getattr_resp, decode_names_resp, decode_open_resp,
-    decode_readdir_resp, decode_write_resp, encode_close_req, encode_mkdir_req, encode_names_req,
-    encode_open_req, encode_path_req, encode_rename_req, encode_setattr_req, encode_write_req,
+    decode_getattr_resp, decode_names_resp, decode_open_resp, decode_readdir_resp,
+    decode_write_resp, encode_close_req, encode_mkdir_req, encode_names_req, encode_open_req,
+    encode_path_req, encode_rename_req, encode_setattr_req, encode_write_req, AttrResp,
+    DirEntryWire, OpenResp, SetattrReq, WriteReq, OPEN_READ, OPEN_WRITE, OP_CLOSE, OP_DELETE,
+    OP_GETATTR, OP_HEARTBEAT, OP_MKDIR, OP_OPEN, OP_READDIR, OP_RENAME, OP_SETATTR,
+    OP_STORED_NAMES, OP_WRITE, ST_OK,
 };
 use vfs_redirect::{RootId, RootMap};
 use vfs_win::SharedMapping;

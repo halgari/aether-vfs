@@ -30,7 +30,10 @@ pub fn decode(blob: &[u8]) -> Source<'_> {
     if blob.first() == Some(&ZIP_TAG) && blob.len() >= 9 {
         let mut off = [0u8; 8];
         off.copy_from_slice(&blob[1..9]);
-        Source::ZipWindow { offset: u64::from_le_bytes(off), container: &blob[9..] }
+        Source::ZipWindow {
+            offset: u64::from_le_bytes(off),
+            container: &blob[9..],
+        }
     } else {
         Source::Disk(blob)
     }
@@ -45,18 +48,27 @@ mod tests {
         let blob = encode_zip_window(0x1_0000_0007, r"C:\GameLayers\base.zip");
         assert_eq!(
             decode(&blob),
-            Source::ZipWindow { offset: 0x1_0000_0007, container: br"C:\GameLayers\base.zip" }
+            Source::ZipWindow {
+                offset: 0x1_0000_0007,
+                container: br"C:\GameLayers\base.zip"
+            }
         );
     }
 
     #[test]
     fn a_plain_path_decodes_as_disk() {
-        assert_eq!(decode(br"D:\Mods\Cool\foo.esp"), Source::Disk(br"D:\Mods\Cool\foo.esp"));
+        assert_eq!(
+            decode(br"D:\Mods\Cool\foo.esp"),
+            Source::Disk(br"D:\Mods\Cool\foo.esp")
+        );
     }
 
     #[test]
     fn a_truncated_zip_blob_is_treated_as_disk() {
         // Leading NUL but fewer than 9 bytes -> not a valid window.
-        assert_eq!(decode(&[0x00, 0x01, 0x02]), Source::Disk(&[0x00, 0x01, 0x02]));
+        assert_eq!(
+            decode(&[0x00, 0x01, 0x02]),
+            Source::Disk(&[0x00, 0x01, 0x02])
+        );
     }
 }

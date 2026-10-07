@@ -229,7 +229,7 @@ unsafe fn fuse_create_section(
         return STATUS_UNSUCCESSFUL;
     };
     use windows_sys::Win32::System::Memory::{
-        MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE, VirtualAlloc, VirtualFree,
+        VirtualAlloc, VirtualFree, MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE,
     };
     let map_len = size as usize;
     // SAFETY: FFI call with valid arguments.

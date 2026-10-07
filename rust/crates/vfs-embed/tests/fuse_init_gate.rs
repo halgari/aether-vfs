@@ -60,11 +60,22 @@ fn ensure_fixtures() {
 
         // Build for the profile this test runs in: `profile_dir()` is that profile's
         // directory, so a debug build under `cargo test --release` would land elsewhere.
-        let release: &[&str] = if cfg!(debug_assertions) { &[] } else { &["--release"] };
+        let release: &[&str] = if cfg!(debug_assertions) {
+            &[]
+        } else {
+            &["--release"]
+        };
         let status = std::process::Command::new(&cargo)
             .current_dir(&workspace)
             .args([
-                "build", "-p", "vfs-shim-dll", "-p", "vfs-inject", "--bin", "vfs-probe", "--quiet",
+                "build",
+                "-p",
+                "vfs-shim-dll",
+                "-p",
+                "vfs-inject",
+                "--bin",
+                "vfs-probe",
+                "--quiet",
             ])
             .args(release)
             .status()
@@ -128,7 +139,8 @@ fn launch_returns_err_when_fuse_client_fails_to_attach() {
     let mut s = Session::new();
     s.set_root(&content_dir);
     s.set_state_dir(&state_dir);
-    s.mount("", Arc::new(DiskProvider::new(&content_dir))).unwrap();
+    s.mount("", Arc::new(DiskProvider::new(&content_dir)))
+        .unwrap();
     s.serve().expect("serve");
 
     let probe = locate_artifact("vfs-probe.exe");
