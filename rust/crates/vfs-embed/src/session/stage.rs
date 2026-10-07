@@ -128,6 +128,12 @@ impl Session {
     /// under `virtual_root` (an accepted form before roots had locations), or
     /// refused if it is not under it.
     pub(super) fn resolve_launch_image(&self, opts: &LaunchOpts) -> Result<ResolvedImage, String> {
+        let resolved = self.resolve_image(opts)?;
+        resolved.trace();
+        Ok(resolved)
+    }
+
+    fn resolve_image(&self, opts: &LaunchOpts) -> Result<ResolvedImage, String> {
         #[cfg(unix)]
         let image: String = {
             let host = Path::new(&opts.image);
@@ -231,19 +237,32 @@ pub(super) enum ResolvedImage {
     /// Inside `root`'s location at `vpath`; `host` is the real file backing
     /// it — already there, or just staged into root 0's backing directory.
     InRoot {
-        // The unix body names the child's image by the root's location and
-        // this vpath; the Windows body launches `host` and reads neither.
-        #[cfg_attr(not(unix), allow(dead_code))]
         root: u32,
-        #[cfg_attr(not(unix), allow(dead_code))]
         vpath: String,
-        // The Windows body launches `host`; the unix body names the child's
-        // image by the root's location instead, so only tests read it there.
-        #[cfg_attr(unix, allow(dead_code))]
         host: PathBuf,
     },
     /// Outside every root: a real program, launched as given.
     Outside(String),
+}
+
+impl ResolvedImage {
+    /// Logs what the launch image resolved to. Each target launches from a
+    /// different half (unix names the child's image by `root` and `vpath`,
+    /// Windows launches `host`), so this is also what reads every field on
+    /// both.
+    fn trace(&self) {
+        match self {
+            ResolvedImage::InRoot { root, vpath, host } => tracing::debug!(
+                root,
+                vpath,
+                host = %host.display(),
+                "launch image resolved inside a root"
+            ),
+            ResolvedImage::Outside(p) => {
+                tracing::debug!(image = %p, "launch image is outside every root")
+            }
+        }
+    }
 }
 
 /// The refusal for a unix host path no Wine drive names.
