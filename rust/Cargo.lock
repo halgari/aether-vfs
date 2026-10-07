@@ -2745,6 +2745,7 @@ dependencies = [
  "vfs-env",
  "vfs-inject",
  "vfs-ipc",
+ "vfs-pe",
  "vfs-protocol",
  "vfs-proton",
  "vfs-provider",

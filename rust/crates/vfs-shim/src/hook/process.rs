@@ -67,6 +67,19 @@ pub(super) unsafe fn cpiw_hook_body(
     };
     let caller_suspended = flags & CREATE_SUSPENDED != 0;
 
+    // Spike: import activation. Children are patched exes that load the shim
+    // through their own import table, so creation passes through unchanged.
+    // Not fail-closed yet: an unpatched child would run un-virtualised.
+    if vfs_env::text(vfs_env::ACTIVATION).as_deref() == Some(vfs_env::ACTIVATION_IMPORT) {
+        // SAFETY: the original NT function, called with the caller's arguments.
+        return unsafe {
+            tramp(
+                token, app, cmd, proc_attr, thread_attr, inherit, flags, env, cur_dir, si, pi,
+                ptok,
+            )
+        };
+    }
+
     // Start managed children in the virtual root, not the launcher's directory
     // (see `child_cwd_root`). Kept alive for the whole call: `cur_dir_eff` may
     // point into it.

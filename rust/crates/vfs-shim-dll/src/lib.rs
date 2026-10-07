@@ -45,6 +45,15 @@ pub extern "system" fn DllMain(_dll: HINSTANCE, reason: u32, _reserved: *mut c_v
         "DllMain",
         || {
             if reason == DLL_PROCESS_ATTACH {
+                if import_activated() {
+                    // Loaded as the exe's first import: bootstrap here, under the
+                    // loader lock, before any other import's DllMain or the exe's
+                    // own code. FALSE fails process start (STATUS_DLL_INIT_FAILED),
+                    // which is the fail-closed outcome.
+                    let ok = bootstrap_inner();
+                    vfs_shim::finish_ready_handshake();
+                    return if ok { TRUE } else { 0 };
+                }
                 std::thread::spawn(bootstrap);
             }
             TRUE
@@ -85,6 +94,13 @@ pub extern "system" fn vfs_shim_sync_bootstrap(payload_cfg: *mut c_void) -> u32 
 /// Non-zero is what matters to the caller either way — it must never be 0, which
 /// would tell the stub that hooks are live when nothing is installed.
 pub const SYNC_BOOTSTRAP_PANICKED: u32 = 4;
+
+/// Whether this process was started with the shim as a static import. Children
+/// inherit it: in import mode the process hook does not inject children, each
+/// patched child activates itself the same way.
+fn import_activated() -> bool {
+    vfs_env::text(vfs_env::ACTIVATION).as_deref() == Some(vfs_env::ACTIVATION_IMPORT)
+}
 
 /// Classic async bootstrap (loader-lock safe: runs off DllMain). A failure also
 /// tells a parent that is waiting on this process (a shim-injected child's

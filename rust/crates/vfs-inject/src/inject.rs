@@ -625,6 +625,10 @@ pub fn run_target_with_shim(cfg: RunConfig) -> Result<i32, InjectError> {
     }
     let _ = std::fs::remove_file(&cfg.ready_path);
 
+    if vfs_env::text(vfs_env::ACTIVATION).as_deref() == Some(vfs_env::ACTIVATION_IMPORT) {
+        return run_import_activated(&cfg);
+    }
+
     let redirects = merge_preinit_redirects(&cfg.config_path, &cfg.preinit_redirects);
 
     // SAFETY: CreateProcessW + dual-layer arm + resume.
@@ -789,6 +793,76 @@ pub fn run_target_with_shim(cfg: RunConfig) -> Result<i32, InjectError> {
             return Err(InjectError::ExitCode);
         }
         Ok(code as i32)
+    }
+}
+
+/// Spike: start a target whose exe imports the shim first. No suspend, no
+/// payload, no remote thread: the loader runs the shim's `DllMain` before any
+/// other import initialises, and a failed bootstrap fails process start there.
+/// This only starts the process and reports how it ended.
+fn run_import_activated(cfg: &RunConfig) -> Result<i32, InjectError> {
+    let mut cmdline = format!("\"{}\"", cfg.target_exe);
+    for a in &cfg.args {
+        cmdline.push_str(&format!(" \"{a}\""));
+    }
+    let app_w = wide(&cfg.target_exe);
+    let mut cmd_w = wide(&cmdline);
+    let cwd_w = cfg.current_dir.as_ref().map(|s| wide(s));
+    let started = Instant::now();
+    // SAFETY: CreateProcessW with valid, NUL-terminated buffers; handles closed below.
+    unsafe {
+        let mut pi: PROCESS_INFORMATION = zeroed();
+        let mut si: STARTUPINFOW = zeroed();
+        si.cb = size_of::<STARTUPINFOW>() as u32;
+        let ok = CreateProcessW(
+            app_w.as_ptr(),
+            cmd_w.as_mut_ptr(),
+            core::ptr::null(),
+            core::ptr::null(),
+            0,
+            0,
+            core::ptr::null(),
+            cwd_w
+                .as_ref()
+                .map(|v| v.as_ptr())
+                .unwrap_or(core::ptr::null()),
+            &si,
+            &mut pi,
+        );
+        if ok == 0 {
+            return Err(InjectError::CreateProcess);
+        }
+        CloseHandle(pi.hThread);
+        // Report when the shim said ready, for the timing comparison.
+        loop {
+            if let Ok(c) = std::fs::read_to_string(&cfg.ready_path) {
+                if !c.is_empty() {
+                    eprintln!(
+                        "vfs-inject: import activation: shim ready after {} ms: {c}",
+                        started.elapsed().as_millis()
+                    );
+                    break;
+                }
+            }
+            if exited(pi.hProcess).is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        if cfg.detach {
+            CloseHandle(pi.hProcess);
+            return Ok(0);
+        }
+        WaitForSingleObject(pi.hProcess, INFINITE);
+        let code = exited(pi.hProcess);
+        CloseHandle(pi.hProcess);
+        match code {
+            // The loader refused to start it: the shim was missing or its
+            // DllMain failed. Nothing of the program ran.
+            Some(c @ (0xC000_0135 | 0xC000_0142)) => Err(InjectError::TargetExited(c)),
+            Some(c) => Ok(c as i32),
+            None => Err(InjectError::ExitCode),
+        }
     }
 }
 

@@ -178,6 +178,11 @@ pub const CHILD_REFUSED_SUFFIX: &str = ".child-refused";
 pub const PAYLOAD_CFG_FILE: &str = "VFS_PAYLOAD_CFG_FILE";
 /// Set when the launch uses the dual-layer (pre-init payload + full shim) path.
 pub const DUAL_LAYER: &str = "VFS_DUAL_LAYER";
+/// Spike: `import` means the target exe was rewritten to import the shim first,
+/// so the launcher starts it normally and the shim bootstraps from `DllMain`.
+pub const ACTIVATION: &str = "VFS_ACTIVATION";
+/// The [`ACTIVATION`] value for import-table activation.
+pub const ACTIVATION_IMPORT: &str = "import";
 /// Test-only: force `vfs_shim::director::try_init_from_env` to report a
 /// connect failure, regardless of ring configuration. Exists to exercise a
 /// director-launched process's abort path without a director that is

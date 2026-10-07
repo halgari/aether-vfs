@@ -129,6 +129,40 @@ fn a_child_the_fixture_spawns_is_virtualised_too_under_proton() {
     );
 }
 
+/// Spike: the same launch with the fixture's import table patched to load the
+/// shim first, started without `CREATE_SUSPENDED` or any injection.
+#[test]
+#[ignore = "spike: import-table activation under Proton"]
+fn spike_import_activated_fixture_reads_from_the_provider() {
+    let mut env = BTreeMap::new();
+    env.insert("VFS_ACTIVATION".to_string(), "import".to_string());
+    launch_fixture("proton_launch::spike_import_activated", env);
+}
+
+/// Spike: an import-activated fixture spawns a child, which the shim's
+/// existing child hook injects the classic way.
+#[test]
+#[ignore = "spike: import-table activation under Proton"]
+fn spike_import_activated_missing_shim_refuses_to_start() {
+    let mut env = BTreeMap::new();
+    env.insert("VFS_ACTIVATION".to_string(), "import".to_string());
+    if std::env::var_os("SPIKE_FUSE_FAIL").is_some() {
+        env.insert("VFS_TEST_FUSE_INIT_FAIL".to_string(), "1".to_string());
+    } else {
+        env.insert("SPIKE_NO_SHIM".to_string(), "1".to_string());
+    }
+    launch_fixture("proton_launch::spike_import_missing_shim", env);
+}
+
+#[test]
+#[ignore = "spike"]
+fn spike_import_activated_fixture_child_is_virtualised() {
+    let mut env = BTreeMap::new();
+    env.insert("VFS_ACTIVATION".to_string(), "import".to_string());
+    env.insert("VFS_FIXTURE_SPAWN_CHILD".to_string(), "1".to_string());
+    launch_fixture("proton_launch::spike_import_activated_child", env);
+}
+
 /// The body of both launches above: serve [`VPATH`] from a provider, launch the
 /// fixture with `extra_env` on top of the read it always does, and check it
 /// exited 0 having read every byte through the ring.
@@ -157,6 +191,19 @@ fn launch_fixture(test_name: &str, extra_env: BTreeMap<String, String>) {
     let image = root.join("fixture.exe");
     std::fs::copy(art.path(vfs_proton::artifacts::FIXTURE_READ), &image)
         .expect("copy the fixture into the root");
+    // Import activation (spike): the exe imports the shim first, and the shim
+    // sits beside it under the name the import asks for.
+    if extra_env.get("VFS_ACTIVATION").map(String::as_str) == Some("import") {
+        let raw = std::fs::read(&image).unwrap();
+        let mut patched =
+            vfs_pe::add_first_import(&raw, "vfs_shim_dll.dll", "vfs_shim_sync_bootstrap")
+                .expect("patch the fixture's imports");
+        vfs_pe::raise_stack_reserve(&mut patched, 16 * 1024 * 1024).unwrap();
+        std::fs::write(&image, patched).unwrap();
+        if extra_env.get("SPIKE_NO_SHIM").is_none() {
+            std::fs::copy(art.shim_dll(), root.join("vfs_shim_dll.dll")).unwrap();
+        }
+    }
 
     let provider = Arc::new(Loud::new(&content));
 
