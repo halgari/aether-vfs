@@ -2,12 +2,16 @@
 #![allow(unsafe_code)]
 
 mod entry;
+#[cfg(test)]
+mod test_support;
 // @mods
 
 pub(crate) use self::entry::ShimIoGuard;
 pub use self::entry::as_shim_io_for_tests;
 pub use self::entry::contain_panic;
 use self::entry::*;
+#[cfg(test)]
+use self::test_support::*;
 // @uses
 
 use core::ffi::c_void;
@@ -5790,25 +5794,6 @@ mod tests {
     #[test]
     fn the_early_rows_are_the_four_payload_slots() {
         assert!(early_rows_are_the_payload_slots());
-    }
-
-    fn us_raw(length: u16, buffer: *mut u16) -> UnicodeString {
-        UnicodeString {
-            length,
-            maximum_length: length,
-            buffer,
-        }
-    }
-
-    fn oa_named(us: &UnicodeString) -> ObjectAttributes {
-        ObjectAttributes {
-            length: core::mem::size_of::<ObjectAttributes>() as u32,
-            root_directory: core::ptr::null_mut(),
-            object_name: us,
-            attributes: 0,
-            security_descriptor: core::ptr::null(),
-            security_qos: core::ptr::null(),
-        }
     }
 
     /// An `ObjectName` the file hooks cannot decode is left to the real syscall: an odd `Length`
