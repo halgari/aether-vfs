@@ -5,8 +5,13 @@
 are solved. Implementation detail lives in module docs; this is the map.
 
 Companion documents: [`../../docs/product-overview.md`](../../docs/product-overview.md)
-(non-technical), [`vfs-summary.md`](./vfs-summary.md) (earlier long-form
-narrative), [`benchmarks/`](./benchmarks/) (measurements).
+(non-technical), [`durability.md`](./durability.md) (what is durable when, for
+the storage layers and the registry overlay),
+[`../../docs/shim-invariants.md`](../../docs/shim-invariants.md) (the shim's
+invariants and the incidents behind them), [`benchmarks/`](./benchmarks/)
+(measurements), [`vfs-summary.md`](./vfs-summary.md) (earlier long-form
+narrative, historical). The design docs are indexed in
+[`../../docs/superpowers/README.md`](../../docs/superpowers/README.md).
 
 ---
 
@@ -21,7 +26,9 @@ Windows NT file API inside it. Every other process on the machine sees the
 original, untouched directory.
 
 The proof point is Skyrim Special Edition: it boots, loads its world, and plays
-from a Stored zip with **no durable extract** of game content.
+from a Stored zip with **no durable extract** of game content. That runs on
+Windows natively, and on Linux under GE-Proton's Wine (§3.10): the game and the
+shim are Windows code either way, and only the host and the director differ.
 
 ### Why this is worth doing
 
@@ -40,7 +47,7 @@ rather than a mutation, and confines failure to one process.
 ```text
 ┌─ Host process (CLI, daemon, or embedding app) ────────────────────────────┐
 │                                                                           │
-│  Session          mounts, paths, launch                                   │
+│  Session          (vfs-embed) roots, mounts, serve, launch                │
 │  Director         userspace FUSE kernel: resolve, overlay, handle table   │
 │  Providers        zip · disk · cache · compose · gRPC plugin              │
 │                                                                           │
@@ -52,7 +59,7 @@ rather than a mutation, and confines failure to one process.
 │                                                                           │
 │  ntdll detours   NtCreateFile / NtOpenFile / NtRead / stat×3 / enum×2 / …  │
 │         │                                                                 │
-│         ├─ path under the managed root ──► FuseClient ──► ring ──► director│
+│         ├─ path under the managed root ──► director client ──► ring ──► director│
 │         └─ anything else ────────────────► real ntdll, untouched          │
 │                                                                           │
 │  synthetic handles · demand-paged sections · staged PE closure            │
@@ -68,7 +75,7 @@ the game only through the ring.
 
 ## 3. The layers
 
-### 3.1 Content model — `vfs-core`, `vfs-shared`
+### 3.1 Content model — `vfs-core`
 
 Pure, OS-free, no I/O. Given enumerated layers, it produces a merged tree and
 answers `resolve(vpath)`. It knows about:
@@ -80,8 +87,6 @@ answers `resolve(vpath)`. It knows about:
   without being case-*destructive* (the original spelling is preserved for
   enumeration).
 - **Wildcards** — enumeration filters (`*.esm`) are matched here, not in the hook.
-
-`vfs-shared` holds the bitness-neutral flat layout of a snapshot of that tree.
 
 Keeping this layer pure is what makes the merge semantics testable without a
 game, a driver, or even a filesystem.
@@ -126,22 +131,27 @@ never cached).
   range, so a read at an arbitrary offset is a seek, not a
   decompress-from-the-start. That is what makes random access into a 15 GB
   archive viable.
-- **`vfs-compose`** provides read-only combinators over other providers:
-  `layered` (top-wins; `readdir` unions), `router` (glob-pattern dispatch —
+- **`vfs-compose`** provides combinators over other providers: `layered`
+  (top-wins; `readdir` unions), `router` (glob-pattern dispatch —
   `getattr`/`open` take the first matching route; `readdir` is currently
   single-dispatch rather than the cross-route union the design calls for),
-  `overlay` (an upper directory wins over a base provider, with `.wh.*`
-  whiteouts hiding base entries — read-only for now: it always declares
-  `Access::Read` and rejects `OPEN_WRITE`; copy-up writes are a later stage),
-  `subdir` (rewrite addressing to expose a subtree as a root), and `inline`
-  (an in-memory provider used by tests).
+  `overlay` (a writable upper over a base provider: reads fall through to the
+  base, the first write to a base-only file **copies it up** into the upper
+  (staged as `.cu.<n>.<name>`, then renamed into place), and removing a
+  base-visible path writes a `.wh.<name>` whiteout; the base is never
+  mutated), `subdir` (rewrite addressing to expose a subtree as a root),
+  `seekable` and `readonly` (wrappers that add positional reads or demote
+  write access), `disk` (a directory, served read-write), `memory` and
+  `inline` (in-memory trees, the second read-only), and `MountGraph` (mounts
+  providers at paths and resolves a path to the mount that serves it).
 - **`vfs-storage`** owns one `vfs-block-store` block store (deduplicated,
   compressed packs), a redb catalog beside it and a RAM tier of decompressed
   blocks, and serves two things from it: `Storage::cached` wraps an
   immutable, slow source (a remote one) as a pull-through cache keyed by a
   stable `SourceKey`, and `Storage::layer` hands out a named, persistent
   read-write layer — a session's write layer that survives the session. The
-  daemon opens one `Storage` per process (`vfs daemon --storage-dir`). See
+  daemon opens one `Storage` per process (`vfs daemon --storage-dir`). What is
+  durable when is in [`durability.md`](./durability.md); the design is
   [the vfs-storage design](../../docs/superpowers/specs/2026-09-29-vfs-storage-design.md).
 - **`vfs-source`** turns a declarative spec into a live provider, including
   `RemoteProvider`, which forwards every op to an out-of-process gRPC plugin
@@ -153,10 +163,11 @@ The userspace FUSE kernel. Holds the mount table, resolves a virtual path
 through it, owns the global file-handle table, and serves ring requests. It is
 the only component that touches archive containers.
 
-`Session` is the host-facing API: configure mounts and paths, `serve()` to
-stand up the ring, `launch()` to start the target.
+It is a kernel, not the API a host embeds. `Session` — configure roots and
+mounts, `serve()` to stand up the ring, `launch()` to start the target — lives in
+`vfs-embed` (§3.11), which sits above the director.
 
-### 3.4 IPC — `vfs-ipc`, `vfs-win`
+### 3.4 IPC — `vfs-ipc`, `vfs-win`, `vfs-unix`
 
 A shared memory segment holding a **control ring** of fixed slots plus a **bulk
 arena** of per-slot banks. Small requests and replies travel inline in the slot;
@@ -165,7 +176,9 @@ large reads land in the arena so the ring never has to carry megabytes.
 Slot ownership moves by `compare_exchange`, which makes it multi-producer safe
 without a lock — necessary because a game issues file I/O from many threads at
 once. `vfs-ipc` imports no OS API at all; the mapping and the event objects live
-in `vfs-win`. All `unsafe` is confined to the segment accessor.
+in `vfs-win` (a named section on Windows) and `vfs-unix` (an `mmap` of a real
+file, which a Windows shim inside Wine maps too). All `unsafe` is confined to
+the segment accessor.
 
 **Concurrency.** Each game thread claims its own slot and waits on that slot
 alone, so file operations on different threads do not wait for each other; the
@@ -213,24 +226,44 @@ FREE → CLAIMED → SUBMITTED → PROCESSING → COMPLETED → FREE
   echoes the request id it answered into the slot header, and the client checks
   it.
 
-The ring's wire version (`vfs_ipc::layout::VERSION`, now 3) covers this state
+The ring's wire version (`vfs_ipc::layout::VERSION`, now 4) covers this state
 machine as well as the payload layouts: a shim and a director built from
-different versions refuse each other at attach.
+different versions refuse each other at attach. (The shim's bootstrap config
+carries its own version first: §3.5.)
 
 On Linux the ring file is named `state_dir/ring.bin`, but when
 `$XDG_RUNTIME_DIR` is a tmpfs owned by the user and closed to everyone else,
 that name is a symlink to a file there (mode 0600, in a 0700 directory), so the
 ring's pages are never written to disk.
 
-### 3.5 The shim — `vfs-shim`, `vfs-redirect`
+### 3.5 The shim — `vfs-shim`, `vfs-redirect`, `vfs-ntlayout`
 
 Detours on ntdll, installed inside the game. For each intercepted call it
 decides: is this path ours? If yes, serve it (from the director, or from a
 synthetic handle); if no, call the original function so the rest of the system
 is untouched.
 
-`vfs-redirect` holds the pure decision logic — path in, decision out — so the
-policy is unit-testable away from the hooks.
+**The shim always runs with a director.** There is no standalone engine and no
+shim-local answer: the shim holds no tree and no write overlay of its own, and
+without the director's client attached nothing is under a managed root. Writes,
+copy-up and whiteouts are the director's overlay provider's (§3.2); the shim
+forwards them. A call it cannot forward fails; it does not fall back to the real
+disk under a root.
+
+`vfs-redirect` holds the pure path logic — which declared root, if any, a path
+falls under, and its canonical spelling — so the policy is unit-testable away
+from the hooks. `vfs-ntlayout` holds the pure NT byte layouts the hooks fill in
+(directory records, dispositions, object names), so they are tested on any host.
+The hooks themselves live in `vfs-shim/src/hook/`, one module per concern
+(open, attributes, I/O, mutation, directory queries, sections, registry, close);
+the invariants each one keeps are in
+[`../../docs/shim-invariants.md`](../../docs/shim-invariants.md).
+
+**Bootstrap config.** The host hands the shim a small byte buffer: the managed
+root and the static-import table. It is versioned (`VFSC` magic, layout version
+2, in `vfs-protocol::shimcfg`), and a host and shim from different builds fail
+bootstrap with a named `BootstrapError::Config` rather than reading each other's
+bytes. The ring `VERSION` check then rejects a stale shim at attach.
 
 #### The read cache
 
@@ -299,6 +332,14 @@ reads as mutable and is never cached.
 Getting the shim into the process before the process needs the VFS. This is the
 subtlest part of the system and gets its own section below.
 
+**Injection fails closed.** The injector holds the target suspended until the
+shim reports ready through a ready file, and a target that is not released with
+its shim is terminated: if injection fails, the shim's bootstrap reports a
+failure (config mismatch, director unreachable), the target dies early, or the
+ready timeout passes, the launch returns an error and the process is killed. The
+same rule holds for every child the game creates (§4.3). The failure mode is a
+launch that errors, never an unvirtualised game that writes to the real disk.
+
 ### 3.7 Configuration — `vfs-env`
 
 Almost all configuration crosses a process boundary: the host sets environment
@@ -322,11 +363,12 @@ the reference.
 
 ### 3.8 Control plane — `vfs-control`, `vfs-directord`
 
-A gRPC contract plus a declarative config schema, a daemon that can hold many
-sessions, and CLIs. The control plane is language-agnostic; the data plane is
-the ring.
+A gRPC contract plus a declarative config schema (`vfs-control`), and a daemon
+(`vfs-directord`) that can hold many sessions, with the `vfs` CLI. The daemon
+builds each session through `vfs-embed`, as any other host would. The control
+plane is language-agnostic; the data plane is the ring.
 
-### 3.9 Registry overlay — `vfs-registry`, `vfs-director::registry`, the shim's `reg*` modules
+### 3.9 Registry overlay — `vfs-registry`, `vfs-director`'s `registry` module, the shim's `reg*` modules
 
 Injected processes see the real registry, but none of their registry writes
 reach it: they go to a per-profile **registry layer** that persists between
@@ -367,6 +409,48 @@ runs (spec: `docs/superpowers/specs/2026-10-05-registry-overlay-design.md`).
   failure, a key handle whose name cannot be read, or a real-modifying call
   made while the hook is bypassed returns `STATUS_UNSUCCESSFUL`. Reads fall
   back to the real registry, counted in the shim stats.
+
+### 3.10 The Proton host path — `vfs-proton`, `vfs-unix`, `vfs-embed`
+
+Linux is a supported host. The game is still a Windows program and so is the
+shim: both run inside GE-Proton's Wine, while the director, the providers and
+the host are native Linux. Only the transport and the launch differ from the
+Windows path.
+
+- **Ring.** `Session::serve` creates a file-backed ring (`state_dir/ring.bin`,
+  mapped by `vfs-unix` natively and by the shim through Wine), tmpfs-backed when
+  `$XDG_RUNTIME_DIR` is private (§3.4). The wire protocol and the version are
+  the same as on Windows.
+- **Runtime.** `vfs-proton` finds, downloads, verifies and extracts GE-Proton
+  (`vfs-proton install`); it refuses anything that is not GE, because an
+  unset or wrong `PROTONPATH` silently falls back to stock Proton. It is portable
+  on purpose, so its logic is tested on both CI hosts.
+- **Prefix.** A launch runs in a Wine prefix: an anonymous one deleted with the
+  session, or a named one that persists (`$VFS_HOME/sessions/<name>/prefix`).
+  `Session::prepare_prefix` brings one up without serving anything. A root's
+  location (`C:\...`) is a symlink into the prefix's `drive_c`, created at the
+  first launch and removed with the session. The managed root is always empty on
+  disk; content only ever arrives through the ring.
+- **Windows half.** The injector (`vfs-injector.exe`), the shim and payload
+  DLLs, and the test probes are Windows binaries cross-built by
+  `bin/build-windows`; `vfs_proton::artifacts::WINDOWS_ARTIFACTS` is the one list
+  of them.
+- **Launch.** The injector argv and the environment the shim reads are pure
+  functions (`vfs_proton::launch`), so they are unit-tested without Wine. A
+  launch lasts as long as anything runs in the prefix, not only the program it
+  started (a mod loader that starts the game and exits keeps it alive), and
+  `LaunchHandle` lets the host poll or stop it.
+
+### 3.11 Embedding — `vfs-embed`
+
+`vfs-embed` is the one crate a host names. It owns a `Session`: the roots, the
+provider graph each root serves, the ring the injected shim talks over, and the
+launch (Windows or Proton). `vfs.exe` and the daemon are hosts like any other;
+if a host has to reach past `vfs-embed`, the fix belongs in `vfs-embed`. It
+re-exports what a host needs (the provider and composition types, the storage
+types, and a `proton` module for runtime, prefix and GPU probes). Its Proton
+code is `session/proton/`; Windows launch and staging are `session/windows.rs`
+and `session/stage.rs`.
 
 ---
 
@@ -473,7 +557,9 @@ closed**: a child whose injection fails, whose shim reports a bootstrap failure,
 that dies early, or that is not ready within the launch's ready timeout is
 terminated and its `CreateProcess` call returns `FALSE` (`ERROR_PROCESS_ABORTED`).
 A child is never released without the shim, so the failure mode is a launch that
-errors, not an unvirtualised game that writes to the real disk. The wait is the
+errors, not an unvirtualised game that writes to the real disk. The refusal
+reaches the launcher: the shim lists the children it killed beside the ready
+file, and the host reports them. The wait is the
 launch's own (`LaunchOpts::ready_timeout`, else 180 s), which the injector passes
 down in `VFS_READY_TIMEOUT_SECS`; every child is injected, none is skipped. The
 child's image identity is scoped so the parent's does not leak into it.
@@ -539,8 +625,8 @@ different ones in different code paths.
 Any hook that answers differently from its siblings produces a program that
 believes a file both exists and does not. Both failure directions are real: a
 false negative makes content silently invisible (this is what suppressed
-Skyrim's intro video), and a false positive leaks a file the snapshot
-deliberately hides.
+Skyrim's intro video), and a false positive leaks a file the sealed
+view deliberately hides.
 
 Every one of these entry points is hooked, they share one implementation body
 where the shapes allow, and cross-API agreement is a test rather than a
@@ -577,15 +663,15 @@ and remain stable across the restart-scan and single-entry-at-a-time protocols
 NT allows. It is also stateful: a directory handle carries a cursor, so the
 listing is built once per scan and served in slices.
 
-It must **not** show the union of real and virtual entries. This section said
-it must until gate 4, and the shim did merge that way; both were wrong for the
-same reason §4.9 gives. A directory listing is a spelling of the paths it
-names, so the sealed root applies to it in full: under a managed root the
-director's `readdir` is the whole answer, never merged with the real directory
-behind the mount. The only other thing that may appear is the shim-local write
-overlay's own entries, and only where the director cannot be asked at all. See
-`serve_dir_query` in `hook.rs`, and `docs/escape-matrix.md`'s "Gate 4, Task 8b"
-for the fall-through this replaced and the test that holds it closed.
+It must **not** show the union of real and virtual entries. An earlier version
+of the shim merged them, and was wrong for the same reason §4.9 gives. A
+directory listing is a spelling of the paths it names, so the sealed root applies
+to it in full: under a managed root the director's `readdir` is the whole
+answer, never merged with the real directory behind the mount. If the director
+cannot be asked, the listing is empty rather than drained from disk. See
+`serve_dir_query` in `vfs-shim/src/hook/dirquery.rs`, and
+[`escape-matrix.md`](./escape-matrix.md) for the fall-through this replaced and
+the test that holds it closed.
 
 ### 4.9 Isolation
 
@@ -638,14 +724,21 @@ Content source is not a factor: zip and disk providers measure the same
 The system's characteristic failure is **silence** — work that is skipped rather
 than work that errors. Tests are shaped around that.
 
-- **Pure layers are unit-tested** (`vfs-core`, `vfs-redirect`, `vfs-shared`,
-  `vfs-ipc`): merge order, tombstones, case folding, wildcards, ring state
-  transitions.
+- **Pure layers are unit-tested** (`vfs-core`, `vfs-redirect`, `vfs-ntlayout`,
+  `vfs-registry`, `vfs-ipc`, `vfs-pe`): merge order, tombstones, case folding,
+  wildcards, NT byte layouts, ring state transitions. They build and test on
+  Linux.
 - **Hook behaviour is tested in-process.** Integration binaries install the real
   detours into the test process and then use ordinary `std::fs` and raw NT calls
-  against a live engine. One install per process, so every
-  `#[test]` in `vfs-shim/tests/` re-executes itself in a fresh process (`tests/common`), and the
-  scenarios are grouped into a few binaries by concern.
+  against a live director (a real one, or the fake in `tests/fakedirector`).
+  One install per process, so every `#[test]` in `vfs-shim/tests/`
+  re-executes itself in a fresh process (`tests/common`), and the scenarios are
+  grouped into a few binaries by concern. These are Windows executables: on
+  Linux they run under Wine with `bin/wine-shim-tests`.
+- **The Proton path is tested end to end** by `#[ignore]`d `vfs-embed` tests
+  that launch Windows fixtures under GE-Proton against a native director. A test
+  whose prerequisite is missing prints `SKIP` and passes; `VFS_TEST_REQUIRE_ALL=1`
+  makes a skip a failure (see the root README).
 - **Every naming form is covered, not just the convenient one.** The
   relative-name battery exercises each decoding hook through a real directory
   handle, because Win32 decides on its own whether a relative path becomes an
@@ -691,7 +784,7 @@ on with `VFS_SHIM_STATS_LOG` and answers questions counters normally cannot:
   times, and a deduplicated list hides exactly the path that matters;
 - **every directory enumeration** with its filter, entry count, and which
   mechanism answered it — `director`, `contained` (under a root, but the
-  director could not be asked: the write overlay alone), or `OS` (outside every
+  director could not be asked: the listing is empty), or `OS` (outside every
   root). "Listed `Data`, got nothing" and "never listed `Data`" are different
   bugs with identical symptoms, and so are "the director listed it" and
   "something else did";
@@ -712,26 +805,31 @@ observer before concluding the process is idle.
 | crate | role |
 |---|---|
 | `vfs-core` | pure merged-tree resolver: layers, tombstones, case folding, wildcards |
-| `vfs-shared` | bitness-neutral shared snapshot layout |
 | `vfs-provider` | provider contract: `Capabilities`, `VPath`, `Provider`, conformance suite |
-| `vfs-protocol` | ring wire codecs and opcodes (re-exports the provider contract for existing importers) |
-| `vfs-ipc` | control ring + bulk arena, OS-free |
-| `vfs-win` | Windows shared memory and events |
+| `vfs-protocol` | ring wire codecs and opcodes, the shim bootstrap config (`VFSC` v2); re-exports the provider contract |
+| `vfs-ipc` | control ring + bulk arena + read cache, OS-free |
+| `vfs-win` | Windows shared memory, events and volume lookups |
+| `vfs-unix` | Unix shared memory: the file-backed ring (the mirror of `vfs-win`) |
 | `vfs-zip` | ZIP64 central directory, Stored windows, `ZipProvider` |
-| `vfs-compose` | read-only provider combinators: layered, overlay, router, subdir, inline |
+| `vfs-compose` | provider combinators: layered, overlay (copy-up), router, subdir, seekable, readonly, disk, memory, inline, `MountGraph` |
 | `vfs-storage` | pull-through cache for slow sources + named persistent layers, on `vfs-block-store` |
 | `vfs-block-store` | deduplicating, compressing block store (redb index + zstd packs) |
-| `vfs-source` | declarative spec → provider, incl. `RemoteProvider` gRPC plugins |
-| `vfs-director` | FUSE kernel, session, staging, launch |
+| `vfs-source` | declarative spec to provider, incl. `RemoteProvider` gRPC plugins |
+| `vfs-director` | the kernel: root to provider table, handle namespace, ring server, staging, registry host |
+| `vfs-embed` | **the embeddable API**: `Session`, roots, composition, serve, launch (Windows and Proton) |
+| `vfs-proton` | GE-Proton install, prefix, Wine launch, Steam and NVAPI probes; the Windows artefact list |
 | `vfs-registry` | registry overlay tree, its file format, the merge with a real key, NT query layouts |
-| `vfs-directord` | daemon + CLI |
+| `vfs-directord` | daemon + `vfs` CLI (a host of `vfs-embed`) |
 | `vfs-control` | gRPC contract + config schema |
 | `vfs-env` | every `VFS_*` switch, defined once, with a drift test |
-| `vfs-redirect` | pure redirect-decision core |
-| `vfs-shim` / `vfs-shim-dll` | NT detours, FUSE client, synthetic handles, sections |
-| `vfs-payload` | `no_std` pre-init hook payload |
-| `vfs-inject` | injection, PE parsing, process creation |
-| `vfs-fixture-*` | test fixtures |
+| `vfs-redirect` | pure path core: root map and canonicalisation |
+| `vfs-ntlayout` | pure NT byte layouts and decisions for the shim's hooks |
+| `vfs-shim` / `vfs-shim-dll` | NT detours, the director client, synthetic handles, sections, registry hooks |
+| `vfs-payload` | `no_std` pre-init hook payload (its own workspace) |
+| `vfs-inject` | injection and process creation (`vfs-injector`) |
+| `vfs-pe` | pure PE byte parsing, so any host can stage Windows executables |
+| `vfs-fixture-*` | Windows probe programs the tests run under the shim |
+| `vfs-testkit` | dev-only helpers shared by integration tests |
 | `vfs-bench` | `ring-bench` (ring round trips) and `skyrim-live` (live Skyrim launch harness, Windows) |
 
 Dependency direction is enforced by the split: pure crates never learn about the
@@ -741,12 +839,13 @@ OS, and the zip provider never learns about the host.
 
 ## 9. Known limitations
 
-- **Windows x64 only.** The design is portable in principle; the implementation
-  is not.
+- **Windows x64 guests only.** The game and the shim are Windows x64 code. A
+  Linux host runs them under GE-Proton's Wine (§3.10); there is no native Linux
+  game support, and no macOS host.
 - **Stored zip entries only.** Deflate would defeat random access. Archives are
   expected to be repacked Stored.
-- **Copy-on-write is partial.** Read-side whiteouts and upper-wins are
-  implemented; full create/write-through is outstanding.
+- **Router `readdir` is single-dispatch**, not the cross-route union the
+  provider design calls for.
 - **Anti-cheat.** The techniques here are indistinguishable from those an
   anti-cheat system exists to detect. This is a single-player modding tool.
 - **Per-child staging recursion** for sub-processes is designed but not
