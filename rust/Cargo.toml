@@ -32,6 +32,9 @@ members = [
   "crates/vfs-directord",
   "crates/vfs-ipc",
   "crates/vfs-inject",
+  # Pure NT byte layouts and decisions (directory records, dispositions, object names)
+  # for the shim, split out so they build and test on any host.
+  "crates/vfs-ntlayout",
   "crates/vfs-redirect",
   "crates/vfs-director",
   "crates/vfs-embed",

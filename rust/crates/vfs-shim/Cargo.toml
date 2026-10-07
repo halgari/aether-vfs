@@ -6,6 +6,8 @@ license = "GPL-3.0-only"
 
 [dependencies]
 vfs-redirect = { path = "../vfs-redirect" }
+# Pure NT layouts and decisions the hooks apply.
+vfs-ntlayout = { path = "../vfs-ntlayout" }
 vfs-shared = { path = "../vfs-shared" }
 vfs-core = { path = "../vfs-core" }
 vfs-protocol = { path = "../vfs-protocol" }

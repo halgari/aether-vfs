@@ -305,16 +305,7 @@ pub const STATUS_SECTION_TOO_BIG: NTSTATUS = 0xC000_0040u32 as i32;
 /// create or overwrite aimed at an existing *directory* must report, rather
 /// than the generic `STATUS_UNSUCCESSFUL` every other provider error gets.
 pub const STATUS_FILE_IS_A_DIRECTORY: NTSTATUS = 0xC000_00BAu32 as i32;
-/// `FILE_SUPERSEDED` disposition-information (an existing object was
-/// replaced by `FILE_SUPERSEDE`).
-pub const FILE_SUPERSEDED: usize = 0;
-/// `FILE_OPENED` disposition-information for a synthetic open's IoStatusBlock.
-pub const FILE_OPENED: usize = 1;
-/// `FILE_CREATED` disposition-information (a fresh object was created).
-pub const FILE_CREATED: usize = 2;
-/// `FILE_OVERWRITTEN` disposition-information (an existing object was
-/// truncated in place by `FILE_OVERWRITE`/`FILE_OVERWRITE_IF`).
-pub const FILE_OVERWRITTEN: usize = 3;
+pub use vfs_ntlayout::{FILE_CREATED, FILE_OPENED};
 
 /// `SEC_IMAGE` — PE image mapping.
 pub const SEC_IMAGE: u32 = 0x0100_0000;
