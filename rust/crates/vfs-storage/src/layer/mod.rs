@@ -33,11 +33,15 @@ use vfs_provider::{
     OPEN_EXCL, OPEN_TRUNC, OPEN_WRITE,
 };
 
+mod path;
+
 use crate::catalog::EntryRec;
 use crate::durable::FreshFiles;
 use crate::ids::{layer_file_id, new_guid, Guid};
 use crate::layer_io::{FileCell, FileState};
 use crate::storage::{Storage, StorageError};
+
+use path::{folded_path, LPath};
 
 fn lock<T>(m: &Mutex<T>) -> Result<MutexGuard<'_, T>, i32> {
     m.lock().map_err(|_| map_io_err())
@@ -57,56 +61,6 @@ fn now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs() as i64)
-}
-
-/// A request path, split into components in their original spelling.
-struct LPath {
-    parts: Vec<String>,
-    folded: String,
-}
-
-impl LPath {
-    /// Backslashes as slashes, empty components dropped; `.` and `..` are
-    /// refused rather than walked.
-    fn parse(rel: &str) -> Result<Self, i32> {
-        let s = rel.replace('\\', "/");
-        let parts: Vec<String> = s
-            .split('/')
-            .filter(|c| !c.is_empty())
-            .map(str::to_owned)
-            .collect();
-        if parts.iter().any(|c| c == "." || c == "..") {
-            return Err(bad_request());
-        }
-        let folded = fold(&parts.join("/"));
-        Ok(LPath { parts, folded })
-    }
-
-    fn is_root(&self) -> bool {
-        self.parts.is_empty()
-    }
-
-    fn name(&self) -> &str {
-        self.parts.last().map_or("", String::as_str)
-    }
-}
-
-/// The folded path [`LPath::parse`] gives for `rel`, without the components:
-/// what a lookup that creates nothing needs. `getattr` runs for every
-/// metadata question the overlay above passes down — nearly always for a
-/// path this layer does not hold — so it is kept to two allocations.
-fn folded_path(rel: &str) -> Result<String, i32> {
-    let mut joined = String::with_capacity(rel.len());
-    for c in rel.split(['/', '\\']).filter(|c| !c.is_empty()) {
-        if c == "." || c == ".." {
-            return Err(bad_request());
-        }
-        if !joined.is_empty() {
-            joined.push('/');
-        }
-        joined.push_str(c);
-    }
-    Ok(fold(&joined))
 }
 
 /// One open handle.
