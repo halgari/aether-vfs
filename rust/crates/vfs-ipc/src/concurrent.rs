@@ -152,7 +152,7 @@ impl Permits<'_> {
     /// ([`ring::Abandon::Retired`]). Those permits are not returned when
     /// this is dropped; [`DataGate::reclaim`] takes each back once its slot
     /// is no longer `ABANDONED`.
-    pub fn retire(&mut self, slots: &[u32]) {
+    pub(crate) fn retire(&mut self, slots: &[u32]) {
         for &slot in slots {
             if self.n == 0 {
                 return;

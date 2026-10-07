@@ -79,7 +79,7 @@ fn filetime_now() -> u64 {
 /// maps these to NT statuses: `ST_BAD_REQUEST` to `STATUS_INVALID_PARAMETER` (the spec's answer
 /// for names and data over the limits), `ST_NOT_FOUND` to `STATUS_OBJECT_NAME_NOT_FOUND` and
 /// `ST_EXISTS` to `STATUS_OBJECT_NAME_COLLISION`.
-pub fn reg_status(e: RegError) -> i32 {
+pub(crate) fn reg_status(e: RegError) -> i32 {
     match e {
         RegError::NameTooLong | RegError::DataTooLarge | RegError::InvalidPath => ST_BAD_REQUEST,
         RegError::NotFound => ST_NOT_FOUND,

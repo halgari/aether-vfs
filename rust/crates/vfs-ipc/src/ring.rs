@@ -35,7 +35,7 @@ impl Geom {
     pub fn slot_off(&self, slot: u32) -> usize {
         RING_HEADER_SIZE + slot as usize * self.slot_stride as usize
     }
-    pub fn payload_off(&self, slot: u32) -> usize {
+    pub(crate) fn payload_off(&self, slot: u32) -> usize {
         self.slot_off(slot) + SLOT_HEADER_SIZE
     }
 }

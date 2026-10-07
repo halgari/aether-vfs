@@ -66,7 +66,7 @@ pub async fn connect_or_spawn(
 /// Where an auto-spawned daemon's stderr goes: `<discovery>.daemon.log`. A
 /// file rather than a pipe, because the detached daemon outlives the CLI
 /// that spawned it.
-pub fn daemon_log_path(discovery_path: &std::path::Path) -> PathBuf {
+pub(crate) fn daemon_log_path(discovery_path: &std::path::Path) -> PathBuf {
     let mut p = discovery_path.as_os_str().to_os_string();
     p.push(".daemon.log");
     PathBuf::from(p)
@@ -601,7 +601,7 @@ pub fn write_layer_flag_entry(path: &str) -> Result<vfs_control::SourceEntry, St
 /// Only the first two `=` split, so a location may itself contain one. The
 /// name is what a launch path spells as `{NAME}\…`; the location is where
 /// the program sees the root (a `C:\…` path inside the prefix on Linux).
-pub fn parse_root_flag(s: &str) -> Result<vfs_control::RootEntry, String> {
+pub(crate) fn parse_root_flag(s: &str) -> Result<vfs_control::RootEntry, String> {
     let bad = || format!("--root expects ID=NAME=LOCATION, got `{s}`");
     let mut parts = s.splitn(3, '=');
     let (Some(id), Some(name), Some(location)) = (parts.next(), parts.next(), parts.next()) else {

@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 // (bottom of this file) keeps it that way. Storage too: `vfs_embed::Storage`
 // is `vfs-storage`'s, re-exported.
 use vfs_embed::{
-    stack_layers, LaunchOpts, Provider, RootId, RootSources, Session, SourceKey, Storage,
+    LaunchOpts, Provider, RootId, RootSources, Session, SourceKey, Storage,
     StorageError,
 };
 
@@ -33,7 +33,7 @@ use vfs_embed::{
 /// [`vfs_embed::compose_root`].
 ///
 /// A source with no explicit `root` defaults to root `0`; sources sharing a
-/// root are combined with [`stack_layers`] in declaration order (later wins),
+/// root are combined with [`vfs_embed::stack_layers`] in declaration order (later wins),
 /// exactly the documented flat-`[[source]]`-list sugar — generalized here to
 /// however many roots the config declares rather than assuming there is only
 /// one. A source flagged `write_layer` is not one of those layers: it becomes
@@ -53,7 +53,8 @@ use vfs_embed::{
 /// providers this function returns are used directly by its own tests,
 /// addressed via [`vfs_embed::VPath`], not through a session's ring/IPC
 /// path.
-pub fn build_provider_graph(
+#[cfg(test)]
+pub(crate) fn build_provider_graph(
     cfg: &vfs_control::SessionConfig,
 ) -> Result<BTreeMap<RootId, Arc<dyn Provider>>, String> {
     cfg.validate_roots()?;
@@ -78,7 +79,7 @@ pub fn build_provider_graph(
         let mounts = match by_root.remove(&root) {
             Some(stack) => vec![(
                 String::new(),
-                stack_layers(stack).map_err(|e| e.to_string())?,
+                vfs_embed::stack_layers(stack).map_err(|e| e.to_string())?,
             )],
             None => Vec::new(),
         };
@@ -156,7 +157,7 @@ struct SessionEntry {
 }
 
 impl LiveSession {
-    pub fn next_source_id(&self) -> u64 {
+    pub(crate) fn next_source_id(&self) -> u64 {
         self.next_source_id.fetch_add(1, Ordering::Relaxed)
     }
 
@@ -591,7 +592,7 @@ impl SessionRegistry {
     }
 
     /// The ids of the live sessions writing into storage layer `name`, sorted.
-    pub fn layer_users(&self, name: &str) -> Vec<String> {
+    pub(crate) fn layer_users(&self, name: &str) -> Vec<String> {
         let Ok(map) = self.inner.lock() else {
             return Vec::new();
         };

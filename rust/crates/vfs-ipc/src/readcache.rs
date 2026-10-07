@@ -286,7 +286,8 @@ pub struct FileRef {
 
 impl FileRef {
     /// Whether reads through this handle may be served from the cache.
-    pub fn cacheable(&self) -> bool {
+    #[cfg(test)]
+    pub(crate) fn cacheable(&self) -> bool {
         self.version.is_some()
     }
 

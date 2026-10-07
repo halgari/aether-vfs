@@ -120,7 +120,7 @@ impl Director {
 
     /// The registry overlay changed outside a host write (a layer attached or detached): bump
     /// and publish the generation. Host writes publish on their own ([`RegistryHost`]).
-    pub fn registry_changed(&self) {
+    pub(crate) fn registry_changed(&self) {
         self.reg_gen.changed();
     }
 

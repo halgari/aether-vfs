@@ -381,14 +381,9 @@ impl IpcServe {
         std::fs::write(path, body).map_err(|e| format!("write thin config: {e}"))
     }
 
-    /// Windows-only, with [`Self::apply_env_roots`]: it publishes the section
-    /// name and both event names, none of which exist in the file-backed mode.
-    #[cfg(windows)]
-    pub fn apply_env(&self, virtual_root: &str, thin_cfg: &std::path::Path) {
-        self.apply_env_roots(virtual_root, &[], thin_cfg, false)
-    }
-
-    /// [`Self::apply_env`] for a session that virtualizes more than one root.
+    /// Windows-only: publishes the section name and both event names, none of
+    /// which exist in the file-backed mode. For a session that virtualizes
+    /// more than one root, pass the extra roots.
     ///
     /// `extra_roots` is `(id, path)` for every root **beyond root 0**, which
     /// `virtual_root` names. The shim needs the full set because the root id

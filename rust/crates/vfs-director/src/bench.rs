@@ -57,13 +57,9 @@ impl Timeline {
         self.start.elapsed()
     }
 
-    pub fn phases(&self) -> &[Phase] {
-        &self.phases
-    }
-
     /// Time from the previous mark to each mark, so a slow stage stands out
     /// rather than being hidden in a cumulative total.
-    pub fn deltas(&self) -> Vec<(String, Duration, Duration)> {
+    fn deltas(&self) -> Vec<(String, Duration, Duration)> {
         let mut out = Vec::with_capacity(self.phases.len());
         let mut prev = Duration::ZERO;
         for p in &self.phases {
@@ -204,7 +200,7 @@ fn find_window(pid: u32) -> Option<(u32, u32)> {
 
 /// Find a running process by image name, returning its pid.
 #[cfg(windows)]
-pub fn find_pid(image_name: &str) -> Option<u32> {
+fn find_pid(image_name: &str) -> Option<u32> {
     use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
@@ -238,7 +234,7 @@ pub fn find_pid(image_name: &str) -> Option<u32> {
 }
 
 #[cfg(not(windows))]
-pub fn find_pid(_image_name: &str) -> Option<u32> {
+fn find_pid(_image_name: &str) -> Option<u32> {
     None
 }
 

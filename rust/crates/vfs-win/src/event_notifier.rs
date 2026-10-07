@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use vfs_ipc::Notifier;
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
 use windows_sys::Win32::System::Threading::{
-    CreateEventW, OpenEventW, ResetEvent, SetEvent, WaitForSingleObject,
+    CreateEventW, OpenEventW, SetEvent, WaitForSingleObject,
 };
 
 const EVENT_ALL_ACCESS: u32 = 0x1F_0003;
@@ -190,13 +190,6 @@ unsafe impl Sync for EventNotifier {}
 
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(core::iter::once(0)).collect()
-}
-
-#[allow(dead_code)]
-fn reset(ev: HANDLE) {
-    unsafe {
-        let _ = ResetEvent(ev);
-    }
 }
 
 #[cfg(test)]

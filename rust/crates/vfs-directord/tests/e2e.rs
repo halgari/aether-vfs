@@ -365,11 +365,11 @@ fn ensure_inject_artifacts() {
 }
 
 /// `Session::launch` configures the injected child through **process-global**
-/// environment variables (`IpcServe::apply_env`'s own doc comment: "for the
+/// environment variables (`IpcServe::apply_env_roots`'s own comment: "for the
 /// injected child (and single-session hosts)"). Any two tests in this binary
 /// that each create a session and launch a real child process race on that
 /// global env under the default (parallel) test harness — whichever
-/// session's `apply_env` fires last wins for the whole process, so a child
+/// session's `apply_env_roots` fires last wins for the whole process, so a child
 /// can silently connect to the *other* test's ring/session instead of its
 /// own. Flip-tested: without this lock, running this file's launching tests
 /// together is intermittently flaky (a write lands nowhere the assertions
