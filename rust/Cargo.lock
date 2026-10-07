@@ -2610,6 +2610,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
+name = "vfs-bench"
+version = "0.1.0"
+dependencies = [
+ "vfs-compose",
+ "vfs-core",
+ "vfs-director",
+ "vfs-embed",
+ "vfs-env",
+ "vfs-ipc",
+ "vfs-protocol",
+ "vfs-provider",
+ "vfs-storage",
+ "vfs-win",
+ "vfs-zip",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "vfs-block-store"
 version = "0.1.0"
 dependencies = [
@@ -2673,10 +2691,10 @@ dependencies = [
  "vfs-redirect",
  "vfs-registry",
  "vfs-shim",
+ "vfs-testkit",
  "vfs-unix",
  "vfs-win",
  "vfs-zip",
- "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2693,15 +2711,13 @@ dependencies = [
  "toml",
  "tonic",
  "tracing-subscriber",
- "vfs-compose",
  "vfs-control",
  "vfs-director",
  "vfs-embed",
  "vfs-env",
  "vfs-protocol",
  "vfs-source",
- "vfs-win",
- "vfs-zip",
+ "vfs-testkit",
 ]
 
 [[package]]
@@ -2795,18 +2811,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "vfs-launch"
-version = "0.1.0"
-dependencies = [
- "vfs-core",
- "vfs-embed",
- "vfs-ipc",
- "vfs-protocol",
- "vfs-server",
- "vfs-zip",
-]
-
-[[package]]
 name = "vfs-pe"
 version = "0.1.0"
 
@@ -2814,8 +2818,11 @@ version = "0.1.0"
 name = "vfs-protocol"
 version = "0.1.0"
 dependencies = [
+ "vfs-core",
+ "vfs-ipc",
  "vfs-provider",
  "vfs-registry",
+ "vfs-shared",
 ]
 
 [[package]]
@@ -2850,34 +2857,6 @@ name = "vfs-registry"
 version = "0.1.0"
 dependencies = [
  "vfs-core",
-]
-
-[[package]]
-name = "vfs-ring-harness"
-version = "0.1.0"
-dependencies = [
- "vfs-compose",
- "vfs-core",
- "vfs-director",
- "vfs-env",
- "vfs-ipc",
- "vfs-protocol",
- "vfs-provider",
- "vfs-shared",
- "vfs-shim",
- "vfs-storage",
- "vfs-unix",
- "vfs-win",
-]
-
-[[package]]
-name = "vfs-server"
-version = "0.1.0"
-dependencies = [
- "vfs-core",
- "vfs-ipc",
- "vfs-protocol",
- "vfs-shared",
 ]
 
 [[package]]
@@ -2930,7 +2909,6 @@ dependencies = [
  "tonic-prost-build",
  "vfs-compose",
  "vfs-control",
- "vfs-director",
  "vfs-provider",
  "vfs-zip",
 ]
@@ -2949,6 +2927,10 @@ dependencies = [
  "vfs-core",
  "vfs-provider",
 ]
+
+[[package]]
+name = "vfs-testkit"
+version = "0.1.0"
 
 [[package]]
 name = "vfs-unix"
@@ -2971,8 +2953,8 @@ dependencies = [
 name = "vfs-zip"
 version = "0.1.0"
 dependencies = [
+ "tempfile",
  "vfs-core",
- "vfs-protocol",
  "vfs-provider",
 ]
 
@@ -3532,16 +3514,6 @@ name = "xml-rs"
 version = "0.8.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e450f9b2ed1dff33c94c12589a87338689467b9c4f5d8a5710bd09a847d2c8a7"
-
-[[package]]
-name = "xtask-descriptor"
-version = "0.1.0"
-dependencies = [
- "vfs-core",
- "vfs-ipc",
- "vfs-protocol",
- "vfs-shared",
-]
 
 [[package]]
 name = "xxhash-rust"

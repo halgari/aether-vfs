@@ -26,7 +26,7 @@ pub struct SharedMapping {
 }
 
 // SAFETY: the mapped pages are shared memory; all concurrent access is governed
-// by the vfs-ipc ring protocol (atomics + seqlock), the same rationale that
+// by the vfs-ipc ring protocol (atomics), the same rationale that
 // makes `SharedSeg` itself `Send + Sync`.
 #[allow(unsafe_code)]
 unsafe impl Send for SharedMapping {}
@@ -214,6 +214,18 @@ impl SharedMapping {
     /// Raw start of the mapped view (for carving an arena after the ring).
     pub fn as_mut_ptr(&self) -> *mut u8 {
         self.view as *mut u8
+    }
+}
+
+impl vfs_ipc::RingBacking for SharedMapping {
+    fn seg(&self) -> &SharedSeg {
+        SharedMapping::seg(self)
+    }
+    fn len(&self) -> usize {
+        SharedMapping::len(self)
+    }
+    fn as_mut_ptr(&self) -> *mut u8 {
+        SharedMapping::as_mut_ptr(self)
     }
 }
 

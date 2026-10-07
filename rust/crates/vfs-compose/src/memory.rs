@@ -16,7 +16,8 @@
 //! it cannot be written to (they assert a write with no writable provider is
 //! refused). Making `InlineProvider` writable would change behavior under
 //! every one of those callers rather than add a capability, so this is a
-//! sibling instead, not a promotion.
+//! sibling instead, not a promotion. The two also fold directories differently
+//! on purpose (see `inline.rs`'s module docs), so they are not merged.
 //!
 //! **Why this lives in `vfs-compose` and not `vfs-provider` or `vfs-source`.**
 //! `vfs-provider` already has an in-memory `ReadWrite` type
@@ -36,19 +37,14 @@
 //! it, neither route paying for the other's dependencies.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use vfs_core::fold;
 use vfs_provider::{
     bad_fh, bad_request, exists, is_dir, map_io_err, not_a_dir, not_found, Access, Capabilities,
-    CaseMatch, DirEntry, Handle, Provider, SetAttr, Stat, VPath, KIND_DIR, KIND_FILE, OPEN_CREATE,
-    OPEN_EXCL, OPEN_TRUNC,
+    CaseMatch, DirEntry, Handle, HandleTable, Provider, SetAttr, Stat, VPath, KIND_DIR, KIND_FILE,
+    OPEN_CREATE, OPEN_EXCL, OPEN_TRUNC,
 };
-
-fn normalize(path: &str) -> String {
-    path.replace('\\', "/").trim_matches('/').to_string()
-}
 
 /// The `"path/"` string a child key must start with, or `""` for the provider
 /// root (whose children carry no prefix at all). The same convention `readdir`
@@ -118,7 +114,7 @@ fn stat_of(files: &HashMap<String, Vec<u8>>, dirs: &HashSet<String>, path: &str)
 /// function's git history for the reproductions.
 ///
 /// Ancestors resolve independently of the leaf, one path component at a
-/// time — mirroring `vfs-director/src/disk.rs`'s `resolve_fold_equal`, and
+/// time — mirroring `vfs-compose/src/disk.rs`'s `resolve_fold_equal`, and
 /// for the same reason: `fold` is not length-preserving (`İ` is 2 bytes,
 /// folds to 3), so a folded prefix can never be sliced off an unfolded key
 /// by byte length, only walked component by component. The moment a
@@ -250,8 +246,7 @@ pub struct MemoryProvider {
     /// is only for the case a file map alone cannot express: an empty
     /// directory.
     dirs: Mutex<HashSet<String>>,
-    next: AtomicU64,
-    opens: Mutex<HashMap<Handle, String>>,
+    opens: HandleTable<String>,
     /// Folded key → the spelling `files`/`dirs` is actually keyed by. Consulted
     /// only when an exact lookup misses, so the common path pays no fold.
     /// Maintained alongside every mutation of `files` and `dirs`; a stale entry
@@ -278,15 +273,14 @@ impl MemoryProvider {
         let mut files = HashMap::new();
         let mut by_fold = HashMap::new();
         for (p, b) in entries {
-            let key = normalize(p.as_ref());
+            let key = vfs_core::trim_rel(p.as_ref());
             by_fold.insert(fold(&key), key.clone());
             files.insert(key, b.as_ref().to_vec());
         }
         Self {
             files: Mutex::new(files),
             dirs: Mutex::new(HashSet::new()),
-            next: AtomicU64::new(1),
-            opens: Mutex::new(HashMap::new()),
+            opens: HandleTable::new(),
             by_fold: Mutex::new(by_fold),
         }
     }
@@ -310,7 +304,7 @@ impl Provider for MemoryProvider {
     }
 
     fn getattr(&self, p: VPath) -> Result<Option<Stat>, i32> {
-        let path = normalize(p.rel);
+        let path = vfs_core::trim_rel(p.rel);
         let files = self.files.lock().map_err(|_| map_io_err())?;
         let dirs = self.dirs.lock().map_err(|_| map_io_err())?;
         let by_fold = self.by_fold.lock().map_err(|_| map_io_err())?;
@@ -319,7 +313,7 @@ impl Provider for MemoryProvider {
     }
 
     fn readdir(&self, p: VPath) -> Result<Vec<DirEntry>, i32> {
-        let path = normalize(p.rel);
+        let path = vfs_core::trim_rel(p.rel);
         let files = self.files.lock().map_err(|_| map_io_err())?;
         let dirs = self.dirs.lock().map_err(|_| map_io_err())?;
         let by_fold = self.by_fold.lock().map_err(|_| map_io_err())?;
@@ -361,7 +355,7 @@ impl Provider for MemoryProvider {
     }
 
     fn open(&self, p: VPath, flags: u32) -> Result<(Handle, u64, bool), i32> {
-        let path = normalize(p.rel);
+        let path = vfs_core::trim_rel(p.rel);
         let mut files = self.files.lock().map_err(|_| map_io_err())?;
         let dirs = self.dirs.lock().map_err(|_| map_io_err())?;
         let mut by_fold = self.by_fold.lock().map_err(|_| map_io_err())?;
@@ -388,18 +382,16 @@ impl Provider for MemoryProvider {
         drop(dirs);
         drop(by_fold);
 
-        let h = self.next.fetch_add(1, Ordering::Relaxed);
-        self.opens.lock().map_err(|_| map_io_err())?.insert(h, path);
+        let h = self.opens.insert(path)?;
         Ok((h, size, false))
     }
 
     fn close(&self, h: Handle) -> Result<(), i32> {
-        self.opens.lock().map_err(|_| map_io_err())?.remove(&h).ok_or_else(bad_fh)?;
-        Ok(())
+        self.opens.remove(h).map(|_| ())
     }
 
     fn read_at(&self, h: Handle, offset: u64, buf: &mut [u8]) -> Result<usize, i32> {
-        let path = self.opens.lock().map_err(|_| map_io_err())?.get(&h).cloned().ok_or_else(bad_fh)?;
+        let path = self.opens.get(h)?;
         let files = self.files.lock().map_err(|_| map_io_err())?;
         let body = files.get(&path).ok_or_else(bad_fh)?;
         let start = (offset as usize).min(body.len());
@@ -409,7 +401,7 @@ impl Provider for MemoryProvider {
     }
 
     fn write_at(&self, h: Handle, offset: u64, buf: &[u8]) -> Result<usize, i32> {
-        let path = self.opens.lock().map_err(|_| map_io_err())?.get(&h).cloned().ok_or_else(bad_fh)?;
+        let path = self.opens.get(h)?;
         let mut files = self.files.lock().map_err(|_| map_io_err())?;
         // `open` already created/resolved this path, so this is normally a
         // hit — the existence check only guards the (racy, but possible) case
@@ -431,7 +423,7 @@ impl Provider for MemoryProvider {
     }
 
     fn set_len(&self, h: Handle, len: u64) -> Result<(), i32> {
-        let path = self.opens.lock().map_err(|_| map_io_err())?.get(&h).cloned().ok_or_else(bad_fh)?;
+        let path = self.opens.get(h)?;
         let mut files = self.files.lock().map_err(|_| map_io_err())?;
         let existed = files.contains_key(&path);
         files.entry(path.clone()).or_default().resize(len as usize, 0);
@@ -447,7 +439,7 @@ impl Provider for MemoryProvider {
     }
 
     fn mkdir(&self, p: VPath) -> Result<(), i32> {
-        let path = normalize(p.rel);
+        let path = vfs_core::trim_rel(p.rel);
         let files = self.files.lock().map_err(|_| map_io_err())?;
         let mut dirs = self.dirs.lock().map_err(|_| map_io_err())?;
         let mut by_fold = self.by_fold.lock().map_err(|_| map_io_err())?;
@@ -476,7 +468,7 @@ impl Provider for MemoryProvider {
     /// the process boundary as `STATUS_UNSUCCESSFUL` instead — strictly less
     /// information, for a new number every host would have to learn.
     fn remove(&self, p: VPath) -> Result<(), i32> {
-        let path = normalize(p.rel);
+        let path = vfs_core::trim_rel(p.rel);
         // files before dirs, the order every method here takes them in.
         let mut files = self.files.lock().map_err(|_| map_io_err())?;
         let mut dirs = self.dirs.lock().map_err(|_| map_io_err())?;
@@ -526,8 +518,8 @@ impl Provider for MemoryProvider {
         if from.root != to.root {
             return Err(bad_request());
         }
-        let from_p = normalize(from.rel);
-        let to_p = normalize(to.rel);
+        let from_p = vfs_core::trim_rel(from.rel);
+        let to_p = vfs_core::trim_rel(to.rel);
         if from_p == to_p {
             return Ok(());
         }

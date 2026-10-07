@@ -86,13 +86,13 @@ impl VfsTree {
         }
     }
 
-    pub fn getattr(&self, vpath: &str) -> Option<crate::model::Stat> {
-        use crate::model::{NodeKind, Stat};
+    pub fn getattr(&self, vpath: &str) -> Option<crate::model::TreeStat> {
+        use crate::model::{EntryKind, TreeStat};
         let norm = normalize_vpath(vpath).ok()?;
         let id = self.find(&norm)?;
         match &self.nodes[id as usize].entry {
-            NodeEntry::Dir(_) => Some(Stat { kind: NodeKind::Dir, size: 0, mtime: 0 }),
-            NodeEntry::File(f) => Some(Stat { kind: NodeKind::File, size: f.size, mtime: f.mtime }),
+            NodeEntry::Dir(_) => Some(TreeStat { kind: EntryKind::Dir, size: 0, mtime: 0 }),
+            NodeEntry::File(f) => Some(TreeStat { kind: EntryKind::File, size: f.size, mtime: f.mtime }),
             NodeEntry::Tombstone => None,
         }
     }
@@ -101,9 +101,9 @@ impl VfsTree {
         &self,
         vpath: &str,
         filter: Option<&str>,
-    ) -> Result<Vec<crate::model::DirEntry>, crate::model::VfsError> {
+    ) -> Result<Vec<crate::model::TreeEntry>, crate::model::VfsError> {
         use crate::casefold::cmp_ci;
-        use crate::model::{DirEntry, NodeKind, VfsError};
+        use crate::model::{EntryKind, TreeEntry, VfsError};
         use crate::wildcard::wildcard_match;
 
         let norm = normalize_vpath(vpath).map_err(|_| VfsError::NotFound)?;
@@ -113,27 +113,27 @@ impl VfsTree {
             NodeEntry::File(_) | NodeEntry::Tombstone => return Err(VfsError::NotADirectory),
         };
 
-        let mut out: Vec<DirEntry> = dir
+        let mut out: Vec<TreeEntry> = dir
             .children
             .values()
             .map(|&cid| {
                 let node = &self.nodes[cid as usize];
                 match &node.entry {
-                    NodeEntry::Dir(_) => DirEntry {
+                    NodeEntry::Dir(_) => TreeEntry {
                         name: node.name.clone(),
-                        kind: NodeKind::Dir,
+                        kind: EntryKind::Dir,
                         size: 0,
                         mtime: 0,
                     },
-                    NodeEntry::File(f) => DirEntry {
+                    NodeEntry::File(f) => TreeEntry {
                         name: node.name.clone(),
-                        kind: NodeKind::File,
+                        kind: EntryKind::File,
                         size: f.size,
                         mtime: f.mtime,
                     },
-                    NodeEntry::Tombstone => DirEntry {
+                    NodeEntry::Tombstone => TreeEntry {
                         name: node.name.clone(),
-                        kind: NodeKind::Tombstone,
+                        kind: EntryKind::Tombstone,
                         size: 0,
                         mtime: 0,
                     },
@@ -449,21 +449,21 @@ mod tests {
 
     #[test]
     fn getattr_file_reports_size_and_mtime() {
-        use crate::model::{NodeKind, Stat};
+        use crate::model::{EntryKind, TreeStat};
         let t = build(vec![layer(0, vec![file("data/a.esp", "s", 123, 456)])]).unwrap();
         assert_eq!(
             t.getattr("data/a.esp"),
-            Some(Stat { kind: NodeKind::File, size: 123, mtime: 456 })
+            Some(TreeStat { kind: EntryKind::File, size: 123, mtime: 456 })
         );
     }
 
     #[test]
     fn getattr_dir_reports_dir_kind() {
-        use crate::model::{NodeKind, Stat};
+        use crate::model::{EntryKind, TreeStat};
         let t = build(vec![layer(0, vec![file("data/a.esp", "s", 1, 1)])]).unwrap();
         assert_eq!(
             t.getattr("data"),
-            Some(Stat { kind: NodeKind::Dir, size: 0, mtime: 0 })
+            Some(TreeStat { kind: EntryKind::Dir, size: 0, mtime: 0 })
         );
     }
 
@@ -495,7 +495,7 @@ mod tests {
         let names: Vec<String> = entries.iter().map(|e| e.name.clone()).collect();
         assert_eq!(names, vec!["a.esp", "b.esp"]);
         let a = entries.iter().find(|e| e.name == "a.esp").unwrap();
-        assert_eq!(a.kind, crate::model::NodeKind::Tombstone);
+        assert_eq!(a.kind, crate::model::EntryKind::Tombstone);
     }
 
     #[test]
@@ -566,11 +566,11 @@ mod tests {
 
     #[test]
     fn tombstone_getattr_is_none_and_parent_lists_it() {
-        use crate::model::NodeKind;
+        use crate::model::EntryKind;
         let t = build(vec![layer(0, vec![tomb("data/gone.esp")])]).unwrap();
         assert_eq!(t.getattr("data/gone.esp"), None);
         let entries = t.readdir("data", None).unwrap();
         let e = entries.iter().find(|e| e.name == "gone.esp").unwrap();
-        assert_eq!(e.kind, NodeKind::Tombstone);
+        assert_eq!(e.kind, EntryKind::Tombstone);
     }
 }

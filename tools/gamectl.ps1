@@ -193,7 +193,7 @@ if ($Action.ToLower() -eq 'launch') {
   $repoRoot = Split-Path $PSScriptRoot -Parent
   $liveExe = Join-Path $repoRoot 'rust\target\release\skyrim-live.exe'
   if (-not (Test-Path $liveExe)) {
-    "ERROR: $liveExe not found - build it first:`n  cargo build --release -p vfs-shim-dll`n  cargo build --release --manifest-path crates/vfs-payload/Cargo.toml --target-dir target`n  cargo build --release -p vfs-directord --bin skyrim-live"
+    "ERROR: $liveExe not found - build it first:`n  cargo build --release -p vfs-shim-dll`n  cargo build --release --manifest-path crates/vfs-payload/Cargo.toml --target-dir target`n  cargo build --release -p vfs-bench --bin skyrim-live"
     exit 1
   }
   $shimLog = if ($Arg1) { $Arg1 } else { 'C:\tmp\skyrim-data\perf\bypass-baseline-shim-stats.log' }

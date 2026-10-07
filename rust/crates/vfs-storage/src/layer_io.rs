@@ -57,7 +57,7 @@ use crate::ids::{layer_file_id, Guid};
 use crate::storage::Storage;
 
 /// Blocks per `write_blocks` call when a commit writes a long run.
-const RUN_BLOCKS: u64 = 64;
+pub(crate) const RUN_BLOCKS: u64 = 64;
 
 /// [`RUN_BLOCKS`] for a bulk write ([`vfs_block_store::WriteClass::Bulk`]):
 /// its blocks may be compressed on the GPU, where each call waits for a
@@ -220,7 +220,7 @@ impl FileCell {
             Ok(r) if r.missing.is_empty() && r.bytes == want => {
                 #[cfg(test)]
                 {
-                    let hook = crate::cached::lock(&s.layer_fill_hook).clone();
+                    let hook = crate::util::lock(&s.layer_fill_hook).clone();
                     if let Some(hook) = hook {
                         hook();
                     }
@@ -267,7 +267,7 @@ impl FileCell {
     ) -> Result<usize, i32> {
         #[cfg(test)]
         {
-            let hook = crate::cached::lock(&s.layer_read_hook).clone();
+            let hook = crate::util::lock(&s.layer_read_hook).clone();
             if let Some(hook) = hook {
                 hook();
             }

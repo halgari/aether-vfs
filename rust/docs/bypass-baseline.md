@@ -24,7 +24,7 @@ difference matters: a zero here is not evidence a bypass is closed.
 | Launch | `SkyrimSE.exe` directly (`VFS_SKYRIM_LAUNCH` default, no SKSE, no `VFS_SKYRIM_MODS` overlay) |
 | Managed root | `C:\tmp\skyrim-runtime` (wiped and re-staged before launch) |
 | Overrides / saves / profiles | `C:\tmp\skyrim-data\{overrides,saves,profiles}` (persist across runs) |
-| Binaries | `cargo build --release` for `vfs-shim-dll`, `vfs-payload` (separate workspace), and `vfs-directord --bin skyrim-live`; DLL freshness verified by grepping the built `vfs_shim_dll.dll` for `under-root open outcomes` before launch |
+| Binaries | `cargo build --release` for `vfs-shim-dll`, `vfs-payload` (separate workspace), and `vfs-bench --bin skyrim-live`; DLL freshness verified by grepping the built `vfs_shim_dll.dll` for `under-root open outcomes` before launch |
 | Steam client | already running, settled (~128,000s uptime), offline mode active — `skyrim-live` skips the online CM-Connected wait in that mode and talks to the client via local IPC only; this is `skyrim-live`'s existing, documented behaviour, not something introduced for this measurement |
 | Stats config | `VFS_SHIM_STATS_LOG=C:\tmp\skyrim-data\perf\bypass-baseline-shim-stats.log`, `VFS_SHIM_STATS_INTERVAL_MS` unset (default 250ms — session ran ~245s, well past it) |
 | Wall time | ~245s from launch to the process exiting after `qqq` (includes zip-staging overhead before the ring starts counting; `io_mark_launch()` marks t=0 for the traffic below) |
@@ -320,7 +320,7 @@ than an assumption.
 
 ## Code changes (additive only; no routing behaviour touched)
 
-- **`rust/crates/vfs-directord/src/bin/skyrim-live.rs`**: added
+- **`rust/crates/vfs-bench/src/bin/skyrim-live.rs`**: added
   `print_open_totals()`, called once at the final I/O dump and once per
   10-second heartbeat tick, printing `io_stats::open_totals()` and
   `io_stats::rejected_writes()` to `skyrim-live`'s own stderr. This is the
@@ -488,7 +488,7 @@ headline question rather than answering it cleanly.
 
 `skyrim-live` remaps Skyrim's save/profile location with real NTFS
 junctions, not virtual mounts: `setup_my_games_junctions()`
-(`rust/crates/vfs-directord/src/bin/skyrim-live.rs`, around line 985) links
+(`rust/crates/vfs-bench/src/bin/skyrim-live.rs`, around line 985) links
 `Documents\My Games\Skyrim Special Edition` (and its `Saves` subdirectory)
 straight to `C:\tmp\skyrim-data\profiles` / `saves` at the filesystem level.
 That is a genuinely different mechanism from `session.mount()` (used for the
@@ -877,7 +877,7 @@ real file on disk underneath. `steam_appid.txt` is exactly this shape: it
 lives under the managed root, so its DRM-exception open is subject to this
 change. The one recorded open of it in this run's own outcome table still
 succeeds only because `skyrim-live` writes a copy into the write overlay
-(`crates/vfs-directord/src/bin/skyrim-live.rs:149`, `490-500`) — `Engine::
+(`crates/vfs-bench/src/bin/skyrim-live.rs:149`, `490-500`) — `Engine::
 decide`'s overlay check runs before `RootMap::decide` and finds it there,
 answering `Redirect` into the overlay copy instead of ever reaching the now-
 `Deny`ing snapshot path. The other 15 opens in this run (the staged EXE)

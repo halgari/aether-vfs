@@ -1,6 +1,5 @@
 //! Composition + storage integration through the session registry (no inject).
 
-use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -16,64 +15,13 @@ use vfs_embed::{
     StorageConfig, VPath,
 };
 use vfs_source::build_provider;
+use vfs_testkit::zip::write_stored_zip;
 
-fn write_stored_zip(dir: &Path, entry: &str, content: &[u8]) -> std::path::PathBuf {
+/// A one-entry Stored zip named `layer.zip` inside `dir`.
+fn layer_zip(dir: &Path, entry: &str, content: &[u8]) -> std::path::PathBuf {
     let path = dir.join("layer.zip");
-    let mut buf = Vec::new();
-    let crc = crc32(content);
-    let n = entry.len() as u16;
-    buf.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
-    buf.extend_from_slice(&[0u8; 4]);
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&crc.to_le_bytes());
-    buf.extend_from_slice(&(content.len() as u32).to_le_bytes());
-    buf.extend_from_slice(&(content.len() as u32).to_le_bytes());
-    buf.extend_from_slice(&n.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(entry.as_bytes());
-    buf.extend_from_slice(content);
-    let cd_start = buf.len() as u32;
-    buf.extend_from_slice(&0x0201_4b50u32.to_le_bytes());
-    buf.extend_from_slice(&[0u8; 6]);
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&crc.to_le_bytes());
-    buf.extend_from_slice(&(content.len() as u32).to_le_bytes());
-    buf.extend_from_slice(&(content.len() as u32).to_le_bytes());
-    buf.extend_from_slice(&n.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&[0u8; 8]);
-    buf.extend_from_slice(&0u32.to_le_bytes());
-    buf.extend_from_slice(entry.as_bytes());
-    let cd_size = buf.len() as u32 - cd_start;
-    buf.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
-    buf.extend_from_slice(&[0u8; 4]);
-    buf.extend_from_slice(&1u16.to_le_bytes());
-    buf.extend_from_slice(&1u16.to_le_bytes());
-    buf.extend_from_slice(&cd_size.to_le_bytes());
-    buf.extend_from_slice(&cd_start.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    std::fs::File::create(&path)
-        .unwrap()
-        .write_all(&buf)
-        .unwrap();
+    write_stored_zip(&path, entry, content);
     path
-}
-
-fn crc32(data: &[u8]) -> u32 {
-    let mut crc: u32 = 0xFFFF_FFFF;
-    for &b in data {
-        crc ^= b as u32;
-        for _ in 0..8 {
-            let mask = (crc & 1).wrapping_neg();
-            crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
-        }
-    }
-    !crc
 }
 
 #[test]
@@ -113,7 +61,7 @@ fn registry_layered_disk_sources_top_wins() {
 #[test]
 fn registry_zip_source_reads_entry() {
     let dir = tempfile::tempdir().unwrap();
-    let zip = write_stored_zip(dir.path(), "Data/proof.dat", b"ZIP-BYTES");
+    let zip = layer_zip(dir.path(), "Data/proof.dat", b"ZIP-BYTES");
     let reg = SessionRegistry::new();
     let summary = reg.create("zip".into()).unwrap();
     let be = build_provider(&SourceSpec::Zip {
@@ -443,7 +391,7 @@ async fn add_zip_source_via_grpc() {
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
     let dir = tempfile::tempdir().unwrap();
-    let zip = write_stored_zip(dir.path(), "hello.txt", b"hello");
+    let zip = layer_zip(dir.path(), "hello.txt", b"hello");
     let mut client = connect(&format!("{addr}")).await.unwrap();
     let session = client
         .create_session(CreateSessionReq {

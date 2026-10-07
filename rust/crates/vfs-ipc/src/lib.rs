@@ -4,6 +4,7 @@
 //! All `unsafe` is confined to the `seg` module (`SharedSeg`).
 
 pub mod arena;
+pub mod backing;
 pub mod concurrent;
 pub mod endpoint;
 pub mod layout;
@@ -12,6 +13,7 @@ pub mod readcache;
 pub mod ring;
 pub mod seg;
 
+pub use backing::RingBacking;
 pub use arena::{DataArena, DEFAULT_ARENA_BYTES, DEFAULT_PAYLOAD_CAP, DEFAULT_WORKER_COUNT};
 pub use concurrent::{data_limit, read_fragmented, submit_data, DataGate, Permits, ReadPlan};
 pub use endpoint::{Request, Response, RingClient, RingServer, Unanswered, CLIENT_SPIN_BUDGET};

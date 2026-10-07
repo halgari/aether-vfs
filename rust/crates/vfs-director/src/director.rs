@@ -4,11 +4,11 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock, Weak};
 
-use crate::ops::{
+use vfs_provider::{
     bad_request, is_dir, map_io_err, not_found, read_only, Access, DirEntry, Handle, Provider,
     RootId, SetAttr, Stat, VPath, OPEN_WRITE,
 };
-use crate::path::normalize;
+use vfs_compose::path::normalize;
 use crate::registry::{RegistryGenSink, RegistryGeneration, RegistryHost};
 use vfs_provider::OPEN_APPEND;
 
@@ -41,7 +41,7 @@ struct OpenRec {
 /// the layer-ordered mount list and its reverse-iteration merge. Composition
 /// across several sources — layering at the same path, or placing one at a
 /// distinct sub-path within a root — now happens explicitly in the provider
-/// graph *before* it reaches `mount` (see [`crate::mount_graph::MountGraph`]
+/// graph *before* it reaches `mount` (see [`vfs_compose::MountGraph`]
 /// and `vfs_compose::stack_layers`), where it is visible rather than
 /// implicit here.
 pub struct Director {
@@ -120,7 +120,7 @@ impl Director {
 
     /// The registry overlay changed outside a host write (a layer attached or detached): bump
     /// and publish the generation. Host writes publish on their own ([`RegistryHost`]).
-    pub fn registry_changed(&self) {
+    pub(crate) fn registry_changed(&self) {
         self.reg_gen.changed();
     }
 
@@ -301,7 +301,7 @@ impl Director {
     pub fn read(&self, fh: u64, offset: u64, buf: &mut [u8]) -> Result<usize, i32> {
         let (backend, bh, size, is_dir_flag) = {
             let g = self.opens.lock().map_err(|_| map_io_err())?;
-            let rec = g.get(&fh).ok_or_else(crate::ops::bad_fh)?;
+            let rec = g.get(&fh).ok_or_else(vfs_provider::bad_fh)?;
             if rec.is_dir {
                 return Err(is_dir());
             }
@@ -319,7 +319,7 @@ impl Director {
     pub fn close(&self, fh: u64) -> Result<(), i32> {
         let rec = {
             let mut g = self.opens.lock().map_err(|_| map_io_err())?;
-            g.remove(&fh).ok_or_else(crate::ops::bad_fh)?
+            g.remove(&fh).ok_or_else(vfs_provider::bad_fh)?
         };
         rec.backend.close(rec.bh)
     }
@@ -332,7 +332,7 @@ impl Director {
     pub fn write(&self, fh: u64, offset: u64, buf: &[u8]) -> Result<usize, i32> {
         let (backend, bh, effective_offset) = {
             let g = self.opens.lock().map_err(|_| map_io_err())?;
-            let rec = g.get(&fh).ok_or_else(crate::ops::bad_fh)?;
+            let rec = g.get(&fh).ok_or_else(vfs_provider::bad_fh)?;
             if rec.is_dir {
                 return Err(is_dir());
             }
@@ -359,7 +359,7 @@ impl Director {
     pub fn set_len(&self, fh: u64, len: u64) -> Result<(), i32> {
         let (backend, bh) = {
             let g = self.opens.lock().map_err(|_| map_io_err())?;
-            let rec = g.get(&fh).ok_or_else(crate::ops::bad_fh)?;
+            let rec = g.get(&fh).ok_or_else(vfs_provider::bad_fh)?;
             (Arc::clone(&rec.backend), rec.bh)
         };
         let result = backend.set_len(bh, len);
@@ -379,7 +379,7 @@ impl Director {
     pub fn flush(&self, fh: u64) -> Result<(), i32> {
         let (backend, bh) = {
             let g = self.opens.lock().map_err(|_| map_io_err())?;
-            let rec = g.get(&fh).ok_or_else(crate::ops::bad_fh)?;
+            let rec = g.get(&fh).ok_or_else(vfs_provider::bad_fh)?;
             (Arc::clone(&rec.backend), rec.bh)
         };
         backend.flush(bh)
@@ -417,7 +417,7 @@ impl Director {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ops::OPEN_READ;
+    use vfs_provider::OPEN_READ;
 
     /// What the shim's read cache relies on: a handle is reported immutable
     /// only when the provider that holds it is, even inside an overlay whose
@@ -425,7 +425,7 @@ mod tests {
     /// that has been copied up into the writable layer.
     #[test]
     fn open_info_reports_immutability_per_handle_through_an_overlay() {
-        let base = crate::mount_graph::MountGraph::new(vec![(
+        let base = vfs_compose::MountGraph::new(vec![(
             String::new(),
             Arc::new(vfs_compose::InlineProvider::from_files([
                 ("a.esm", b"base-a".as_slice()),
@@ -534,7 +534,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("f"), b"disk").unwrap();
         let d = Director::new();
-        d.mount(RootId::DEFAULT, Arc::new(crate::DiskProvider::new(&dir))).unwrap();
+        d.mount(RootId::DEFAULT, Arc::new(vfs_compose::DiskProvider::new(&dir))).unwrap();
         let disk = d.open_info(RootId::DEFAULT, "f", OPEN_READ).unwrap();
         assert!(!disk.immutable, "a real directory can change underneath us");
 
@@ -592,7 +592,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let d = Director::new();
-        d.mount(RootId::DEFAULT, Arc::new(crate::DiskProvider::new(&dir))).unwrap();
+        d.mount(RootId::DEFAULT, Arc::new(vfs_compose::DiskProvider::new(&dir))).unwrap();
 
         let (fh, _, _) = d
             .open(RootId::DEFAULT, "w.txt", OPEN_WRITE | vfs_provider::OPEN_CREATE)
@@ -616,7 +616,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("log.txt"), b"one").unwrap();
         let d = Director::new();
-        d.mount(RootId::DEFAULT, Arc::new(crate::DiskProvider::new(&dir))).unwrap();
+        d.mount(RootId::DEFAULT, Arc::new(vfs_compose::DiskProvider::new(&dir))).unwrap();
 
         let (fh, _, _) = d
             .open(RootId::DEFAULT, "log.txt", OPEN_WRITE | vfs_provider::OPEN_APPEND)
@@ -635,7 +635,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("log.txt"), b"0123456789").unwrap();
         let d = Director::new();
-        d.mount(RootId::DEFAULT, Arc::new(crate::DiskProvider::new(&dir))).unwrap();
+        d.mount(RootId::DEFAULT, Arc::new(vfs_compose::DiskProvider::new(&dir))).unwrap();
 
         let (fh, _, _) = d
             .open(RootId::DEFAULT, "log.txt", OPEN_WRITE | vfs_provider::OPEN_APPEND)
@@ -668,8 +668,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("vfs-dirshadow-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let graph = crate::mount_graph::MountGraph::new(vec![
-            ("/".to_string(), Arc::new(crate::DiskProvider::new(&dir)) as Arc<dyn Provider>),
+        let graph = vfs_compose::MountGraph::new(vec![
+            ("/".to_string(), Arc::new(vfs_compose::DiskProvider::new(&dir)) as Arc<dyn Provider>),
             (
                 "/".to_string(),
                 Arc::new(vfs_compose::InlineProvider::from_files([("f", b"x".as_slice())])),
@@ -693,7 +693,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("x.txt"), b"x").unwrap();
         let d = Director::new();
-        d.mount(RootId::DEFAULT, Arc::new(crate::DiskProvider::new(&dir))).unwrap();
+        d.mount(RootId::DEFAULT, Arc::new(vfs_compose::DiskProvider::new(&dir))).unwrap();
         assert!(d.getattr(RootId::DEFAULT, "x.txt").unwrap().is_some());
         d.unmount(RootId::DEFAULT).unwrap();
         assert!(d.getattr(RootId::DEFAULT, "x.txt").unwrap().is_none());

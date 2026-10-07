@@ -1,12 +1,18 @@
-//! In-memory file tree backend for tests (Clojure `inline-provider`).
+//! Read-only in-memory file tree, for tests.
+//!
+//! **Not built on `MemoryProvider` (audit T16, rejected).** The two fold
+//! directories differently on purpose. This provider folds whole paths, so
+//! `Data/Skyrim.esm` and `data/textures/x.dds` share one merged `Data`
+//! directory. `MemoryProvider` gives byte-exact spellings precedence, so
+//! `Data` and `data` stay two directories. Re-implementing this on top of
+//! `MemoryProvider` changed `readdir("Data")` and `getattr("Data/TEXTURES")`
+//! (see the regression test below), so the two stay separate.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
 
 use vfs_provider::{
-    bad_fh, bad_request, map_io_err, not_a_dir, not_found, Capabilities, DirEntry,
-    Handle, Provider, Stat, VPath, KIND_DIR, KIND_FILE, OPEN_WRITE,
+    HandleTable, bad_request, not_a_dir, not_found, Capabilities, DirEntry, Handle,
+    Provider, Stat, VPath, KIND_DIR, KIND_FILE, OPEN_WRITE,
 };
 
 use crate::casefold::{fold_components, fold_strip_prefix};
@@ -22,8 +28,7 @@ pub struct InlineProvider {
     /// is immutable after construction, so unlike `MemoryProvider`'s index this
     /// one needs no maintenance and no lock.
     by_fold: HashMap<String, String>,
-    next: AtomicU64,
-    opens: Mutex<HashMap<u64, (String, Vec<u8>)>>,
+    opens: HandleTable<(String, Vec<u8>)>,
 }
 
 impl InlineProvider {
@@ -35,7 +40,7 @@ impl InlineProvider {
     {
         let mut files = HashMap::new();
         for (p, b) in entries {
-            let path = normalize(p.as_ref());
+            let path = vfs_core::trim_rel(p.as_ref());
             files.insert(
                 path,
                 FileData {
@@ -50,8 +55,7 @@ impl InlineProvider {
         Self {
             files,
             by_fold,
-            next: AtomicU64::new(1),
-            opens: Mutex::new(HashMap::new()),
+            opens: HandleTable::new(),
         }
     }
 
@@ -95,10 +99,6 @@ impl InlineProvider {
     }
 }
 
-fn normalize(path: &str) -> String {
-    path.replace('\\', "/").trim_matches('/').to_string()
-}
-
 /// True if any of `keys` has `query` as a proper fold-equal directory prefix.
 fn dir_has_fold_prefix<'a>(keys: impl Iterator<Item = &'a str>, query: &str) -> bool {
     let query = fold_components(query);
@@ -116,13 +116,13 @@ impl Provider for InlineProvider {
 
     fn getattr(&self, p: VPath) -> Result<Option<Stat>, i32> {
         let path = p.rel;
-        let path = normalize(path);
+        let path = vfs_core::trim_rel(path);
         self.stat(&path)
     }
 
     fn readdir(&self, p: VPath) -> Result<Vec<DirEntry>, i32> {
         let path = p.rel;
-        let path = normalize(path);
+        let path = vfs_core::trim_rel(path);
         if self.stat(&path)?.map(|s| s.kind) != Some(KIND_DIR) {
             if self.canonical(&path).is_some() {
                 return Err(not_a_dir());
@@ -166,37 +166,28 @@ impl Provider for InlineProvider {
         if flags & OPEN_WRITE != 0 {
             return Err(bad_request());
         }
-        let path = normalize(path);
+        let path = vfs_core::trim_rel(path);
         let key = self.canonical(&path).ok_or_else(not_found)?;
         let f = &self.files[key];
-        let h = self.next.fetch_add(1, Ordering::Relaxed);
         let size = f.bytes.len() as u64;
-        self.opens
-            .lock()
-            .map_err(|_| map_io_err())?
-            .insert(h, (key.clone(), f.bytes.clone()));
+        let h = self.opens.insert((key.clone(), f.bytes.clone()))?;
         Ok((h, size, false))
     }
 
     fn read_at(&self, h: Handle, offset: u64, buf: &mut [u8]) -> Result<usize, i32> {
-        let g = self.opens.lock().map_err(|_| map_io_err())?;
-        let (_, bytes) = g.get(&h).ok_or_else(bad_fh)?;
-        if offset as usize >= bytes.len() {
-            return Ok(0);
-        }
-        let start = offset as usize;
-        let n = buf.len().min(bytes.len() - start);
-        buf[..n].copy_from_slice(&bytes[start..start + n]);
-        Ok(n)
+        self.opens.with(h, |(_, bytes)| {
+            if offset as usize >= bytes.len() {
+                return 0;
+            }
+            let start = offset as usize;
+            let n = buf.len().min(bytes.len() - start);
+            buf[..n].copy_from_slice(&bytes[start..start + n]);
+            n
+        })
     }
 
     fn close(&self, h: Handle) -> Result<(), i32> {
-        self.opens
-            .lock()
-            .map_err(|_| map_io_err())?
-            .remove(&h)
-            .ok_or_else(bad_fh)?;
-        Ok(())
+        self.opens.remove(h).map(|_| ())
     }
 }
 
@@ -225,8 +216,37 @@ mod tests {
     fn folding_is_unicode_not_ascii() {
         let p = InlineProvider::from_files([("Über/A.esp", &b"x"[..])]);
         assert!(
-            p.getattr(VPath::at_default("über/a.esp")).unwrap().is_some(),
+            p.getattr(VPath::at_default("über/a.esp"))
+                .unwrap()
+                .is_some(),
             "Unicode fold-equal spelling did not resolve"
         );
+    }
+
+    /// Pins the merged view: directories that differ only in case are one
+    /// directory here, whichever spelling asks. (`MemoryProvider` keeps them
+    /// apart; see the module docs.)
+    #[test]
+    fn differently_cased_directories_merge_into_one_view() {
+        let p = InlineProvider::from_files([
+            ("Data/Skyrim.esm", &b"esm"[..]),
+            ("data/textures/x.dds", &b"dds"[..]),
+        ]);
+        for dir in ["Data", "data", "DATA"] {
+            let mut names: Vec<String> = p
+                .readdir(VPath::at_default(dir))
+                .unwrap()
+                .into_iter()
+                .map(|e| e.name)
+                .collect();
+            names.sort();
+            assert_eq!(names, ["Skyrim.esm", "textures"], "readdir({dir})");
+        }
+        for path in ["Data/TEXTURES", "DATA/textures", "data/Textures/X.DDS"] {
+            assert!(
+                p.getattr(VPath::at_default(path)).unwrap().is_some(),
+                "getattr({path}) did not resolve"
+            );
+        }
     }
 }

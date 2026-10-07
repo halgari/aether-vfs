@@ -1,0 +1,55 @@
+[package]
+name = "vfs-bench"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+publish = false
+description = "Benchmarks and live harnesses: ring-bench (ring round trips) and skyrim-live (a real Skyrim launch)"
+
+[lib]
+name = "vfs_bench"
+path = "src/lib.rs"
+
+[dependencies]
+vfs-ipc = { path = "../vfs-ipc" }
+vfs-protocol = { path = "../vfs-protocol" }
+# `skyrim-live` and `launch_bench` read `stage` and `io_stats`; `ring-bench`
+# drives the real Director and its serve workers, not a hand-written server:
+# the worker loop and its notifier are half of what a round trip costs.
+vfs-director = { path = "../vfs-director" }
+# `skyrim-live`: the embeddable session, the composition providers it mounts
+# and the zip it launches from.
+vfs-embed = { path = "../vfs-embed" }
+vfs-compose = { path = "../vfs-compose" }
+vfs-zip = { path = "../vfs-zip" }
+vfs-env = { path = "../vfs-env" }
+
+# `ring-bench` is Unix-only: its Windows `main` just exits.
+[target.'cfg(unix)'.dependencies]
+vfs-provider = { path = "../vfs-provider" }
+# `ring-bench names`: a base whose names are in an index (a `vfs-storage`
+# layer), and the shim's own final-path code (`vfs-core`).
+vfs-storage = { path = "../vfs-storage" }
+vfs-core = { path = "../vfs-core" }
+
+[target.'cfg(windows)'.dependencies]
+# GetFinalPathNameByHandleW, for resolving the second (Documents\My Games)
+# root's junction to its real target in `skyrim-live`
+# (`resolve_second_root_target`).
+vfs-win = { path = "../vfs-win" }
+# Window + process enumeration for the load benchmark (`launch_bench`).
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_UI_WindowsAndMessaging",
+  "Win32_System_Diagnostics_ToolHelp",
+] }
+
+# Native on both ends: latency of one requester and throughput of several,
+# under the shim's client discipline before and after `ring_lock` went.
+[[bin]]
+name = "ring-bench"
+path = "src/bin/ring-bench.rs"
+
+[[bin]]
+name = "skyrim-live"
+path = "src/bin/skyrim-live.rs"

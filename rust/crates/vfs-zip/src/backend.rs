@@ -7,13 +7,11 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
 
 use vfs_core::fold;
 use vfs_provider::{
-    Access, Capabilities, CaseMatch, DirEntry, Handle, Provider, Stat, VPath, KIND_DIR, KIND_FILE,
-    OPEN_WRITE,
+    Access, Capabilities, CaseMatch, DirEntry, Handle, HandleTable, Provider, Stat, VPath, KIND_DIR,
+    KIND_FILE, OPEN_WRITE,
 };
 use vfs_provider::{ST_BAD_FH, ST_BAD_REQUEST, ST_IO_ERROR, ST_NOT_A_DIRECTORY, ST_NOT_FOUND};
 
@@ -44,8 +42,7 @@ pub struct ZipProvider {
     /// with before they cross the ring — an ASCII-only fold here would miss
     /// every entry whose case only Unicode knows how to lower.
     by_fold: HashMap<String, String>,
-    next: AtomicU64,
-    opens: Mutex<HashMap<u64, Live>>,
+    opens: HandleTable<Live>,
 }
 
 impl ZipProvider {
@@ -100,8 +97,7 @@ impl ZipProvider {
             container: zip_path.to_path_buf(),
             nodes,
             by_fold,
-            next: AtomicU64::new(1),
-            opens: Mutex::new(HashMap::new()),
+            opens: HandleTable::new(),
         })
     }
 
@@ -117,9 +113,7 @@ impl ZipProvider {
 
 fn ensure_parents(nodes: &mut HashMap<String, Node>, vpath: &str) {
     // Only intermediate directories (exclude the leaf — caller inserts the leaf).
-    let Some((parent, _)) = vpath.rsplit_once('/') else {
-        return;
-    };
+    let (parent, _) = vfs_core::split_parent(vpath);
     let mut acc = String::new();
     for part in parent.split('/') {
         if part.is_empty() {
@@ -164,6 +158,18 @@ impl Provider for ZipProvider {
             kind: if n.is_dir { KIND_DIR } else { KIND_FILE },
             size: n.size,
             mtime: n.mtime,
+        }))
+    }
+
+    /// The last component of the entry's key in the central directory, found
+    /// by the folded index.
+    fn stored_name(&self, p: VPath) -> Result<Option<String>, i32> {
+        let rel = p.rel.trim_matches('/');
+        if rel.is_empty() {
+            return Ok(None);
+        }
+        Ok(self.by_fold.get(&fold(rel)).map(|canon| {
+            vfs_core::split_parent(canon).1.to_string()
         }))
     }
 
@@ -237,27 +243,18 @@ impl Provider for ZipProvider {
         let path = p.rel;
         let p = path.trim_start_matches('/');
         if p.is_empty() {
-            let bh = self.next.fetch_add(1, Ordering::Relaxed);
-            return Ok((bh, 0, true));
+            return Ok((self.opens.fresh(), 0, true));
         }
         let node = self.get(p).ok_or(ST_NOT_FOUND)?;
         if node.is_dir {
-            let bh = self.next.fetch_add(1, Ordering::Relaxed);
-            return Ok((bh, 0, true));
+            return Ok((self.opens.fresh(), 0, true));
         }
         let file = File::open(&self.container).map_err(|_| ST_IO_ERROR)?;
-        let bh = self.next.fetch_add(1, Ordering::Relaxed);
-        self.opens
-            .lock()
-            .map_err(|_| ST_IO_ERROR)?
-            .insert(
-                bh,
-                Live {
-                    file,
-                    base: node.data_off,
-                    size: node.size,
-                },
-            );
+        let bh = self.opens.insert(Live {
+            file,
+            base: node.data_off,
+            size: node.size,
+        })?;
         Ok((bh, node.size, false))
     }
 
@@ -265,23 +262,26 @@ impl Provider for ZipProvider {
         // Serialize seek+read on the live File. Concurrent try_clone + seek from
         // multiple director workers was part of the post-seal 0xC0000409 regression
         // (corrupted / racy BSA streams). Revisit with per-handle File handles later.
-        let mut g = self.opens.lock().map_err(|_| ST_IO_ERROR)?;
-        let live = g.get_mut(&h).ok_or(ST_BAD_FH)?;
-        if offset >= live.size {
-            return Ok(0);
-        }
-        let max = ((live.size - offset) as usize).min(buf.len());
-        let abs = live.base + offset;
-        live.file
-            .seek(SeekFrom::Start(abs))
-            .map_err(|_| ST_IO_ERROR)?;
-        live.file.read(&mut buf[..max]).map_err(|_| ST_IO_ERROR)
+        self.opens.with(h, |live| {
+            if offset >= live.size {
+                return Ok(0);
+            }
+            let max = ((live.size - offset) as usize).min(buf.len());
+            let abs = live.base + offset;
+            live.file
+                .seek(SeekFrom::Start(abs))
+                .map_err(|_| ST_IO_ERROR)?;
+            live.file.read(&mut buf[..max]).map_err(|_| ST_IO_ERROR)
+        })?
     }
 
     fn close(&self, h: Handle) -> Result<(), i32> {
-        let mut g = self.opens.lock().map_err(|_| ST_IO_ERROR)?;
-        let _ = g.remove(&h);
-        Ok(())
+        // Closing a handle that is not open (a directory's, or one already
+        // closed) is not an error; only a poisoned table is.
+        match self.opens.remove(h) {
+            Ok(_) | Err(ST_BAD_FH) => Ok(()),
+            Err(e) => Err(e),
+        }
     }
 }
 
@@ -414,6 +414,30 @@ mod tests {
         let p: std::sync::Arc<dyn vfs_provider::Provider> =
             std::sync::Arc::new(ZipProvider::open(&zip).expect("open zip"));
         vfs_provider::assert_conformance(p);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stored_name_gives_the_central_directory_spelling_of_any_query_case() {
+        use vfs_provider::Provider;
+        let dir = std::env::temp_dir().join(format!("vfs-zipname-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let zip = dir.join("t.zip");
+        write_zip(&zip, &[("Meshes/Armor/Iron.NIF", b"x"), ("Data/Skyrim.ESM", b"y")]);
+        let p = ZipProvider::open(&zip).expect("open zip");
+        let name = |q: &str| p.stored_name(VPath::at_default(q)).unwrap();
+
+        // The file, and the directories above it, in the case they were stored.
+        assert_eq!(name("meshes/armor/iron.nif").as_deref(), Some("Iron.NIF"));
+        assert_eq!(name("MESHES/ARMOR/IRON.NIF").as_deref(), Some("Iron.NIF"));
+        assert_eq!(name("meshes/armor").as_deref(), Some("Armor"));
+        assert_eq!(name("MESHES").as_deref(), Some("Meshes"));
+        assert_eq!(name("data/skyrim.esm").as_deref(), Some("Skyrim.ESM"));
+        // Slashes around the query do not matter; the root and a miss are None.
+        assert_eq!(name("/meshes/").as_deref(), Some("Meshes"));
+        assert_eq!(name(""), None);
+        assert_eq!(name("meshes/armor/nope.nif"), None);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

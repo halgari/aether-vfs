@@ -3,16 +3,17 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard, Weak};
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex, RwLock, Weak};
 
 use vfs_block_store::BlockStore;
 use vfs_provider::Provider;
 
-use crate::cached::{lock, CacheState};
+use crate::cached::CacheState;
+use crate::util::lock;
 use crate::catalog::Catalog;
 use crate::config::{Durability, StorageConfig};
+use crate::durable::{fold_scratch_dirs, DurableClock};
 use crate::ids::Guid;
 use crate::layer::LayerProvider;
 use crate::ram::RamTier;
@@ -133,31 +134,10 @@ pub struct Storage {
     pub(crate) cfg: StorageConfig,
     /// Pull-through cache bookkeeping shared by every cached source.
     pub(crate) cache: CacheState,
-    /// The durability gate (spec §6: every durable catalog row references
-    /// durable store data). Held **shared** across every "write store data,
-    /// then write the catalog row that describes it" pair: a layer commit
-    /// (`FileCell::commit` and the row update), a layer file create (row, then
-    /// `set_len`) and a cache fetch (for a file's first block, its row and
-    /// `set_len`; then `write_blocks`, then the access-log update a later row
-    /// commit persists). Held **exclusive** across `store.flush()` +
-    /// `catalog.commit_durable()` wherever that pair runs: a layer's durable
-    /// point, `delete_layer`, `close` and reconciliation. So no row can land
-    /// between a flush and the durable commit that would publish it ahead of
-    /// its data. (The store's own auto-flush and compaction commits can still
-    /// make a store state durable mid-commit; reconciliation repairs those.)
-    ///
-    /// **Lock order**, outermost first:
-    /// - layers: a file cell's `state` → `gate` → the layer's `ns` → the
-    ///   layer's leaf locks (`cells`, `handles`, `fresh`, a cell's `path`
-    ///   and `mtime_override`) and the storage's `doomed`;
-    /// - the `layers` registry → `gate` (a new layer is made durable while
-    ///   the registry is held; nothing holding the gate takes the registry);
-    /// - cache: `gate` → `open_counts` → `access`.
-    ///
-    /// The gate is never taken recursively (shared or exclusive) by a thread
-    /// that holds it. The exclusive holder takes nothing else during the
-    /// fsyncs (a durable point takes `doomed` only briefly, before them, and
-    /// no layer lock at all).
+    /// The durability gate (spec §6): shared around each "write store data,
+    /// then the catalog row that describes it" pair, exclusive around a flush
+    /// plus durable commit. What it guards, who takes it how, and the **lock
+    /// order** are in `rust/docs/durability.md` (module `crate::durable`).
     pub(crate) gate: RwLock<()>,
     /// Every layer with a provider, by name: live, or dropped and still
     /// inside its `Drop` (a last commit and durable point). A provider removes
@@ -174,12 +154,19 @@ pub struct Storage {
     /// drop), or, in tests, once a crash is simulated: the drop then does
     /// nothing more.
     pub(crate) shut: AtomicBool,
+    /// Set by [`Storage::crash_on_drop_for_tests`]: the process is "dead". No
+    /// durable point runs from then on, so a layer provider dropped after the
+    /// crash does not publish what the crash should have lost.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub(crate) crashed: AtomicBool,
     /// Set when this session left something for reconciliation at the next
     /// open (see [`Storage::needs_reconcile`]): the close then leaves no
     /// clean-close mark.
     pub(crate) dirty: AtomicBool,
     /// When durable points happen, under [`Durability::Deferred`].
     pub(crate) clock: DurableClock,
+    /// `StorageConfig::scratch_dirs`, folded once at open: `(layer, dir)`.
+    pub(crate) scratch: Vec<(String, String)>,
     /// GUIDs of layer files (any layer's) whose rows are gone, durably or
     /// not, and that no handle has open: deleted from the store by the next
     /// durable point, after its catalog commit. A leaf lock, pushed to under
@@ -212,116 +199,13 @@ pub struct Storage {
     #[cfg(test)]
     #[allow(clippy::type_complexity)]
     pub(crate) layer_fill_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
-}
-
-/// The default for [`DurableClock::max_commits`]
-/// ([`StorageConfig::max_deferred_commits`]).
-pub(crate) const DEFERRED_MAX_COMMITS: u64 = 10_000;
-
-/// When durable points happen, for [`Durability::Deferred`].
-pub(crate) struct DurableClock {
-    /// When the last durable point completed (or, while one is claimed as
-    /// due, when it was claimed).
-    last: Mutex<Instant>,
-    /// Durable points completed since open, counting ones that found nothing
-    /// to make durable. Read by a layer file create under the shared gate
-    /// and bumped under the exclusive gate, so a file whose create saw the
-    /// current epoch has a row that no durable point has published yet.
-    epoch: AtomicU64,
-    /// A deferred change finds a durable point due once the catalog holds
-    /// this many non-durable commits (redb keeps their bookkeeping in memory
-    /// until a durable commit), whatever `max_interval` says.
-    max_commits: AtomicU64,
-    /// Test hook: time added to the real clock.
-    #[cfg(test)]
-    skew: Mutex<Duration>,
-    /// Test hook: durable points that fsynced, since open.
-    #[cfg(test)]
-    points: AtomicU64,
-}
-
-impl DurableClock {
-    fn new(max_commits: u64) -> Self {
-        DurableClock {
-            last: Mutex::new(Instant::now()),
-            epoch: AtomicU64::new(0),
-            max_commits: AtomicU64::new(max_commits.max(1)),
-            #[cfg(test)]
-            skew: Mutex::new(Duration::ZERO),
-            #[cfg(test)]
-            points: AtomicU64::new(0),
-        }
-    }
-
-    fn now(&self) -> Instant {
-        #[cfg(test)]
-        return Instant::now() + *lock(&self.skew);
-        #[cfg(not(test))]
-        Instant::now()
-    }
-
-    /// The current epoch (see [`DurableClock::epoch`]).
-    pub(crate) fn epoch(&self) -> u64 {
-        self.epoch.load(Ordering::Acquire)
-    }
-
-    /// If the last durable point is at least `max` old, or `commits`
-    /// non-durable catalog commits have piled up, claims the next durable
-    /// point (restarting the interval) and returns true.
-    fn claim_if_due(&self, max: Duration, commits: u64) -> bool {
-        let now = self.now();
-        let mut last = lock(&self.last);
-        if now.saturating_duration_since(*last) >= max
-            || commits >= self.max_commits.load(Ordering::Acquire)
-        {
-            *last = now;
-            true
-        } else {
-            false
-        }
-    }
-
-    /// A claimed durable point failed: the next change tries again.
-    pub(crate) fn retry(&self) {
-        let now = self.now();
-        let mut last = lock(&self.last);
-        // An `Instant` that far back may not exist (early after boot): then
-        // the next change waits `max_interval` again, as after open.
-        *last = now
-            .checked_sub(Duration::from_secs(365 * 24 * 3600))
-            .unwrap_or(*last);
-    }
-
-    /// A durable point completed (`fsynced`), or found nothing to make
-    /// durable. Under the exclusive gate.
-    fn reached(&self, fsynced: bool) {
-        self.epoch.fetch_add(1, Ordering::AcqRel);
-        *lock(&self.last) = self.now();
-        #[cfg(test)]
-        if fsynced {
-            self.points.fetch_add(1, Ordering::AcqRel);
-        }
-        #[cfg(not(test))]
-        let _ = fsynced;
-    }
-
-    /// Test hook: moves this clock `by` into the future.
-    #[cfg(test)]
-    pub(crate) fn advance(&self, by: Duration) {
-        *lock(&self.skew) += by;
-    }
-
-    /// Test hook: durable points that fsynced, since open.
-    #[cfg(test)]
-    pub(crate) fn points(&self) -> u64 {
-        self.points.load(Ordering::Acquire)
-    }
-
-    /// Test hook: sets [`DurableClock::max_commits`].
-    #[cfg(test)]
-    pub(crate) fn set_max_commits(&self, n: u64) {
-        self.max_commits.store(n, Ordering::Release);
-    }
+    /// The directory as a crash left it, put back by the drop. **Declared
+    /// last, so it drops after every field above has released its files**: see
+    /// [`CrashImage`](crate::test_util::CrashImage).
+    #[cfg(all(any(test, feature = "test-hooks"), not(windows)))]
+    pub(crate) crash_image: Mutex<Option<crate::test_util::CrashImage>>,
+    #[cfg(all(any(test, feature = "test-hooks"), not(windows)))]
+    pub(crate) dir: std::path::PathBuf,
 }
 
 impl Storage {
@@ -332,16 +216,9 @@ impl Storage {
     /// the directory open.
     ///
     /// After a clean close ([`Storage::close`], or the drop of the last
-    /// reference) nothing can disagree between the catalog and the store, so
-    /// reconciliation (a lookup per file, slow on a large store) is skipped
-    /// and [`Storage::last_reconcile`] says so. The close left the same
-    /// random token in the catalog and as the block store's clean-shutdown
-    /// value; the skip needs the catalog to have existed before this open and
-    /// the two tokens to match exactly. The catalog's token is removed,
-    /// durably, before anything else is written, and every block store open
-    /// (of any build) overwrites the store's at once, so a crash of this
-    /// open, or anything else that opened the store since, makes the next
-    /// open reconcile. So does a store from before the token existed.
+    /// reference) reconciliation (a lookup per file, slow on a large store) is
+    /// skipped and [`Storage::last_reconcile`] says so. The close-token
+    /// handshake that makes this safe is in `rust/docs/durability.md`.
     pub fn open(dir: impl AsRef<Path>, cfg: StorageConfig) -> Result<Arc<Storage>, StorageError> {
         let dir = dir.as_ref();
         std::fs::create_dir_all(dir)?;
@@ -390,6 +267,7 @@ impl Storage {
             .map(|(_, r)| r.logical_bytes)
             .sum();
         let clock = DurableClock::new(cfg.max_deferred_commits);
+        let scratch = fold_scratch_dirs(&cfg.scratch_dirs);
         // Corruption found, or a repair that failed: the next open reports
         // and retries it, as before.
         let dirty = !reconciled.corrupt_files.is_empty() || !reconciled.failed_repairs.is_empty();
@@ -404,8 +282,11 @@ impl Storage {
             layers_gone: Condvar::new(),
             reconciled,
             shut: AtomicBool::new(false),
+            #[cfg(any(test, feature = "test-hooks"))]
+            crashed: AtomicBool::new(false),
             dirty: AtomicBool::new(dirty),
             clock,
+            scratch,
             doomed: Mutex::new(Vec::new()),
             #[cfg(test)]
             fail_import_at: Mutex::new(None),
@@ -419,6 +300,10 @@ impl Storage {
             layer_read_hook: Mutex::new(None),
             #[cfg(test)]
             layer_fill_hook: Mutex::new(None),
+            #[cfg(all(any(test, feature = "test-hooks"), not(windows)))]
+            crash_image: Mutex::new(None),
+            #[cfg(all(any(test, feature = "test-hooks"), not(windows)))]
+            dir: dir.to_path_buf(),
         }))
     }
 
@@ -467,64 +352,6 @@ impl Storage {
         }
     }
 
-    /// The clean close, by the holder of the only reference (so no provider,
-    /// cached source or eviction can write any more): a last
-    /// [`Storage::sync`] (cheap when [`Storage::close`] just ran one), the
-    /// block store's own clean shutdown recording a fresh random token (its
-    /// final durable commit, which also covers the deletions that sync made),
-    /// then the same token as the catalog's clean-close mark, in one durable
-    /// commit. Each step durable before the next, so a crash anywhere in
-    /// between leaves no matching mark.
-    ///
-    /// Tried once: `shut` is set first. No mark is left (and the reason is
-    /// logged) when the session is dirty ([`Storage::needs_reconcile`]: a
-    /// repair left for the next open, a write that panicked, corruption found
-    /// at open), when the durability gate is poisoned, or when the block
-    /// store's writer is (then nothing is attempted at all: the next open
-    /// reconciles).
-    fn close_cleanly(&self) -> Result<(), StorageError> {
-        if self.shut.swap(true, Ordering::AcqRel) {
-            return Ok(());
-        }
-        if self.store.is_poisoned() {
-            self.needs_reconcile("the block store's writer lock is poisoned (a write panicked)");
-            tracing::warn!("storage not closed cleanly: the next open reconciles");
-            return Ok(());
-        }
-        self.sync()?;
-        if self.gate.is_poisoned() {
-            self.needs_reconcile("a durable point panicked");
-        }
-        if self.dirty.load(Ordering::Acquire) {
-            self.store.shutdown()?;
-            tracing::warn!(
-                "storage closed without a clean-close mark: this session left repairs \
-                 for reconciliation, which the next open runs"
-            );
-            return Ok(());
-        }
-        let token = clean_close_token();
-        self.store.shutdown_with_token(token)?;
-        #[cfg(test)]
-        if let Some(hook) = lock(&self.before_mark_hook).take() {
-            hook(self);
-        }
-        self.catalog.mark_clean_close(token)
-    }
-
-    /// Records that this session left something only reconciliation repairs
-    /// (an orphan store file, a row whose length disagrees with the store, a
-    /// cache row that counts no bytes...), so the close leaves no clean-close
-    /// mark and the next open reconciles. Cheap; logged once per session.
-    pub(crate) fn needs_reconcile(&self, why: &str) {
-        if !self.dirty.swap(true, Ordering::AcqRel) {
-            tracing::warn!(
-                reason = why,
-                "storage left a repair for reconciliation at the next open"
-            );
-        }
-    }
-
     /// The block store's delete of a removed layer file, with the test hook
     /// applied.
     pub(crate) fn store_delete(&self, id: &[u8]) -> Result<(), vfs_block_store::Error> {
@@ -548,84 +375,6 @@ impl Storage {
         self.shut.store(true, Ordering::Release);
     }
 
-    /// Test hook for other crates (feature `test-hooks`): when the last
-    /// reference goes, the drop does nothing more, as a crash: no sync, no
-    /// clean-close mark, so what no durable point made durable is lost and the
-    /// next open reconciles.
-    #[cfg(feature = "test-hooks")]
-    pub fn crash_on_drop_for_tests(&self) {
-        self.shut.store(true, Ordering::Release);
-    }
-
-    /// The durability gate, shared: see [`Storage::gate`]. A panic while it
-    /// is held may leave a write pair half done (and a reader's panic does
-    /// not poison an `RwLock`), so the guard marks the session dirty then.
-    pub(crate) fn gate_shared(&self) -> SharedGate<'_> {
-        SharedGate {
-            _guard: self.gate.read().unwrap_or_else(|e| e.into_inner()),
-            storage: self,
-        }
-    }
-
-    /// The durability gate, exclusive: see [`Storage::gate`].
-    pub(crate) fn gate_exclusive(&self) -> RwLockWriteGuard<'_, ()> {
-        self.gate.write().unwrap_or_else(|e| e.into_inner())
-    }
-
-    /// A durable point: [`Storage::durable_point`]. Safe with the `layers`
-    /// registry held.
-    pub(crate) fn flush_durably(&self) -> Result<(), StorageError> {
-        self.durable_point()
-    }
-
-    /// Store flush, then the durable catalog commit, then the store deletes
-    /// that commit made safe (every layer's removed or replaced files that no
-    /// handle has open, see [`Storage::doomed`]).
-    ///
-    /// The flush and the commit run under the exclusive durability gate
-    /// ([`Storage::gate`]), so no layer's or cache's row can land between
-    /// them ahead of its data. Every GUID in the doomed list had its row
-    /// removal committed before it was pushed, so the commit makes the
-    /// removal durable before the store delete (spec §6). GUIDs doomed later
-    /// wait for the next durable point.
-    ///
-    /// When neither the store nor the catalog holds anything non-durable,
-    /// the fsyncs are skipped (the doomed files' removals are then already
-    /// durable, and they are deleted all the same).
-    pub(crate) fn durable_point(&self) -> Result<(), StorageError> {
-        let doomed = {
-            let _gate = self.gate_exclusive();
-            let doomed = std::mem::take(&mut *lock(&self.doomed));
-            let fsync = self.store.has_unflushed() || self.catalog.unflushed_commits() > 0;
-            if fsync {
-                let flushed = self
-                    .store
-                    .flush()
-                    .map_err(StorageError::from)
-                    .and_then(|()| self.catalog.commit_durable());
-                if let Err(e) = flushed {
-                    lock(&self.doomed).extend(doomed);
-                    return Err(e);
-                }
-            }
-            self.clock.reached(fsync);
-            doomed
-        };
-        for g in doomed {
-            let id = crate::ids::layer_file_id(&g);
-            self.ram.invalidate_file(&id);
-            match self.store_delete(&id) {
-                Ok(()) | Err(vfs_block_store::Error::NotFound) => {}
-                // Left for reconciliation, which deletes unreferenced ids.
-                Err(e) => {
-                    tracing::warn!(error = %e, "layer file delete failed");
-                    self.needs_reconcile("a removed layer file's store delete failed");
-                }
-            }
-        }
-        Ok(())
-    }
-
     /// Makes everything written so far durable: commits the cache's batched
     /// access times, then runs one durable point (store flush, then the
     /// catalog's durable commit), which covers every layer and the cache and
@@ -637,17 +386,6 @@ impl Storage {
     pub fn sync(&self) -> Result<(), StorageError> {
         self.commit_access()?;
         self.durable_point()
-    }
-
-    /// Under [`Durability::Deferred`], called after a layer change that
-    /// [`Durability::OnEveryClose`] would make durable at once: whether a
-    /// durable point is due (the last one is at least `max_interval` old, or
-    /// the catalog holds [`DurableClock::max_commits`] non-durable commits).
-    /// A due point is claimed by the caller, so concurrent writers do not
-    /// all run one; if it fails, the caller calls [`DurableClock::retry`].
-    pub(crate) fn deferred_point_due(&self, max_interval: Duration) -> bool {
-        self.clock
-            .claim_if_due(max_interval, self.catalog.unflushed_commits())
     }
 
     /// The block store's block size in bytes.
@@ -705,7 +443,7 @@ impl Storage {
     /// catalog). May be called with the `layers` registry lock held.
     pub(crate) fn create_layer_durably(&self, name: &str) -> Result<u64, StorageError> {
         let id = self.catalog.create_layer(name)?;
-        self.flush_durably()?;
+        self.durable_point()?;
         Ok(id)
     }
 
@@ -737,32 +475,6 @@ impl Storage {
     }
 }
 
-/// A shared hold of the durability gate: see [`Storage::gate_shared`].
-pub(crate) struct SharedGate<'a> {
-    _guard: RwLockReadGuard<'a, ()>,
-    storage: &'a Storage,
-}
-
-impl Drop for SharedGate<'_> {
-    fn drop(&mut self) {
-        if std::thread::panicking() {
-            self.storage
-                .needs_reconcile("a write panicked while holding the durability gate");
-        }
-    }
-}
-
-/// A random clean-close token: never 0 (not clean) or 1 (a plain clean
-/// shutdown, which builds before the token write).
-fn clean_close_token() -> u64 {
-    loop {
-        let t = uuid::Uuid::new_v4().as_u64_pair().0;
-        if t > 1 {
-            return t;
-        }
-    }
-}
-
 impl Drop for Storage {
     /// The last reference is gone, so nothing else can write: a clean close
     /// (see [`Storage::close`]), unless one was already tried or this thread
@@ -791,6 +503,50 @@ impl Drop for Storage {
 mod tests {
     use super::*;
     use crate::config::StorageConfig;
+
+    /// One closed file in layer `l`, written under the default (deferred)
+    /// policy, so no durable point has run for it; then `end` ends the session.
+    /// Whether the file is there after a reopen.
+    fn survives(end: impl FnOnce(Arc<Storage>, Arc<dyn vfs_provider::Provider>)) -> bool {
+        use vfs_provider::{VPath, OPEN_CREATE, OPEN_WRITE};
+        let dir = tempfile::tempdir().unwrap();
+        let s = Storage::open(dir.path(), StorageConfig::default()).unwrap();
+        let p = s.layer("l").unwrap();
+        let (h, _, _) = p
+            .open(VPath::at_default("f.bin"), OPEN_WRITE | OPEN_CREATE)
+            .unwrap();
+        p.write_at(h, 0, b"unsynced").unwrap();
+        p.close(h).unwrap();
+        end(s, p);
+        let s = Storage::open(dir.path(), StorageConfig::default()).unwrap();
+        let p = s.layer("l").unwrap();
+        p.getattr(VPath::at_default("f.bin")).unwrap().is_some()
+    }
+
+    #[test]
+    fn dropping_the_layer_provider_after_a_crash_makes_nothing_durable() {
+        // Control: the same drops without the crash publish the write.
+        assert!(survives(|s, p| {
+            drop(p);
+            drop(s);
+        }));
+        // The crash comes first, then the drops that would have published it.
+        assert!(!survives(|s, p| {
+            s.crash_on_drop_for_tests();
+            drop(p);
+            drop(s);
+        }));
+    }
+
+    #[test]
+    fn a_sync_after_a_crash_makes_nothing_durable() {
+        assert!(!survives(|s, p| {
+            s.crash_on_drop_for_tests();
+            s.sync().unwrap();
+            drop(p);
+            drop(s);
+        }));
+    }
 
     #[test]
     fn storage_opens_twice_in_sequence_but_not_concurrently() {
@@ -918,7 +674,7 @@ mod tests {
             p.write_at(h, 0, &[7u8; 100_000]).unwrap();
             s.store.flush().unwrap();
             let killed = tempfile::tempdir().unwrap();
-            crate::test_util::snapshot(dir.path(), killed.path());
+            crate::test_util::snapshot_as_killed(dir.path(), killed.path()).unwrap();
             p.close(h).unwrap();
             drop(p);
             let k = Storage::open(killed.path(), StorageConfig::default()).unwrap();
@@ -1124,7 +880,7 @@ mod tests {
         let killed = tempfile::tempdir().unwrap();
         let (from, to) = (dir.path().to_owned(), killed.path().to_owned());
         *lock(&s.before_mark_hook) = Some(Box::new(move |_: &Storage| {
-            crate::test_util::snapshot(&from, &to);
+            crate::test_util::snapshot_as_killed(&from, &to).unwrap();
         }));
         s.close().unwrap();
         let k = Storage::open(killed.path(), StorageConfig::default()).unwrap();

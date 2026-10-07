@@ -20,7 +20,7 @@ pub struct FileMapping {
 }
 
 // SAFETY: the mapped pages are shared memory; all concurrent access is governed
-// by the vfs-ipc ring protocol (atomics + seqlock) — the same rationale that
+// by the vfs-ipc ring protocol (atomics) — the same rationale that
 // makes `SharedSeg` itself `Send + Sync`.
 #[allow(unsafe_code)]
 unsafe impl Send for FileMapping {}
@@ -145,6 +145,18 @@ impl FileMapping {
     /// Raw start of the mapped region (for carving an arena after the ring).
     pub fn as_mut_ptr(&self) -> *mut u8 {
         self.ptr
+    }
+}
+
+impl vfs_ipc::RingBacking for FileMapping {
+    fn seg(&self) -> &SharedSeg {
+        FileMapping::seg(self)
+    }
+    fn len(&self) -> usize {
+        FileMapping::len(self)
+    }
+    fn as_mut_ptr(&self) -> *mut u8 {
+        FileMapping::as_mut_ptr(self)
     }
 }
 

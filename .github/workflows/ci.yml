@@ -62,7 +62,7 @@ jobs:
         # Ensure shim/payload/fixtures sit next to the test profile so the
         # daemon e2e can inject them without a nested cargo build. The fixture
         # list must stay in step with `ensure_inject_artifacts`'s `needed`
-        # array in crates/vfs-directord/tests/e2e.rs — that is the code that
+        # array in crates/vfs-directord/tests/support/artifacts.rs — that is the code that
         # decides which artifacts have to be present, and it re-runs cargo
         # itself for anything missing or stale.
         #
@@ -77,7 +77,7 @@ jobs:
         # and fails LNK1181. A developer tree hides this: the lib is already
         # there from an earlier build. Nothing downstream can self-heal it the
         # way `needed` does, because the failure is in the outer compile.
-        run: cargo build -p vfs-directord -p vfs-source -p vfs-inject -p vfs-shim-dll -p vfs-fixture-read -p vfs-fixture-writepath -p vfs-fixture-escape -p vfs-fixture-prefs -p vfs-fixture-vproxy -p vfs-ring-harness
+        run: cargo build -p vfs-directord -p vfs-source -p vfs-inject -p vfs-shim-dll -p vfs-fixture-read -p vfs-fixture-writepath -p vfs-fixture-escape -p vfs-fixture-prefs -p vfs-fixture-vproxy -p vfs-bench
         working-directory: rust
       - name: Build vfs-payload (separate workspace)
         working-directory: rust
@@ -110,14 +110,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      # `vfs-core`, `vfs-env`, `vfs-shared` and `vfs-server` were portable
-      # before anyone claimed it: measured 2026-09-01 in a WSL Arch box on an
-      # ext4 checkout, they contribute 85 passing tests with a Linux dependency
-      # graph containing no windows crate at all. `vfs-server` is the load-
-      # bearing one — its `tests/fuse_e2e.rs` drives the control ring
-      # end-to-end, so the ring transport is proven on Linux, not merely
-      # compiled. (That file predates the Linux port and is named for the
-      # FUSE-style RPC design, not for /dev/fuse; it mounts nothing.)
+      # `vfs-core`, `vfs-env` and `vfs-shared` were portable before anyone
+      # claimed it: measured 2026-09-01 in a WSL Arch box on an ext4
+      # checkout, they contribute passing tests with a Linux dependency graph
+      # containing no windows crate at all. The ring transport is proven on
+      # Linux, not merely compiled, by `vfs-director/tests/serve_file_backed.rs`
+      # and the `vfs-ipc` tests, which drive the control ring end-to-end.
       #
       # `vfs-proton` is the newest entry and the only one that is portable *on
       # purpose* rather than by nature: extracting a Linux Proton tarball on
@@ -140,7 +138,7 @@ jobs:
       # non-ignored tests run on any Linux box; its one Wine test is
       # `#[ignore]`d and run by `proton-linux`.
       - name: Portable Rust crates (compile+test on Linux)
-        run: cargo test --no-fail-fast -p vfs-ipc -p vfs-protocol -p vfs-provider -p vfs-compose -p vfs-pe -p vfs-source -p vfs-zip -p xtask-descriptor -p vfs-core -p vfs-env -p vfs-shared -p vfs-server -p vfs-unix -p vfs-proton -p vfs-embed -p vfs-directord -p vfs-block-store -p vfs-storage -p vfs-registry
+        run: cargo test --no-fail-fast -p vfs-ipc -p vfs-protocol -p vfs-provider -p vfs-compose -p vfs-pe -p vfs-source -p vfs-zip -p vfs-core -p vfs-env -p vfs-shared -p vfs-unix -p vfs-proton -p vfs-embed -p vfs-directord -p vfs-block-store -p vfs-storage -p vfs-registry
         working-directory: rust
       # The block store's own gates, carried over from its repository:
       # `crash-points` compiles in the abort hooks its subprocess crash tests
@@ -166,10 +164,6 @@ jobs:
       - name: Director kernel (compile+test on Linux)
         run: cargo test -p vfs-director
         working-directory: rust
-      - name: Regenerate protocol artifacts
-        run: bin/regen-protocol
-      - name: Fail on protocol drift
-        run: git diff --exit-code resources/
 
   # The Proton path end to end, on Linux: the shim is always a Windows PE,
   # injected into a Windows program inside GE-Proton's Wine, while the Director

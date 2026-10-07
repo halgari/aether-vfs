@@ -29,14 +29,14 @@ For the full technical narrative (architecture, PE loading, performance, lessons
 
 The **game** never calls host open/read. It sees normal paths under the virtual root; hooks + ring deliver bytes from backends.
 
-CLI: `cargo run -p vfs-launch --release` (GameLayers layout under `C:\GameLayers`).
+CLI: `vfs` (the `vfs-directord` binary).
 
 ---
 
 ## Architecture at a glance
 
 ```text
-┌────────────────── Host process (vfs-launch / language host) ──────────────────┐
+┌────────────────── Host process (vfs / language host) ──────────────────┐
 │  Session: mounts, paths, IpcServe workers, launch                              │
 │  Backends: ZipBackend (CD index + Stored windows), Disk, C callbacks           │
 └────────────────────────────────────┬───────────────────────────────────────────┘
@@ -62,11 +62,10 @@ CLI: `cargo run -p vfs-launch --release` (GameLayers layout under `C:\GameLayers
 | **vfs-ipc** / **vfs-win** | Control ring, bulk arena, Windows section/events |
 | **vfs-zip** | Zip **backend** (Stored + ZIP64 CD) |
 | **vfs-inject** / **vfs-payload** / **vfs-shim** | Process create, pre-init, hooks, hollow |
-| **vfs-launch** | Skyrim-oriented CLI host |
 
 | Legacy / transitional | Role |
 |------------------------|------|
-| **vfs-core** / **shared** / **redirect** / **server** | Snapshot tree, old Serve path, fuse-bench baselines |
+| **vfs-core** / **shared** / **redirect** | Snapshot tree, old Serve path |
 
 ---
 

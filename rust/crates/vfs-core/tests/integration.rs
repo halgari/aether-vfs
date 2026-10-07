@@ -1,4 +1,4 @@
-use vfs_core::{build, EntryKind, InputEntry, Layer, LayerId, NodeKind, Resolution, SourceId};
+use vfs_core::{build, EntryKind, InputEntry, Layer, LayerId, Resolution, SourceId};
 
 fn file(vpath: &str, source: &str, size: u64, mtime: i64) -> InputEntry {
     InputEntry { vpath: vpath.into(), kind: EntryKind::File, source: source.into(), size, mtime }
@@ -55,7 +55,7 @@ fn end_to_end_modded_game_view() {
     assert!(matches!(tree.resolve("Data/MyMod.esp"), Resolution::File { .. }));
 
     // A directory reports as a dir via getattr.
-    assert_eq!(tree.getattr("Data/textures").unwrap().kind, NodeKind::Dir);
+    assert_eq!(tree.getattr("Data/textures").unwrap().kind, EntryKind::Dir);
 }
 
 use proptest::prelude::*;
