@@ -2,6 +2,8 @@
 
 use vfs_provider::{DirEntry, RootId, Stat, OPEN_READ};
 
+use vfs_director::Director;
+
 use super::Session;
 
 impl Session {
@@ -39,23 +41,7 @@ impl Session {
     ///
     /// [`Director::readdir`]: vfs_director::Director::readdir
     pub fn read_file_at(&self, root: RootId, vpath: &str) -> Result<Vec<u8>, i32> {
-        let (fh, size, is_dir) = self.kernel.open(root, vpath, OPEN_READ)?;
-        if is_dir {
-            let _ = self.kernel.close(fh);
-            return Err(vfs_provider::is_dir());
-        }
-        let mut buf = vec![0u8; size as usize];
-        let mut off = 0usize;
-        while off < buf.len() {
-            let n = self.kernel.read(fh, off as u64, &mut buf[off..])?;
-            if n == 0 {
-                break;
-            }
-            off += n;
-        }
-        let _ = self.kernel.close(fh);
-        buf.truncate(off);
-        Ok(buf)
+        read_whole(&self.kernel, root, vpath)
     }
 
     /// List a directory in `root`'s graph, host-side.
@@ -94,4 +80,30 @@ impl Session {
     pub fn getattr(&self, root: RootId, vpath: &str) -> Result<Option<Stat>, i32> {
         self.kernel.getattr(root, vpath)
     }
+}
+
+/// Reads the whole file at `vpath` in `root` through the director. The one
+/// open/read-loop/close, shared by [`Session::read_file_at`] and the staging
+/// source. A directory is `is_dir`; the handle is closed on every path.
+pub(super) fn read_whole(kernel: &Director, root: RootId, vpath: &str) -> Result<Vec<u8>, i32> {
+    let (fh, size, is_dir) = kernel.open(root, vpath, OPEN_READ)?;
+    if is_dir {
+        let _ = kernel.close(fh);
+        return Err(vfs_provider::is_dir());
+    }
+    let mut buf = vec![0u8; size as usize];
+    let mut off = 0usize;
+    while off < buf.len() {
+        match kernel.read(fh, off as u64, &mut buf[off..]) {
+            Ok(0) => break,
+            Ok(n) => off += n,
+            Err(st) => {
+                let _ = kernel.close(fh);
+                return Err(st);
+            }
+        }
+    }
+    let _ = kernel.close(fh);
+    buf.truncate(off);
+    Ok(buf)
 }

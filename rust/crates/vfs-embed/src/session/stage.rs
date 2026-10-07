@@ -8,8 +8,9 @@ use std::sync::Arc;
 
 use vfs_director::stage::{stage_launch_into, ImageSource};
 use vfs_director::{Director, DiskProvider};
-use vfs_provider::{Provider, RootId, OPEN_READ};
+use vfs_provider::{Provider, RootId};
 
+use super::read::read_whole;
 use super::{LaunchOpts, Session, StageOpts};
 use crate::image::{self, ImageTarget};
 
@@ -23,26 +24,7 @@ struct KernelSource(Arc<Director>);
 
 impl ImageSource for KernelSource {
     fn read(&self, vpath: &str) -> Option<Vec<u8>> {
-        let (fh, size, is_dir) = self.0.open(RootId::DEFAULT, vpath, OPEN_READ).ok()?;
-        if is_dir {
-            let _ = self.0.close(fh);
-            return None;
-        }
-        let mut buf = vec![0u8; size as usize];
-        let mut off = 0usize;
-        while off < buf.len() {
-            match self.0.read(fh, off as u64, &mut buf[off..]) {
-                Ok(0) => break,
-                Ok(n) => off += n,
-                Err(_) => {
-                    let _ = self.0.close(fh);
-                    return None;
-                }
-            }
-        }
-        let _ = self.0.close(fh);
-        buf.truncate(off);
-        Some(buf)
+        read_whole(&self.0, RootId::DEFAULT, vpath).ok()
     }
 }
 
@@ -273,43 +255,24 @@ fn no_drive_names(p: &str) -> String {
     )
 }
 
-/// Protocol golden `empty-tree-snapshot`: a single empty root directory.
-/// Kept inline so `vfs-director` does not need the vfs-core bridge just for this.
+/// Protocol golden `empty-tree-snapshot`: a single empty root directory (the
+/// "SSFV" header, version 1, and one empty root node), 128 bytes.
 ///
-/// Portable, with its two helpers below: `shim.cfg` is written by `serve` on
-/// Windows and by `launch` on unix — where the `C:\` form of the managed root
-/// is not known until a Wine prefix exists — and both need this snapshot.
-const EMPTY_TREE_SNAPSHOT_HEX: &str = "\
-535346560100000000000000000000008000000000000000010000003000000000000000\
-800000000000000080000000000000000000000080000000000000000000000000000000\
-800000000000000000000000000000000000000000000000000000000000000000000000\
-0000000000000000000000000000000000000000";
+/// `shim.cfg` carries a tree snapshot, and `Engine::build` rejects zero-length
+/// snapshot bytes, so both targets' `launch` write this one.
+const EMPTY_TREE_SNAPSHOT: [u8; 128] = [
+    0x53, 0x53, 0x46, 0x56, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x30, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+];
 
 pub(super) fn empty_tree_snapshot() -> Vec<u8> {
-    let hex = EMPTY_TREE_SNAPSHOT_HEX.as_bytes();
-    debug_assert_eq!(
-        hex.len(),
-        256,
-        "empty-tree golden must be 128 bytes (256 hex chars)"
-    );
-    let mut out = Vec::with_capacity(hex.len() / 2);
-    let mut i = 0;
-    while i + 1 < hex.len() {
-        let hi = from_hex(hex[i]);
-        let lo = from_hex(hex[i + 1]);
-        out.push((hi << 4) | lo);
-        i += 2;
-    }
-    out
-}
-
-fn from_hex(b: u8) -> u8 {
-    match b {
-        b'0'..=b'9' => b - b'0',
-        b'a'..=b'f' => b - b'a' + 10,
-        b'A'..=b'F' => b - b'A' + 10,
-        _ => 0,
-    }
+    EMPTY_TREE_SNAPSHOT.to_vec()
 }
 
 // The golden is consumed by a `shim.cfg` write on both targets now, so the
