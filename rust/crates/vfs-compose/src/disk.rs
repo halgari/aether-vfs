@@ -32,11 +32,9 @@ impl DiskProvider {
     ///
     /// `rel` is documented as arriving normalized (no `..`), but that is a
     /// contract on the caller, not a guarantee this provider can see
-    /// enforced elsewhere — `vfs-source`'s gRPC boundary rejects a `..`
-    /// component from a network client, but this is a different crate, and
-    /// `open`'s new `OPEN_CREATE` handling escalates a containment slip from
-    /// unauthorized read to unauthorized directory creation. Reject a bare
-    /// `..` component here too, so containment does not depend solely on a
+    /// enforced, and `open`'s `OPEN_CREATE` handling escalates a containment
+    /// slip from unauthorized read to unauthorized directory creation. Reject a
+    /// bare `..` component here, so containment does not depend solely on a
     /// caller in another crate getting it right. A filename that merely
     /// starts with `..` (e.g. `..foo`) is a normal path segment and passes
     /// through untouched.

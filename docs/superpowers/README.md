@@ -19,8 +19,11 @@ doc has one row. Written for the 2026-10-07 cleanup pass (finding E12).
   historical and were left alone. Use the file name to find the target here. Links from READMEs,
   `rust/docs/*.md`, code comments and `Cargo.toml` were fixed (they point at current docs).
 - To archive a doc: `git mv` it into the matching `archive/` folder, and flip its row below.
+- **2026-10-08:** the daemon stack (`vfs-directord`, `vfs-control`, `vfs-source`) was removed: no
+  host used it. Its two specs were archived; its e2e tests moved to `vfs-embed/tests/`. Older
+  docs that mention it describe removed code.
 
-## Current (19)
+## Current (17)
 
 | Date | Doc | Kind | Status | Summary |
 |---|---|---|---|---|
@@ -29,14 +32,12 @@ doc has one row. Written for the 2026-10-07 cleanup pass (finding E12).
 | 2026-07-14 | [Pre-init Injection — Reflective-map + RIP-redirect](specs/2026-07-14-preinit-injection-design.md) | spec | current | Reflective-map plus RIP-redirect pre-init injection; vfs-payload and vfs-inject use it. |
 | 2026-07-14 | [Zip-Backed Layers — Serve Mod Files Directly From Stored ZIP Archives](specs/2026-07-14-zip-backed-layers-design.md) | spec | current | Serving mod files straight from stored ZIP archives; vfs-zip. |
 | 2026-07-15 | [Director-Centric Userland FUSE + Thin Shim — Design Spec](specs/2026-07-15-director-fuse-thin-shim-design.md) | spec | current | Director-centric RPC with a thin shim. The FUSE half is superseded by the wine-hosted shim, but the director/thin-shim split is still the architecture. |
-| 2026-08-11 | [Director Daemon Rework — Design Spec](specs/2026-08-11-director-daemon-rework-design.md) | spec | current | Director daemon as the one source of truth; shim becomes a thin client. Implemented through M4; the live daemon architecture. |
 | 2026-08-13 | [No Bypass and Real Roots — Design Spec](specs/2026-08-13-no-bypass-and-real-roots-design.md) | spec | current | Invariant that no file access bypasses the director, plus real-root virtualisation. Gates 1-5 and 2b executed; still the contract the shim enforces. |
 | 2026-08-13 | [Pluggable Providers and the Embeddable Library — Design Spec](specs/2026-08-13-pluggable-providers-design.md) | spec | current | Provider contract, crate table and embeddable library; the reference for vfs-provider, vfs-compose and vfs-embed. Its Node and cache sections are historical. |
 | 2026-08-31 | [aether-vfs — the case-fold contract](specs/2026-08-31-case-fold-contract-design.md) | spec | current | Single case-folding contract across layers and the wire. |
 | 2026-08-31 | [aether-vfs — Linux portability: make the Director OS-agnostic](specs/2026-08-31-linux-fuse-proton-portability-design.md) | spec | current | Making the director OS-agnostic for Linux and Proton. Its FUSE half is superseded by the wine-hosted shim. |
 | 2026-09-01 | [Linux delivery via the Wine-hosted shim — design](specs/2026-09-01-wine-hosted-shim-design.md) | spec | current | Linux delivery by running the Windows shim inside Wine/Proton; the live Linux launch path. |
 | 2026-09-23 | [Block Store Design](specs/2026-09-23-block-store-design.md) | spec | current | Content-addressed block store design; vfs-block-store. |
-| 2026-09-29 | [The `vfs` CLI and daemon on Linux, and rooted launches — design](specs/2026-09-29-linux-cli-design.md) | spec | current | The vfs CLI and daemon on Linux, and rooted launches. |
 | 2026-09-29 | [`vfs-storage`: the block store as cache and layer storage — design](specs/2026-09-29-vfs-storage-design.md) | spec | current | The block store as cache and layer storage; vfs-storage. |
 | 2026-10-05 | [Registry overlay — implementation plan](plans/2026-10-05-registry-overlay.md) | plan | current | Implementation plan for the registry overlay. Kept current as the reference for how it was built and its follow-ups. |
 | 2026-10-05 | [aether-vfs — Registry overlay: per-profile copy-on-write of registry keys](specs/2026-10-05-registry-overlay-design.md) | spec | current | Per-profile copy-on-write registry overlay (overlay.reg); implemented. |
@@ -44,7 +45,7 @@ doc has one row. Written for the 2026-10-07 cleanup pass (finding E12).
 | 2026-10-07 | [Cleanup audit reports (director, embed, shim, storage)](specs/2026-10-07-cleanup-audit/) | audit | current | Four audit reports (director, embed, shim, storage) holding the detail behind every cleanup finding ID. |
 | 2026-10-07 | [aether-vfs: code cleanup pass](specs/2026-10-07-cleanup-design.md) | spec | current | The 2026-10 code cleanup pass: scope, streams, rules. |
 
-## Historical (77 rows, in `archive/`)
+## Historical (79 rows, in `archive/`)
 
 | Date | Doc | Kind | Status | Summary |
 |---|---|---|---|---|
@@ -101,6 +102,7 @@ doc has one row. Written for the 2026-10-07 cleanup pass (finding E12).
 | 2026-07-30 | [M5 — Unified Entry + Packaging + Docs Implementation Plan](archive/plans/2026-07-30-m5-unified-entry.md) | plan | historical | M5 plan. Executed. |
 | 2026-07-30 | [M5 — Unified Entry + Packaging + Docs (design)](archive/specs/2026-07-30-m5-unified-entry-design.md) | spec | historical | Unified entry, packaging and docs for the JVM-era milestones. Superseded. |
 | 2026-08-11 | [Code review: M0–M4 director daemon rework](archive/reviews/2026-08-11-m0-m4-once-over.md) | review | historical | Code review of the M0-M4 director rework. Findings fixed. |
+| 2026-08-11 | [Director Daemon Rework — Design Spec](archive/specs/2026-08-11-director-daemon-rework-design.md) | spec | historical | Director daemon as the one source of truth; shim becomes a thin client. Implemented through M4; the daemon was removed on 2026-10-08. |
 | 2026-08-13 | [Stage 1: Provider Contract Foundations — Implementation Plan](archive/plans/2026-08-13-stage1-provider-contract.md) | plan | historical | Stage 1 plan: provider contract. Executed. |
 | 2026-08-13 | [Stage 2a-i: The Write Path — Implementation Plan](archive/plans/2026-08-13-stage2a-i-write-path.md) | plan | historical | Stage 2a-i plan: write path. Executed. |
 | 2026-08-13 | [Stage 2a-ii Gate 1: Measure the Bypass — Implementation Plan](archive/plans/2026-08-13-stage2a-ii-gate1-measure.md) | plan | historical | Gate 1 plan: measure the bypass. Executed. |
@@ -125,3 +127,4 @@ doc has one row. Written for the 2026-10-07 cleanup pass (finding E12).
 | 2026-09-23 | [Block Store Implementation Plan](archive/plans/2026-09-23-block-store.md) | plan | historical | Block store plan. Executed. |
 | 2026-09-29 | [The `vfs` CLI on Linux, and rooted launches — Implementation Plan](archive/plans/2026-09-29-linux-cli.md) | plan | historical | vfs CLI plan. Executed. |
 | 2026-09-29 | [`vfs-storage` Implementation Plan](archive/plans/2026-09-29-vfs-storage.md) | plan | historical | vfs-storage plan. Executed. |
+| 2026-09-29 | [The `vfs` CLI and daemon on Linux, and rooted launches — design](archive/specs/2026-09-29-linux-cli-design.md) | spec | historical | The vfs CLI and daemon on Linux, and rooted launches. The CLI and daemon were removed on 2026-10-08; rooted launches live on in `vfs-embed`. |

@@ -9,9 +9,10 @@ jobs:
     # the account is `runneradmin`, which exceeds eight characters, so the
     # profile directory carries an 8.3 alias and **every path derived from
     # `std::env::temp_dir()` carries it too**. Eleven tests failed for that
-    # reason alone — `vfs-redirect`'s two 8.3 unit tests plus nine
-    # `vfs-directord` e2e tests — while passing on any developer machine whose
-    # user name happens to fit in 8.3, which is why it went unnoticed for weeks.
+    # reason alone — `vfs-redirect`'s two 8.3 unit tests plus nine daemon
+    # e2e tests (since moved to `vfs-embed`) — while passing on any developer
+    # machine whose user name happens to fit in 8.3, which is why it went
+    # unnoticed for weeks.
     #
     # The defect those tests trip over is real but shallow in practice: a root
     # *declared* in short form matches short paths and nothing else, including
@@ -61,11 +62,11 @@ jobs:
       - name: Clippy (workspace, all targets, warnings are errors)
         run: cargo clippy --all-targets -- -D warnings
         working-directory: rust
-      - name: Build daemon + inject artifacts
-        # Ensure shim/payload/fixtures sit next to the test profile so the
-        # daemon e2e can inject them without a nested cargo build. The fixture
+      - name: Build inject artifacts
+        # Ensure shim/payload/fixtures sit next to the test profile so
+        # vfs-embed's e2e tests can inject them without a nested cargo build. The fixture
         # list must stay in step with `ensure_inject_artifacts`'s `needed`
-        # array in crates/vfs-directord/tests/support/artifacts.rs — that is the code that
+        # array in crates/vfs-embed/tests/support/artifacts.rs — that is the code that
         # decides which artifacts have to be present, and it re-runs cargo
         # itself for anything missing or stale.
         #
@@ -80,7 +81,7 @@ jobs:
         # and fails LNK1181. A developer tree hides this: the lib is already
         # there from an earlier build. Nothing downstream can self-heal it the
         # way `needed` does, because the failure is in the outer compile.
-        run: cargo build -p vfs-directord -p vfs-source -p vfs-inject -p vfs-shim-dll -p vfs-fixture-read -p vfs-fixture-writepath -p vfs-fixture-escape -p vfs-fixture-prefs -p vfs-fixture-vproxy -p vfs-bench
+        run: cargo build -p vfs-inject -p vfs-shim-dll -p vfs-fixture-read -p vfs-fixture-writepath -p vfs-fixture-escape -p vfs-fixture-prefs -p vfs-fixture-vproxy -p vfs-bench
         working-directory: rust
       - name: Build vfs-payload (separate workspace)
         working-directory: rust
@@ -89,7 +90,7 @@ jobs:
           CARGO_TARGET_DIR: target
       # `--no-fail-fast` is not optional here. Without it cargo stops after the
       # first test binary that fails, and this suite is 689 tests across 116
-      # binaries — so a single failing `vfs-directord` e2e test truncated the run
+      # binaries — so a single failing daemon e2e test truncated the run
       # at 274 tests and reported "7 failed" when the real total was unknown.
       # A red run that hides most of the suite is barely better than no run: it
       # tells you something broke without telling you how much.
@@ -113,10 +114,10 @@ jobs:
       # portable and is listed here.
       LINUX_CRATES: >-
         -p vfs-ipc -p vfs-protocol -p vfs-provider -p vfs-compose -p vfs-pe
-        -p vfs-source -p vfs-zip -p vfs-core -p vfs-env -p vfs-unix -p vfs-proton
-        -p vfs-embed -p vfs-director -p vfs-directord -p vfs-block-store
+        -p vfs-zip -p vfs-core -p vfs-env -p vfs-unix -p vfs-proton
+        -p vfs-embed -p vfs-director -p vfs-block-store
         -p vfs-storage -p vfs-registry -p vfs-testkit -p vfs-bench -p vfs-ntlayout
-        -p vfs-redirect -p vfs-control
+        -p vfs-redirect
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -274,14 +275,6 @@ jobs:
         working-directory: rust
         env:
           VFS_TEST_REQUIRE_ALL: "1"
-      # Both `#[ignore]`d tests in the file: the disk write layer, and the
-      # named storage layer (`type = "layer"`) whose save must survive `vfs
-      # down` and a daemon restart and come back out through `vfs layer
-      # export`. Each sets `VFS_STORAGE_DIR` to its own temp directory, so no
-      # daemon here touches `$VFS_HOME/storage`.
-      - name: vfs CLI end to end (vfs up + vfs exec under Proton, disk and layer write layers)
-        run: timeout 900 cargo test -p vfs-directord --test proton_cli -- --ignored --nocapture
-        working-directory: rust
 
   # The add-ons workspace (addons/): optional crates on top of the core. Its own
   # job, so the core's build never sees them.

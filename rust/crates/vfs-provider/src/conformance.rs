@@ -970,7 +970,7 @@ fn assert_common(p: &Arc<dyn Provider>) {
     );
 
     // Opening an absent path fails with NOT_FOUND, not some other error and
-    // not success. The old vfs-source suite asserted this; six ports depend
+    // not success. The old per-crate suites asserted this; six ports depend
     // on it staying true.
     match p.open(VPath::at_default("nope.txt"), crate::OPEN_READ) {
         Err(e) if e == crate::not_found() => {}

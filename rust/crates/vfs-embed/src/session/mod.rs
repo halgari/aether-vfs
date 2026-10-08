@@ -61,8 +61,8 @@ pub struct Session {
     ///
     /// **This is the one place a session's provider graph is composed**, for
     /// every root and for every host: `Session::mount`'s single-root
-    /// convenience, and `vfs-directord`'s `SessionRegistry` (which drives the
-    /// multi-root gRPC/TOML surface) both land here. Composing anywhere else
+    /// convenience and [`Session::set_root_mounts`] (which a host adding
+    /// sources one at a time drives, root by root) both land here. Composing anywhere else
     /// — calling `kernel().mount` with a hand-built graph — silently drops
     /// whatever the *other* half of the composition contributed (copy-on-write,
     /// in practice).
@@ -164,8 +164,8 @@ impl Session {
     /// project detects a write that bypassed the director, so inherited
     /// content fails that check with nothing having actually fallen through —
     /// and, worse in the other direction, a real bypass gets dismissed as
-    /// leftovers. `vfs-directord`'s `SessionRegistry::create` clears its base
-    /// directory before every session for exactly this reason. A host picking
+    /// leftovers. [`Session::new`]'s defaults are cleared on the way in for
+    /// exactly this reason. A host picking
     /// its own directories inherits the hazard along with the choice.
     pub fn set_overlay(&mut self, path: impl Into<PathBuf>) {
         self.overlay = path.into();
@@ -218,10 +218,6 @@ impl Session {
     /// `set_root` had left it. Accepting-then-discarding is the one behaviour
     /// that cannot be right, and a fallible signature would force every host
     /// to special-case the id that needs it least.
-    ///
-    /// A daemon session declares root 0 the same way when its config names
-    /// one (`SessionRegistry::declare_root`), and reports the declared
-    /// location as the session's root.
     ///
     /// Re-declaring an id replaces its path. Takes effect at the next
     /// [`Session::serve`] or [`Session::launch`], which is what publishes it

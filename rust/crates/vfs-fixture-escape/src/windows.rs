@@ -151,7 +151,7 @@
 //! — it is dispatched only when that variable is set to exactly `"4m"`, so it
 //! cannot change any existing matrix run's line count or output. See
 //! `vector4_metadata_query`'s own doc comment and
-//! `crates/vfs-directord/tests/escape_matrix.rs`'s
+//! `crates/vfs-embed/tests/escape_matrix.rs`'s
 //! `metadata_queries_are_sealed_for_canonicaliser_only_spellings` for the
 //! test that uses it.
 //!
@@ -179,7 +179,7 @@
 //! everything broke.
 //!
 //! Dispatched only when `VFS_ESCAPE_ONLY_VECTOR` is exactly `"enum"`. See
-//! `crates/vfs-directord/tests/enumeration.rs`'s
+//! `crates/vfs-embed/tests/enumeration.rs`'s
 //! `directory_enumeration_under_a_managed_root_hides_an_unserved_real_file`.
 //!
 //! **`VFS_ESCAPE_ONLY_VECTOR`**: when set to one of the vector ids above,
@@ -809,7 +809,7 @@ fn vector4_metadata_query(abs: &str) -> Line {
 // ---------------------------------------------------------------------
 
 /// Separates the entry names packed into this vector's `<note>` field.
-/// Mirrored by `crates/vfs-directord/tests/support/escape.rs`, which splits on it.
+/// Mirrored by `crates/vfs-embed/tests/support/escape.rs`, which splits on it.
 /// A Windows filename cannot contain `|`, so no name can forge a boundary.
 const ENUM_NAME_SEP: char = '|';
 

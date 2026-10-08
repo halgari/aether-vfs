@@ -219,7 +219,7 @@ pub(super) static OUTCOME_PATHS: [BoundedTally<String>; OUTCOME_N] =
 /// `PATHS_SHOWN`: this table prints one such list per outcome, so it must
 /// stay skimmable rather than repeat the full passthrough dump once per outcome.
 ///
-/// **Not purely cosmetic**: `vfs-directord`'s escape matrix locates each
+/// **Not purely cosmetic**: `vfs-embed`'s escape matrix test locates each
 /// vector's own attempt in this list and asserts the list did not truncate
 /// (`... and N more`) for a run that small, because a per-vector search
 /// against a truncated list proves nothing. Raised from 20 when the matrix
@@ -267,7 +267,7 @@ pub(super) static UNROUTED_DIRECTOR_OPENS: AtomicU64 = AtomicU64::new(0);
 /// would renumber `OUTCOME_COUNTS` against the audit tables in
 /// `docs/bypass-baseline.md`.
 ///
-/// `vfs-directord`'s `tests/support/mod.rs` matches this string. A rename
+/// `vfs-embed`'s `tests/support/shim_report.rs` matches this string. A rename
 /// there without one here turns the reconciliation back into a silent
 /// inequality.
 pub(crate) const UNROUTED_OPEN_LABEL: &str = "director-open: unrouted";

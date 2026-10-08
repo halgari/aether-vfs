@@ -122,7 +122,7 @@ fn scenario_toml_disk_source_fixture_writepath() {
 
     // Baseline for the director's open count, taken right before the launch
     // that will drive real opens through `OP_OPEN`/`record_open`. `io_stats`
-    // is a process-wide static (not per-`DirectorService`), and this test
+    // is a process-wide static (not per-session), and this test
     // binary runs other tests concurrently, so a delta — not an absolute
     // reading — is what isolates this launch's own opens (same convention
     // `io_stats::tests::open_totals_counts_ok_and_err_separately` uses).

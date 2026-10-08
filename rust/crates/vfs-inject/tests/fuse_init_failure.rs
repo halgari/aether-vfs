@@ -47,7 +47,8 @@ fn fuse_init_failure_aborts_the_launch() {
 
     // This is a single-test binary (one process), so mutating process env
     // around this one call cannot race another test the way it would in a
-    // multi-test file (see `vfs-directord`'s `LAUNCH_LOCK` for that case).
+    // multi-test file (see `vfs-embed`'s `tests/support/launch.rs`
+    // `LAUNCH_LOCK` for that case).
     std::env::set_var(vfs_env::TEST_FUSE_INIT_FAIL, "1");
     let result = run_target_with_shim(RunConfig {
         target_exe: probe,

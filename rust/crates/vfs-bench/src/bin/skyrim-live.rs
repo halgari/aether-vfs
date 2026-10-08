@@ -41,7 +41,10 @@ fn env_path(key: &str, default: &str) -> PathBuf {
 
 fn main() {
     if cfg!(not(windows)) {
-        eprintln!("skyrim-live is a Windows harness; on Linux use `vfs up` + `vfs exec`");
+        eprintln!(
+            "skyrim-live is a Windows harness; on Linux, vfs-embed's proton_skyrim test \
+             launches Skyrim under Proton"
+        );
         std::process::exit(2);
     }
     if let Err(e) = run() {
@@ -349,7 +352,7 @@ component match sees exactly what the game's own raw NT open spells)",
     // directory this harness exists to observe.
     //
     // Composed by [`vfs_embed::compose_root`] — the same function
-    // `Session::recompose` and the daemon's `SessionRegistry` use — rather
+    // `Session::recompose` uses — rather
     // than by assembling an `OverlayProvider` here. It cannot go through
     // `Session` itself (the counters have to wrap the *composed* provider and
     // `Session` composes internally, with no hook for a wrapper), but it can
@@ -1321,10 +1324,9 @@ fn is_safe_to_wipe(root: &Path) -> bool {
 /// Director-side open counts, for reconciling against the shim's `routed`
 /// outcome count (see `rust/docs/bypass-baseline.md`).
 ///
-/// `skyrim-live` embeds the director directly rather than through the
-/// `vfs-directord` gRPC daemon, so there is no `vfs stats` endpoint to query
-/// for a live game run; this prints the same `io_stats::open_totals()` /
-/// `rejected_writes()` the gRPC `stats` RPC exposes for the daemon case.
+/// `skyrim-live` embeds the director directly, so there is no stats endpoint
+/// to query for a live game run; this prints `io_stats::open_totals()` /
+/// `rejected_writes()` to stderr instead.
 /// Purely additive stderr output — no I/O routing decision reads this.
 ///
 /// **Per-root breakdown, to the extent this process can see one.**

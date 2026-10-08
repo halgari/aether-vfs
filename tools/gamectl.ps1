@@ -24,10 +24,9 @@
 #   4. the director's own open AND routed-write totals, per root
 #
 # 1-3 come from the shim's stats log; 4 comes from skyrim-live's stderr log
-# (skyrim-live embeds the director directly — there is no separate
-# `vfs-directord` gRPC daemon for a live game run, so there is no `vfs stats`
-# endpoint to query; this reads the same `io_stats` numbers skyrim-live prints
-# to its own stderr). Gate 4's acceptance reading needs 2 and 4 together:
+# (skyrim-live embeds the director directly, so there is no stats endpoint to
+# query; this reads the `io_stats` numbers skyrim-live prints to its own
+# stderr). Gate 4's acceptance reading needs 2 and 4 together:
 # `fell-through: write-fallback` absent/zero is only evidence when the
 # director's `vfs-io writes: ops=` is greater than zero.
 param(
