@@ -1,3 +1,2 @@
 # One style for the whole workspace, matching the crates' edition.
-# (vfs-block-store is edition 2024 but is formatted the same way.)
 style_edition = "2021"

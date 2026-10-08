@@ -27,7 +27,7 @@ optional `Provider` adapter. The core never depends on them.
 | [Architectural overview](rust/docs/architecture.md) | Engineers: how the system fits together, and how the hard parts are solved |
 | [Product overview](docs/product-overview.md) | Non-technical: what it does and why it matters |
 | [Benchmarks](rust/docs/benchmarks/) | Measurements and the analysis behind them |
-| [Durability](rust/docs/durability.md) | What is durable when, for named layers and the registry overlay |
+| [Durability](addons/crates/aether-storage/DURABILITY.md) | What is durable when, for named layers and the registry overlay |
 | [Shim invariants](docs/shim-invariants.md) | The rules the NT hooks keep, and the incidents behind them |
 | [Design docs](docs/superpowers/README.md) | Index of specs, plans and reviews (current and archived) |
 | [Code audit](rust/docs/audit-2026-08-13.md) | Historical full-tree review (names as of 2026-08-13) |
@@ -106,9 +106,12 @@ on Linux name the crates (CI's list is in `.github/workflows/ci.yml`):
 cd rust
 cargo test -p vfs-ipc -p vfs-protocol -p vfs-provider -p vfs-compose -p vfs-pe \
   -p vfs-source -p vfs-zip -p vfs-core -p vfs-env -p vfs-unix -p vfs-proton \
-  -p vfs-embed -p vfs-directord -p vfs-director -p vfs-block-store -p vfs-storage \
-  -p vfs-registry -p vfs-redirect -p vfs-ntlayout
+  -p vfs-embed -p vfs-directord -p vfs-director -p vfs-registry -p vfs-redirect \
+  -p vfs-ntlayout
 ```
+
+The add-ons (storage and the downloaders) are their own workspace: run
+`cargo test --workspace` from `addons/`.
 
 On Windows, `cargo test --workspace` builds everything.
 
@@ -318,7 +321,7 @@ output discarded.
 #### Storage: the source cache and named layers
 
 The daemon keeps one storage directory, a deduplicating, compressing block
-store (`vfs-storage`), which holds two things:
+store (`aether-storage`, an add-on in `addons/`), which holds two things:
 
 - **A pull-through cache** for sources that declare themselves **immutable and
   slow**. Today that means a remote (gRPC) source that declares both; an HTTP
@@ -428,8 +431,8 @@ Any language can implement `vfs-source/proto/source.proto` (`Source` service).
 | Provider contract, capabilities, conformance suite | `vfs-provider` |
 | Provider builders, gRPC SourceService | `vfs-source` |
 | Layered / router / overlay (copy-up writes) | `vfs-compose` |
-| Storage: pull-through cache for slow sources, named persistent write layers | `vfs-storage` |
-| Deduplicating, compressing block store (under `vfs-storage`) | `vfs-block-store` |
+| Storage: pull-through cache for slow sources, named persistent write layers (add-on) | `addons/crates/aether-storage` |
+| Deduplicating, compressing block store (under `aether-storage`; add-on) | `addons/crates/aether-block-store` |
 | Director kernel + ring server + staging | `vfs-director` |
 | GE-Proton install, prefix and Wine launch (Linux host) | `vfs-proton` |
 | Registry overlay model | `vfs-registry` |

@@ -18,16 +18,6 @@ members = [
   # Registry overlay model (paths, copy-on-write tree). Portable: depends only on
   # vfs-core. See docs/superpowers/specs/2026-10-05-registry-overlay-design.md.
   "crates/vfs-registry",
-  # Deduplicating, compressing block store (redb index + zstd packs),
-  # imported with its history from aether-vfs-block-store. vfs-storage below
-  # is its one consumer. Edition 2024, as it was upstream; GPL-3.0-only like
-  # the rest.
-  "crates/vfs-block-store",
-  # The block store as pull-through cache and layer storage: one BlockStore,
-  # a redb catalog beside it and a RAM tier of decompressed blocks: the
-  # daemon's pull-through cache and its named write layers. See
-  # docs/superpowers/specs/2026-09-29-vfs-storage-design.md.
-  "crates/vfs-storage",
   "crates/vfs-directord",
   "crates/vfs-ipc",
   "crates/vfs-inject",
@@ -88,7 +78,6 @@ unimplemented = "warn"
 
 [workspace.dependencies]
 # Internal crates.
-vfs-block-store = { path = "crates/vfs-block-store" }
 vfs-compose = { path = "crates/vfs-compose" }
 vfs-control = { path = "crates/vfs-control" }
 vfs-core = { path = "crates/vfs-core" }
@@ -105,7 +94,6 @@ vfs-redirect = { path = "crates/vfs-redirect" }
 vfs-registry = { path = "crates/vfs-registry" }
 vfs-shim = { path = "crates/vfs-shim" }
 vfs-source = { path = "crates/vfs-source" }
-vfs-storage = { path = "crates/vfs-storage" }
 vfs-testkit = { path = "crates/vfs-testkit" }
 vfs-unix = { path = "crates/vfs-unix" }
 vfs-win = { path = "crates/vfs-win" }

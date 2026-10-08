@@ -1,0 +1,45 @@
+[package]
+name = "aether-block-store"
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+edition.workspace = true
+description = "Deduplicating, compressing block store for a virtual file system cache"
+
+[dependencies]
+blake3.workspace = true
+rayon = "1.12"
+redb.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+zstd = "0.14"
+# GPU zstd for bulk writes (feature `gpu-zstd`). Pinned: the crate has no releases (and no
+# LICENSE file, so nothing of it is copied here; it is only linked when the feature is on).
+gzc-gpu = { git = "https://github.com/halgari/gpu-zstd-comp", rev = "655fb68b77b9ad01cd402817a526c2a2ebf4ace2", optional = true }
+
+[dev-dependencies]
+vfs-testkit.workspace = true
+criterion = "0.8"
+proptest.workspace = true
+memory-stats = "1.2"
+tempfile.workspace = true
+
+[features]
+# Enables crash_point() calls that abort the process when BLOCK_STORE_CRASH_AT matches.
+crash-points = []
+# Bulk writes (`WriteClass::Bulk`) can be compressed on the GPU (`BulkCompression::Gpu`), through
+# `gzc-gpu`. Off by default: without it the store builds and runs with no GPU stack at all.
+gpu-zstd = ["dep:gzc-gpu"]
+
+[[bench]]
+name = "store"
+harness = false
+
+[[example]]
+name = "gpu_bench"
+required-features = ["gpu-zstd"]
+
+[lints]
+workspace = true

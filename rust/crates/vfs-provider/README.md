@@ -252,8 +252,8 @@ and in `vfs-compose` today. To avoid documenting aspiration as fact:
 
 - **The write path is on the trait and implemented elsewhere.** `write_at`,
   `set_len`, `mkdir`, `remove`, `rename` and `set_attr` are optional methods;
-  `MemoryProvider`, `OverlayProvider`, `DiskProvider` and `vfs-storage`'s
-  layer provider implement them, and the conformance suite has `ReadWrite`
+  `MemoryProvider`, `OverlayProvider`, `DiskProvider` and the
+  `aether-storage` add-on's layer provider implement them, and the conformance suite has `ReadWrite`
   cases (see `RwMemFixture`).
 - **`vfs-compose`'s combinators are narrower than the spec's catalog.**
   `layered`, `router`, `subdir`, `inline`, `memory`, `seekable`, `readonly`
@@ -262,7 +262,7 @@ and in `vfs-compose` today. To avoid documenting aspiration as fact:
   and hides a removed base path with a `.wh.<name>` marker in the upper.
   `router`'s `readdir` is single-dispatch (it returns one route's listing, not
   the union across routes the design calls for). `cached` is not a
-  `vfs-compose` primitive: `vfs-storage` has `Storage::cached`.
+  `vfs-compose` primitive: the `aether-storage` add-on has `Storage::cached`.
 - **No registry.** There is no `register_provider` and no `type` string →
   factory mapping; providers are constructed directly in Rust.
 - **No Python binding.** That is later work in the design spec (the Rust

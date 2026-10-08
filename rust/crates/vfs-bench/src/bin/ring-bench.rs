@@ -473,6 +473,62 @@ mod imp {
         }
     }
 
+    /// A tree whose stored names are also in an index, by folded path: a base
+    /// that answers [`Provider::stored_name`] without listing, as
+    /// `aether-storage`'s layers do from their catalog. Everything else is the
+    /// tree's.
+    struct Indexed {
+        tree: vfs_compose::MemoryProvider,
+        names: HashMap<String, String>,
+    }
+
+    impl Indexed {
+        fn new(files: &[(String, Vec<u8>)]) -> Self {
+            let mut names = HashMap::new();
+            for (p, _) in files {
+                let mut at = String::new();
+                for comp in p.split('/') {
+                    if !at.is_empty() {
+                        at.push('/');
+                    }
+                    at.push_str(comp);
+                    names.insert(vfs_core::fold(&at), comp.to_string());
+                }
+            }
+            let tree = vfs_compose::MemoryProvider::from_files(
+                files.iter().map(|(p, b)| (p.as_str(), b.as_slice())),
+            );
+            Self { tree, names }
+        }
+    }
+
+    impl Provider for Indexed {
+        fn capabilities(&self) -> Capabilities {
+            self.tree.capabilities()
+        }
+        fn getattr(&self, p: VPath) -> Result<Option<Stat>, i32> {
+            self.tree.getattr(p)
+        }
+        fn readdir(&self, p: VPath) -> Result<Vec<DirEntry>, i32> {
+            self.tree.readdir(p)
+        }
+        fn open(&self, p: VPath, flags: u32) -> Result<(Handle, u64, bool), i32> {
+            self.tree.open(p, flags)
+        }
+        fn close(&self, h: Handle) -> Result<(), i32> {
+            self.tree.close(h)
+        }
+        fn read_at(&self, h: Handle, offset: u64, buf: &mut [u8]) -> Result<usize, i32> {
+            self.tree.read_at(h, offset, buf)
+        }
+        fn stored_name(&self, p: VPath) -> Result<Option<String>, i32> {
+            Ok(self
+                .names
+                .get(&vfs_core::fold(p.rel.trim_matches('/')))
+                .cloned())
+        }
+    }
+
     /// **What one final-path name query costs**, for a font five levels down
     /// a `Data` of 3,000 entries, and for a file directly in `Data`.
     ///
@@ -480,8 +536,8 @@ mod imp {
     ///   across the ring, each listing decoded and searched on the client.
     /// - *one lookup*: `OP_STORED_NAMES`, one round trip for the whole path.
     ///   Against a base that has no index of names the director still lists
-    ///   each directory, on its own side; against one that has (a storage
-    ///   layer), it does not list at all.
+    ///   each directory, on its own side; against one that has ([`Indexed`],
+    ///   as `aether-storage`'s layers are), it does not list at all.
     /// - *directories known*: the shim's cache holds the directories, so only
     ///   the last component is asked about.
     /// - *all known*: the shim's cache answers; no round trip.
@@ -500,32 +556,10 @@ mod imp {
         let tree: Arc<dyn Provider> = Arc::new(vfs_compose::MemoryProvider::from_files(
             files.iter().map(|(p, b)| (p.as_str(), b.as_slice())),
         ));
-        let store_dir = dir.join("names-storage");
-        let _ = std::fs::remove_dir_all(&store_dir);
-        let storage =
-            vfs_storage::Storage::open(&store_dir, vfs_storage::StorageConfig::default()).unwrap();
-        let layer = storage.layer("base").unwrap();
-        for (p, b) in &files {
-            let mut at = String::new();
-            for comp in p.split('/').take(p.split('/').count() - 1) {
-                if !at.is_empty() {
-                    at.push('/');
-                }
-                at.push_str(comp);
-                let _ = layer.mkdir(VPath::at_default(&at));
-            }
-            let (h, _, _) = layer
-                .open(
-                    VPath::at_default(p),
-                    P::OPEN_WRITE | vfs_provider::OPEN_CREATE,
-                )
-                .unwrap();
-            layer.write_at(h, 0, b).unwrap();
-            layer.close(h).unwrap();
-        }
+        let indexed: Arc<dyn Provider> = Arc::new(Indexed::new(&files));
         let d = Arc::new(Director::new());
         d.mount(RootId(0), tree).unwrap();
-        d.mount(RootId(1), layer).unwrap();
+        d.mount(RootId(1), indexed).unwrap();
         let ring = dir.join("ring-names.bin");
         let _ = std::fs::remove_file(&ring);
         let ipc = IpcServe::start_file_backed_with_workers(Arc::clone(&d), &ring, PAYLOAD_CAP, 16)
@@ -607,8 +641,6 @@ mod imp {
         }
         ipc.stop();
         let _ = std::fs::remove_file(&ring);
-        drop(storage);
-        let _ = std::fs::remove_dir_all(&store_dir);
     }
 
     /// **Two deep reads of streamed content, and a small read beside them.**

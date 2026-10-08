@@ -26,6 +26,20 @@ vfs-provider = { path = "../rust/crates/vfs-provider" }
 vfs-compose = { path = "../rust/crates/vfs-compose" }
 vfs-embed = { path = "../rust/crates/vfs-embed", default-features = false }
 vfs-testkit = { path = "../rust/crates/vfs-testkit" }
+vfs-proton = { path = "../rust/crates/vfs-proton", default-features = false }
+
+# Add-on crates.
+aether-block-store = { path = "crates/aether-block-store" }
+aether-storage = { path = "crates/aether-storage" }
+
+# Shared external crates: one version spec each, the same as ../rust/Cargo.toml.
+# Members add their own `features` / `optional` on top.
+blake3 = "1.8"
+proptest = "1.11"
+redb = "4.3"
+tempfile = "3.27"
+thiserror = "2"
+tracing = "0.1"
 
 [profile.dev]
 panic = "unwind"

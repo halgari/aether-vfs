@@ -3,6 +3,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use aether_storage::{SourceKey, Storage, StorageConfig};
 use tokio::net::TcpListener;
 use tonic::transport::Server;
 use vfs_control::pb::director_server::DirectorServer;
@@ -10,10 +11,7 @@ use vfs_control::pb::{source_spec, AddSourceReq, CreateSessionReq, DiskSource, E
 use vfs_control::SourceSpec;
 use vfs_director::RootId;
 use vfs_directord::{connect, DirectorService, SessionRegistry};
-use vfs_embed::{
-    Access, Capabilities, DirEntry, Handle, MemoryProvider, Provider, SourceKey, Stat, Storage,
-    StorageConfig, VPath,
-};
+use vfs_embed::{Access, Capabilities, DirEntry, Handle, MemoryProvider, Provider, Stat, VPath};
 use vfs_source::build_provider;
 use vfs_testkit::zip::write_stored_zip;
 

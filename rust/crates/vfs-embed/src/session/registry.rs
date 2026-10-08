@@ -17,8 +17,8 @@ impl Session {
     /// **`sync`: the durable point of the layer's store** (registry overlay
     /// spec §5). Saves of the overlay are ordinary writes to the layer, which
     /// a deferred-durability store does not make durable by itself. Pass the
-    /// owning store's sync — for a [`crate::Storage`] layer,
-    /// [`registry_sync_for`]`(&storage)` — and the session calls it after
+    /// owning store's sync — for a layer of `aether-storage`'s `Storage`,
+    /// `aether_storage::registry_sync_for(&storage)` — and the session calls it after
     /// the final save when it stops serving ([`Session::stop_serve`], and so
     /// on drop) and when the layer is replaced or detached, and the saver
     /// calls it at most every five minutes while a save is not yet durable.
@@ -93,25 +93,13 @@ impl Session {
 /// back into the session.
 pub type RegistrySync = DurableSync;
 
-/// The [`RegistrySync`] for a registry layer taken from `storage`
-/// ([`crate::Storage::layer`]): [`crate::Storage::sync`], with its error as
-/// the provider status ([`crate::StorageError::to_status`]). Holds the storage
-/// weakly, so it never keeps the directory locked; a storage already gone
-/// was synced by its own close or drop.
-pub fn registry_sync_for(storage: &Arc<vfs_storage::Storage>) -> RegistrySync {
-    let weak = Arc::downgrade(storage);
-    Arc::new(move || match weak.upgrade() {
-        Some(s) => s.sync().map_err(|e| e.to_status()),
-        None => Ok(()),
-    })
-}
-
 #[cfg(test)]
 mod registry_layer_tests {
     use super::*;
     #[cfg(unix)]
     use std::collections::BTreeMap;
-    use std::path::{Path, PathBuf};
+    #[cfg(unix)]
+    use std::path::PathBuf;
     #[cfg(unix)]
     use vfs_proton::launch::{LaunchFiles, RingGeometry, WineLaunch};
     use vfs_provider::VPath;
@@ -163,20 +151,15 @@ mod registry_layer_tests {
         vfs_proton::launch::launch_env(&l)
     }
 
-    /// A scratch directory under the build's target dir (never `/tmp`).
-    fn scratch_dir(tag: &str) -> PathBuf {
-        crate::test_scratch::scratch_dir(&format!("reglayer-{tag}"))
-    }
-
-    fn storage_layer(tag: &str) -> (PathBuf, Arc<dyn Provider>) {
-        let dir = scratch_dir(tag);
-        let storage = crate::Storage::open(&dir, crate::StorageConfig::default()).unwrap();
-        (dir, storage.layer("registry").unwrap())
+    /// A registry layer. The tests against `aether-storage`'s layers (and its
+    /// durable point) are in that crate's `tests/registry_layer.rs`.
+    fn memory_layer() -> Arc<dyn Provider> {
+        Arc::new(crate::MemoryProvider::new())
     }
 
     #[test]
     fn attach_and_detach_toggle_the_registry_flag() {
-        let (dir, layer) = storage_layer("flag");
+        let layer = memory_layer();
         let s = Session::new();
         assert!(!s.registry_attached());
         s.set_registry_layer(Some(layer), None).unwrap();
@@ -192,12 +175,11 @@ mod registry_layer_tests {
         assert!(s.kernel().registry().is_none());
         #[cfg(unix)]
         assert!(!launch_env_of(&s).contains_key("VFS_REGISTRY"));
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn stop_flushes_and_a_second_save_replaces_the_first() {
-        let (dir, layer) = storage_layer("flush");
+        let layer = memory_layer();
         let mut s = Session::new();
         s.set_registry_layer(Some(layer.clone()), None).unwrap();
         let host = s.kernel().registry().unwrap();
@@ -207,7 +189,7 @@ mod registry_layer_tests {
         let first = read(&layer, "overlay.reg").expect("stop must leave overlay.reg in the layer");
         assert!(first.windows(3).any(|w| w == b"one"));
 
-        // Rename onto an existing overlay.reg, on the provider sessions use.
+        // Rename onto an existing overlay.reg.
         host.set_value(KEY, "v", 1, b"two\0").unwrap();
         s.stop_serve();
         let second = read(&layer, "overlay.reg").unwrap();
@@ -220,99 +202,10 @@ mod registry_layer_tests {
 
         // Replacing the layer flushes the old one first.
         host.set_value(KEY, "v", 1, b"six\0").unwrap();
-        let (dir2, other) = storage_layer("flush2");
-        s.set_registry_layer(Some(other), None).unwrap();
+        s.set_registry_layer(Some(memory_layer()), None).unwrap();
         assert!(read(&layer, "overlay.reg")
             .unwrap()
             .windows(3)
             .any(|w| w == b"six"));
-        let _ = std::fs::remove_dir_all(dir);
-        let _ = std::fs::remove_dir_all(dir2);
-    }
-
-    /// What a process kill at this instant leaves of a storage directory: a
-    /// copy of its files, taken while the storage is still open. The
-    /// catalog's non-durable commits live only in the process, so the copy
-    /// opens as of the last durable point (vfs-storage `Durability`), as the
-    /// directory would after a crash.
-    ///
-    /// The storage's own crash hook (`crash_on_drop_for_tests`) cannot stand
-    /// in here: the registry layer's provider runs a durable point when it
-    /// drops, so dropping the session and the layer before the "crash" would
-    /// make everything durable whatever the session did.
-    fn killed_copy(dir: &Path, tag: &str) -> PathBuf {
-        fn copy(from: &Path, to: &Path) {
-            std::fs::create_dir_all(to).unwrap();
-            for e in std::fs::read_dir(from).unwrap() {
-                let e = e.unwrap();
-                let dst = to.join(e.file_name());
-                if e.file_type().unwrap().is_dir() {
-                    copy(&e.path(), &dst);
-                } else {
-                    std::fs::copy(e.path(), dst).unwrap();
-                }
-            }
-        }
-        let to = scratch_dir(tag);
-        copy(dir, &to);
-        to
-    }
-
-    /// The `overlay.reg` a storage directory holds once reopened.
-    fn reopened_overlay(dir: &Path) -> Option<Vec<u8>> {
-        let storage = crate::Storage::open(dir, crate::StorageConfig::default()).unwrap();
-        let layer = storage.layer("registry").unwrap();
-        let saved = read(&layer, "overlay.reg");
-        drop(layer);
-        drop(storage);
-        saved
-    }
-
-    /// Spec §5's durable point at session end: a registry write, a session
-    /// stop, then a crash (a process kill, [`killed_copy`]) and a reopen.
-    /// The write survives because the stop called the storage's sync
-    /// through the layer's hook.
-    #[test]
-    fn a_crash_after_stop_keeps_the_sessions_registry_writes() {
-        let dir = scratch_dir("crash");
-        let storage = crate::Storage::open(&dir, crate::StorageConfig::default()).unwrap();
-        let layer = storage.layer("registry").unwrap();
-        let mut s = Session::new();
-        s.set_registry_layer(Some(layer), Some(registry_sync_for(&storage)))
-            .unwrap();
-        s.kernel()
-            .registry()
-            .unwrap()
-            .set_value(KEY, "v", 1, b"kept\0")
-            .unwrap();
-        s.stop_serve();
-        let crashed = killed_copy(&dir, "crash-killed");
-        let saved = reopened_overlay(&crashed).expect("the overlay survives the crash");
-        assert!(saved.windows(4).any(|w| w == b"kept"));
-        drop(s);
-        drop(storage);
-        let _ = std::fs::remove_dir_all(dir);
-        let _ = std::fs::remove_dir_all(crashed);
-    }
-
-    /// The control for the test above: the same write saved (`flush`) but
-    /// never synced is lost to the same crash, so the sync is what keeps it.
-    #[test]
-    fn a_crash_after_a_save_without_the_sync_loses_it() {
-        let dir = scratch_dir("crash-control");
-        let storage = crate::Storage::open(&dir, crate::StorageConfig::default()).unwrap();
-        let layer = storage.layer("registry").unwrap();
-        let host = RegistryHost::open(layer).unwrap();
-        host.set_value(KEY, "v", 1, b"lost\0").unwrap();
-        host.flush().unwrap();
-        let crashed = killed_copy(&dir, "crash-control-killed");
-        assert!(
-            reopened_overlay(&crashed).is_none_or(|b| !b.windows(4).any(|w| w == b"lost")),
-            "a save with no durable point does not survive the crash"
-        );
-        drop(host);
-        drop(storage);
-        let _ = std::fs::remove_dir_all(dir);
-        let _ = std::fs::remove_dir_all(crashed);
     }
 }

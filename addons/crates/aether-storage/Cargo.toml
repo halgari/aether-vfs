@@ -1,0 +1,43 @@
+[package]
+name = "aether-storage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "The block store as pull-through cache and layer storage: catalog, RAM tier and Storage"
+
+[dependencies]
+aether-block-store.workspace = true
+vfs-provider.workspace = true
+vfs-core.workspace = true
+redb.workspace = true
+uuid = { version = "1", features = ["v4"] }
+blake3.workspace = true
+tracing.workspace = true
+tempfile = { workspace = true, optional = true }
+# Only for `RegistrySync` (`registry_sync_for`, feature `embed`).
+vfs-embed = { workspace = true, optional = true }
+
+[dev-dependencies]
+vfs-testkit.workspace = true
+vfs-provider = { workspace = true, features = ["conformance"] }
+tempfile.workspace = true
+vfs-compose.workspace = true
+vfs-embed.workspace = true
+# The Proton end-to-end test borrows vfs-embed's test support, which names it.
+vfs-proton.workspace = true
+
+[features]
+default = ["embed"]
+# `registry_sync_for`: a `vfs_embed::RegistrySync` for a registry layer kept
+# in a `Storage`. Without it the crate does not depend on `vfs-embed`.
+embed = ["dep:vfs-embed"]
+# Compress bulk writes on the GPU (`aether_block_store::BulkCompression::Gpu`).
+gpu-zstd = ["aether-block-store/gpu-zstd"]
+# Hooks other crates' tests use: `Storage::crash_on_drop_for_tests` and
+# `snapshot_as_killed`.
+test-hooks = ["dep:tempfile"]
+
+[lints]
+workspace = true

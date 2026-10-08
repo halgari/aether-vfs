@@ -40,7 +40,7 @@ pub fn overlay_layer_dir(overlay_root: &Path, root: RootId) -> PathBuf {
 ///
 /// The marker convention lives here, with the rest of the on-disk layout, so
 /// the overlay that writes the markers (`vfs-compose`) and whatever reads an
-/// upper without it (`vfs-storage`'s layer export) cannot drift apart.
+/// upper without it (`aether-storage`'s layer export) cannot drift apart.
 pub const WHITEOUT_PREFIX: &str = ".wh.";
 
 /// The prefix of a copy-up staging file, `.cu.<n>.<name>`: the half-finished

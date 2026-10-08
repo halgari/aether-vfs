@@ -28,9 +28,8 @@ vfs-env.workspace = true
 # `ring-bench` is Unix-only: its Windows `main` just exits.
 [target.'cfg(unix)'.dependencies]
 vfs-provider.workspace = true
-# `ring-bench names`: a base whose names are in an index (a `vfs-storage`
-# layer), and the shim's own final-path code (`vfs-core`).
-vfs-storage.workspace = true
+# `ring-bench names`: the shim's own final-path code and the name folding of
+# its indexed base (`vfs-core`).
 vfs-core.workspace = true
 
 [target.'cfg(windows)'.dependencies]

@@ -100,12 +100,11 @@
 //!   embedding host is multi-threaded by construction. On unix `Session::serve`
 //!   and `Session::launch` never write process env: a Wine child's
 //!   environment block is built explicitly by `vfs_proton::launch::launch_env`.
-//! * **Its own [`Storage`], if it wants caching or persistent layers.** A
-//!   `Session` owns none: a host opens one per storage directory (the store
-//!   allows one process per directory), wraps each slow source with
-//!   [`Storage::cached`], and takes named write layers from [`Storage::layer`].
-//!   Never wrap the write layer itself in a cache — see
-//!   [`Session::set_write_layer_at`].
+//! * **Its own storage, if it wants caching or persistent layers.** A
+//!   `Session` owns none: a host wraps each slow source with a caching
+//!   wrapper such as `aether-storage`'s `Storage::cached`, and may take named
+//!   write layers from the same place (`Storage::layer`). Never wrap the write
+//!   layer itself in a cache — see [`Session::set_write_layer_at`].
 //! * **Session directories that do not inherit a previous run's litter** — see
 //!   [`Session::set_overlay`]. [`Session::new`]'s own defaults handle this for
 //!   themselves; a host that calls `set_root`/`set_overlay`/`set_state_dir`
@@ -126,8 +125,8 @@ mod sources;
 mod test_scratch;
 
 pub use session::{
-    compose_root, registry_sync_for, Activation, LaunchExit, LaunchOpts, RegistrySync, Session,
-    StageOpts, STOPPED_EXIT_CODE,
+    compose_root, Activation, LaunchExit, LaunchOpts, RegistrySync, Session, StageOpts,
+    STOPPED_EXIT_CODE,
 };
 #[cfg(unix)]
 pub use session::{LaunchHandle, LaunchStopper};
@@ -214,21 +213,6 @@ pub use vfs_compose::{
 };
 #[cfg(feature = "zip")]
 pub use vfs_zip::ZipProvider;
-
-// ---------------------------------------------------------------------------
-// Storage: the block store as pull-through cache and as named, persistent
-// write layers (docs/superpowers/specs/2026-09-29-vfs-storage-design.md).
-// Opt-in: a host opens one and wraps providers with it; `Session` owns none.
-// `StorageStats`, `CacheStats`, `ReconcileReport` and `CloseOutcome` come along
-// because `Storage::stats()`, `last_reconcile()` and `close()` return them, and
-// `Durability` because `StorageConfig` holds one — a
-// host able to call a method but not to name what it returns is the seam
-// leaking by omission.
-// ---------------------------------------------------------------------------
-pub use vfs_storage::{
-    CacheStats, CloseOutcome, Durability, LayerInfo, ReconcileReport, SourceKey, Storage,
-    StorageConfig, StorageError, StorageStats,
-};
 
 // ---------------------------------------------------------------------------
 // The kernel, for the cases a host genuinely needs it: reading back through

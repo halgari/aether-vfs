@@ -13,7 +13,7 @@ CLI, storage, embedding). This file is the short map of the workspace.
 | Document | Description |
 |----------|-------------|
 | **[docs/architecture.md](docs/architecture.md)** | How the system fits together; the crate map |
-| [docs/durability.md](docs/durability.md) | What is durable when (named layers, registry overlay) |
+| [aether-storage DURABILITY.md](../addons/crates/aether-storage/DURABILITY.md) | What is durable when (named layers, registry overlay) |
 | [../docs/shim-invariants.md](../docs/shim-invariants.md) | The rules the NT hooks keep, and the incidents behind them |
 | [../docs/superpowers/README.md](../docs/superpowers/README.md) | Index of design specs and plans (current and archived) |
 | [docs/benchmarks/](docs/benchmarks/) | Measurements |
@@ -84,7 +84,7 @@ first:
 | `vfs-directord` | Daemon + `vfs` CLI |
 | `vfs-director` | Kernel: root to provider table, ring server, staging |
 | `vfs-compose`, `vfs-zip`, `vfs-source` | Providers and composition (overlay copy-up, layered, router, zip, remote) |
-| `vfs-storage`, `vfs-block-store` | Pull-through cache and named write layers on a deduplicating block store |
+| `aether-storage`, `aether-block-store` (add-ons, `../addons/crates/`) | Pull-through cache and named write layers on a deduplicating block store |
 | `vfs-proton` | GE-Proton install, prefix and Wine launch (Linux host) |
 | `vfs-shim`, `vfs-inject` | The Windows half: NT detours, launch and injection |
 

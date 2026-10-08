@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use tonic::transport::Server;
 
-use vfs_embed::{CloseOutcome, Storage};
+use aether_storage::{CloseOutcome, Storage};
 
 use crate::discovery::{read_discovery, write_discovery, Discovery};
 use crate::service::DirectorService;

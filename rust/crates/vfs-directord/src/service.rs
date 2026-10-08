@@ -8,6 +8,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::Stream;
 use tonic::{Request, Response, Status};
 
+use aether_storage::{SourceKey, Storage, StorageError};
 use vfs_control::pb::director_server::Director;
 use vfs_control::pb::{
     launch_event, source_spec, AddSourceReq, CreateSessionReq, DeclareRootReq, Empty, HealthReq,
@@ -15,7 +16,7 @@ use vfs_control::pb::{
     LayerPathReq, RejectedWrite, Session, SessionList, SourceRef, StatsResp, TeardownReq,
 };
 use vfs_control::SourceSpec;
-use vfs_embed::{open_totals, rejected_writes, LaunchOpts, SourceKey, Storage, StorageError};
+use vfs_embed::{open_totals, rejected_writes, LaunchOpts};
 use vfs_source::build_provider;
 
 use crate::sessions::{LayerOpError, SessionRegistry, NO_STORAGE};
@@ -491,7 +492,8 @@ mod tests {
 
         let dir = vfs_testkit::tempdir().unwrap();
         let storage =
-            vfs_embed::Storage::open(dir.path(), vfs_embed::StorageConfig::default()).unwrap();
+            aether_storage::Storage::open(dir.path(), aether_storage::StorageConfig::default())
+                .unwrap();
         let reg = SessionRegistry::with_storage(Arc::clone(&storage));
         let s = reg.create("stats".into()).unwrap();
         reg.set_layer_write_layer(&s.id, 0, "one").unwrap();

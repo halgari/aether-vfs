@@ -4,7 +4,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use vfs_embed::{Storage, StorageConfig};
+use aether_storage::{Storage, StorageConfig};
 
 /// The daemon's storage directory: `flag` (`--storage-dir`), else
 /// `VFS_STORAGE_DIR`, else `<home>/storage`, where the aether-vfs home is
