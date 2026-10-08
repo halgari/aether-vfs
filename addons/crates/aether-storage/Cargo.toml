@@ -27,6 +27,8 @@ vfs-compose.workspace = true
 vfs-embed.workspace = true
 # The Proton end-to-end test borrows vfs-embed's test support, which names it.
 vfs-proton.workspace = true
+# ... and parses Cargo.toml files to decide when to rebuild the Windows artefacts.
+toml.workspace = true
 
 [features]
 default = ["embed"]

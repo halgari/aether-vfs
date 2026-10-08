@@ -62,6 +62,7 @@ steamroom = { git = "https://github.com/landaire/steamroom", rev = "4dd310cb98d9
 tempfile = "3.27"
 thiserror = "2"
 tokio = "1"
+toml = "0.8"
 tracing = "0.1"
 url = "2.5.8"
 xxhash-rust = "0.8.19"
