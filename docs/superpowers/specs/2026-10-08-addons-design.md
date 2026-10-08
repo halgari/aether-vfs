@@ -84,8 +84,11 @@ Naming: `aether-*` for add-ons, `vfs-*` for core, so a crate's name says which s
 
 From `haskill-sources`: `Http`, `HttpConfig`, `Limiter`, `Permit`, `RetryPolicy`, `Events`,
 `JobId`, `SourceEvent`, `BulkHttp`, `BulkHttpConfig`, `RangeBody`, `HttpFile`, `Downloaded`,
-`BlobSink`, `MemorySink`, and the error type (`NetError`, with the Nexus/CDN-specific variants
-moving to their crates). Depends on `aether-archive` for `Xxh64`.
+`BlobSink`, `MemorySink`, and the one shared error type `SourceError` (kept whole so Haskill's
+matches on `SourceError::Status`, `ArchiveChanged`, … keep working; Nexus and CDN code return it).
+Host-specific wording leaves it: `NexusUnauthorized` no longer names `haskill login nexus`, and the
+`Bethesda { status, code, msg }` variant becomes `Refused { service: &'static str, status, code,
+msg }`. Depends on `aether-archive` for `Xxh64` and `FormatError`.
 
 ### 4.2 `aether-archive`
 
@@ -128,7 +131,10 @@ demand, never sign ahead, respect the hourly quota) are crate behaviour and are 
 
 `haskill-wabbajack`, `haskill-gamedb`, `haskill-resolve`, `haskill-store`, `haskill-vfs`,
 `haskill-formats` (bsa, octodiff), texture/GPU/DDS crates, the CLI. `haskill-sources` shrinks to
-`bethesda/` (CKM / Creation Club). Haskill depends on add-ons by path through the
+`bethesda/` (CKM / Creation Club) plus re-exports of `aether-net`, `aether-wj-cdn` and
+`aether-nexus` (as `nexus`), so Haskill's `haskill_sources::…` paths keep working. Likewise
+`haskill-formats` re-exports `aether_archive`'s `range`, `seekable`, `zip`, `path` modules and
+`FormatError`. `haskill-steam` is deleted and its users import `aether_steam`. Haskill depends on add-ons by path through the
 `external/aether-vfs` submodule, replacing its `vfs-storage` workspace dep with `aether-storage`.
 
 ### 4.6 `aether-gog`
