@@ -13,6 +13,13 @@ daemon — see [Embedding](#embedding) below.
 
 > Pure Rust. The former Clojure/JVM layer has been removed (M4).
 
+## Add-ons
+
+Optional crates live in [`addons/`](addons/README.md), a separate Cargo
+workspace: storage (block store, pull-through cache, named layers) and
+downloaders for Steam, Nexus Mods, the Wabbajack CDN and GOG, each with an
+optional `Provider` adapter. The core never depends on them.
+
 ## Documentation
 
 | Document | For |

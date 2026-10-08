@@ -282,3 +282,25 @@ jobs:
       - name: vfs CLI end to end (vfs up + vfs exec under Proton, disk and layer write layers)
         run: timeout 900 cargo test -p vfs-directord --test proton_cli -- --ignored --nocapture
         working-directory: rust
+
+  # The add-ons workspace (addons/): optional crates on top of the core. Its own
+  # job, so the core's build never sees them.
+  addons:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: addons
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: addons
+      - name: fmt
+        run: cargo fmt --all --check
+      - name: clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: test
+        run: cargo test --workspace --all-features

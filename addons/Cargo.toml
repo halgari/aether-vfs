@@ -1,0 +1,35 @@
+# The add-ons: optional crates on top of the core in ../rust. The core never
+# depends on anything here. See docs/superpowers/specs/2026-10-08-addons-design.md.
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-only"
+rust-version = "1.96"
+publish = false
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
+
+[workspace.dependencies]
+# Core crates, by path.
+vfs-core = { path = "../rust/crates/vfs-core" }
+vfs-provider = { path = "../rust/crates/vfs-provider" }
+vfs-compose = { path = "../rust/crates/vfs-compose" }
+vfs-embed = { path = "../rust/crates/vfs-embed", default-features = false }
+vfs-testkit = { path = "../rust/crates/vfs-testkit" }
+
+[profile.dev]
+panic = "unwind"
+
+# Third-party code optimised even in debug builds, as in the core workspace.
+[profile.dev.package."*"]
+opt-level = 2
