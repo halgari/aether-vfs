@@ -223,3 +223,88 @@ async fn large_read_fetches_a_bounded_number_of_chunks_at_once() {
     let max = fake.max_cdn_in_flight();
     assert!((2..=3).contains(&max), "{max} chunk requests at once");
 }
+
+/// Asserts no CDN path token issued by `fake` appears in `text`.
+fn assert_no_token(fake: &FakeGog, text: &str) {
+    let tokens = fake.cdn_tokens();
+    assert!(!tokens.is_empty());
+    for t in tokens {
+        assert!(!text.contains(&t), "secure-link token {t} leaked: {text}");
+    }
+}
+
+/// The secure link carries its token in the URL path, which `redact`
+/// (query strings only) does not strip: a failed chunk fetch must not put
+/// it in the error, its Debug form, or the retry/failure events.
+#[tokio::test]
+async fn chunk_errors_never_show_the_secure_link_token() {
+    let fake = start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = fake.config(dir.path());
+    complete_login(&http(), &cfg, CODE).await.unwrap();
+    let events = aether_net::Events::new(1024);
+    let mut rx = events.subscribe();
+    let h = aether_net::Http::new(http().config().clone(), events).unwrap();
+    let content = GogContent::open(h, cfg).await.unwrap();
+    let builds = content.builds(ProductId(GAME), Os::Windows).await.unwrap();
+    let details = content.build_details(&builds[0]).await.unwrap();
+    let m = content.depot(&details.depots[0]).await.unwrap();
+    let f = content
+        .file(ProductId(GAME), &m, "Data\\Big.bin")
+        .await
+        .unwrap();
+    let data = big();
+    for (i, status) in [(0, 500), (1, 403)] {
+        let id = FakeGog::chunk_id(&data[i * CHUNK..(i + 1) * CHUNK]);
+        fake.fail_chunk(&id, status);
+        let e = f
+            .read_at((i * CHUNK) as u64, &mut [0u8; 10])
+            .await
+            .unwrap_err();
+        let shown = format!("{e}");
+        assert!(shown.contains(&status.to_string()), "{shown}");
+        assert_no_token(&fake, &shown);
+        assert_no_token(&fake, &format!("{e:?}"));
+        let io: std::io::Error = e.into();
+        assert_no_token(&fake, &format!("{io} {io:?}"));
+    }
+    let mut seen = 0;
+    while let Ok(ev) = rx.try_recv() {
+        assert_no_token(&fake, &format!("{ev:?}"));
+        seen += 1;
+    }
+    assert!(seen > 0);
+}
+
+/// Two downloads refused on the same stale link: the second must not
+/// drop the fresh link the first fetched.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_refusals_renew_the_secure_link_once() {
+    let fake = start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (content, m) = setup(&fake, dir.path()).await;
+    let f = content
+        .file(ProductId(GAME), &m[0], "Data\\Big.bin")
+        .await
+        .unwrap();
+    let data = big();
+    let before = fake.secure_link_calls();
+    fake.revoke_cdn_tokens();
+    // The second chunk's refusal arrives well after the first was renewed.
+    fake.delay_chunk(&FakeGog::chunk_id(&data[CHUNK..2 * CHUNK]), 300);
+    let reads = (0..2usize).map(|i| {
+        let f = f.clone();
+        tokio::spawn(async move {
+            let mut buf = vec![0u8; CHUNK];
+            f.read_at((i * CHUNK) as u64, &mut buf).await.map(|_| buf)
+        })
+    });
+    for (i, r) in futures_util::future::join_all(reads)
+        .await
+        .into_iter()
+        .enumerate()
+    {
+        assert_eq!(r.unwrap().unwrap(), data[i * CHUNK..(i + 1) * CHUNK]);
+    }
+    assert_eq!(fake.secure_link_calls() - before, 1, "one renewal");
+}

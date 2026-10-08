@@ -43,6 +43,11 @@ pub const MTIME: i64 = 1_577_836_800;
 /// Steam's chunk size: the natural unit for a cache in front of this.
 const STEAM_CHUNK: u32 = 1 << 20;
 
+/// One `read_at` returns at most this many bytes (short reads are legal):
+/// a read fetches and holds all the chunks it covers at once, so a huge
+/// read must not buffer the whole range.
+const MAX_READ: usize = 32 << 20;
+
 enum Kind {
     /// Children, in the order first seen.
     Dir(Vec<u32>),
@@ -80,6 +85,8 @@ pub struct DepotProvider {
     by_path: HashMap<String, u32>,
     handles: HandleTable<BlockingDepotFile>,
     rt: RtHandle,
+    /// [`MAX_READ`], smaller in tests.
+    max_read: usize,
 }
 
 /// `rel`'s components, folded and joined by `/`; `""` for the root.
@@ -167,6 +174,7 @@ impl DepotProvider {
             nodes,
             by_path,
             handles: HandleTable::new(),
+            max_read: MAX_READ,
             rt,
         }
     }
@@ -265,7 +273,7 @@ impl Provider for DepotProvider {
         if offset >= len || buf.is_empty() {
             return Ok(0);
         }
-        let n = (len - offset).min(buf.len() as u64) as usize;
+        let n = (len - offset).min(buf.len().min(self.max_read) as u64) as usize;
         file.read_at(offset, &mut buf[..n]).map_err(|e| {
             tracing::warn!(
                 depot = %file.file().depot(),
@@ -314,6 +322,11 @@ mod tests {
     }
 
     fn fixture(depots: &[Depot]) -> Fixture {
+        fixture_capped(depots, MAX_READ)
+    }
+
+    /// [`fixture`] whose reads return at most `max_read` bytes.
+    fn fixture_capped(depots: &[Depot], max_read: usize) -> Fixture {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
@@ -353,7 +366,10 @@ mod tests {
         });
         let game = SteamGame::from_parts(AppId(7), parts);
         Fixture {
-            provider: Arc::new(DepotProvider::new(game, rt.handle().clone())),
+            provider: Arc::new(DepotProvider {
+                max_read,
+                ..DepotProvider::new(game, rt.handle().clone())
+            }),
             _cdns: cdns,
             rt,
         }
@@ -444,6 +460,17 @@ mod tests {
         assert_eq!(read(p, "big.bin", 90, 64), &body[90..], "short at the end");
         assert_eq!(read(p, "big.bin", 100, 8), b"", "at EOF");
         assert_eq!(read(p, "big.bin", 1000, 8), b"", "past EOF");
+    }
+
+    /// A read larger than the cap is short: exactly the cap, correct bytes,
+    /// rather than fetching and buffering every chunk it covers.
+    #[test]
+    fn a_huge_read_is_capped() {
+        let body: Vec<u8> = (0..100u8).collect();
+        let f = fixture_capped(&[&[("big.bin", &body, 16)]], 40);
+        let p = &f.provider;
+        assert_eq!(read(p, "big.bin", 5, 90), &body[5..45]);
+        assert_eq!(read(p, "big.bin", 70, 90), &body[70..], "short at the end");
     }
 
     /// Provider methods run on director threads. Called on a tokio worker

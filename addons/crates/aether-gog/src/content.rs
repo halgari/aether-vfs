@@ -29,6 +29,9 @@ const MAX_META_BODY: u64 = 256 << 20;
 const LINK_MARGIN_SECS: u64 = 60;
 /// How long a secure link without an `expires_at` is used.
 const LINK_DEFAULT_TTL_SECS: u64 = 3600;
+/// Secure-link parameter values at least this long are scrubbed from error
+/// text (shorter ones, like `dirs=2`, cannot be secrets and would mangle it).
+const MIN_SECRET_LEN: usize = 6;
 
 /// GOG content for one login. Cheap to clone.
 ///
@@ -219,9 +222,14 @@ impl GogContent {
         Ok(link)
     }
 
-    /// Forget `product`'s link (the CDN refused it).
-    pub(crate) async fn drop_secure_link(&self, product: ProductId) {
-        self.inner.links.lock().await.remove(&product);
+    /// Forget `product`'s link if it is still `refused`, the one the CDN
+    /// rejected. A download whose refusal comes after another's has
+    /// already put a fresh link in its place drops nothing.
+    pub(crate) async fn drop_secure_link(&self, product: ProductId, refused: &SecureLink) {
+        let mut links = self.inner.links.lock().await;
+        if links.get(&product) == Some(refused) {
+            links.remove(&product);
+        }
     }
 }
 
@@ -230,7 +238,12 @@ impl GogContent {
 /// `/{md5[0..2]}/{md5[2..4]}/{md5}` appended to the `path` parameter, as
 /// NexusMods.App's `ChunkedStreamSource.cs` and heroic-gogdl's
 /// `merge_url_with_params` build it.
-#[derive(Clone)]
+///
+/// The template may put secrets in the URL *path* (`~token=…`), where
+/// [`aether_net::error::redact`] does not look, so errors name a chunk by
+/// [`shown_chunk_url`](Self::shown_chunk_url) and pass through
+/// [`scrub`](Self::scrub).
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) struct SecureLink {
     url_format: String,
     params: Vec<(String, String)>,
@@ -297,6 +310,21 @@ impl SecureLink {
 
     /// The URL of the chunk whose compressed MD5 is `md5` (lowercase hex).
     pub(crate) fn chunk_url(&self, md5: &str) -> Result<Url, SourceError> {
+        Url::parse(&self.fill(md5, false)).map_err(|e| SourceError::Protocol {
+            url: aether_net::error::redact_raw(&self.fill(md5, true)),
+            msg: format!("GOG secure link gave a bad URL: {e}"),
+        })
+    }
+
+    /// [`chunk_url`](Self::chunk_url) with every parameter but `base_url`
+    /// and `path` replaced by `REDACTED`: what errors and logs may show.
+    pub(crate) fn shown_chunk_url(&self, md5: &str) -> Url {
+        let shown = self.fill(md5, true);
+        Url::parse(&shown)
+            .unwrap_or_else(|_| Url::parse(&format!("gog-cdn:chunk/{md5}")).expect("a valid URL"))
+    }
+
+    fn fill(&self, md5: &str, redacted: bool) -> String {
         let path = format!("{}/{}/{}/{md5}", self.path, &md5[..2], &md5[2..4]);
         let mut u = self.url_format.clone();
         for (k, v) in self
@@ -305,12 +333,46 @@ impl SecureLink {
             .map(|(k, v)| (k.as_str(), v.as_str()))
             .chain([("path", path.as_str())])
         {
+            let v = if redacted && k != "base_url" && k != "path" {
+                "REDACTED"
+            } else {
+                v
+            };
             u = u.replace(&format!("{{{k}}}"), v);
         }
-        Url::parse(&u).map_err(|e| SourceError::Protocol {
-            url: aether_net::error::redact_raw(&u),
-            msg: format!("GOG secure link gave a bad URL: {e}"),
-        })
+        u
+    }
+
+    /// `e` with this link's secret parameter values cut out of every text
+    /// it carries (an error page may echo the request path).
+    pub(crate) fn scrub(&self, e: SourceError) -> SourceError {
+        let clean = |s: String| {
+            self.params
+                .iter()
+                .filter(|(k, v)| k != "base_url" && v.len() >= MIN_SECRET_LEN)
+                .fold(s, |s, (_, v)| s.replace(v.as_str(), "REDACTED"))
+        };
+        match e {
+            SourceError::Status { url, status, body } => SourceError::Status {
+                url: clean(url),
+                status,
+                body: clean(body),
+            },
+            SourceError::Protocol { url, msg } => SourceError::Protocol {
+                url: clean(url),
+                msg: clean(msg),
+            },
+            SourceError::NotFound { what } => SourceError::NotFound { what: clean(what) },
+            SourceError::CorruptPart { what, msg } => SourceError::CorruptPart {
+                what: clean(what),
+                msg: clean(msg),
+            },
+            SourceError::Network { url, source } => SourceError::Network {
+                url: clean(url),
+                source,
+            },
+            other => other,
+        }
     }
 }
 
@@ -332,6 +394,10 @@ mod tests {
         assert_eq!(
             l.chunk_url(md5).unwrap().as_str(),
             "https://a.example/token=nva=2000000000~dirs=2~token=T/content-system/v2/store/1/01/23/0123456789abcdef0123456789abcdef"
+        );
+        assert_eq!(
+            l.shown_chunk_url(md5).as_str(),
+            "https://a.example/token=nva=REDACTED~dirs=REDACTED~token=REDACTED/content-system/v2/store/1/01/23/0123456789abcdef0123456789abcdef"
         );
         assert!(SecureLink::parse(br#"{"urls":[]}"#).is_err());
     }

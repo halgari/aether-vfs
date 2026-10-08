@@ -109,6 +109,16 @@ pub struct ServerState {
     /// CDN requests being answered now, and the most seen at once.
     cdn_in_flight: AtomicU32,
     cdn_max_in_flight: AtomicU32,
+    /// Secure links issued so far; each carries a fresh path token.
+    links_issued: AtomicU32,
+    /// Path tokens the CDN accepts.
+    cdn_tokens: Mutex<HashSet<String>>,
+    /// Every path token issued, valid or not.
+    all_cdn_tokens: Mutex<Vec<String>>,
+    /// Chunks answered with this status (body echoing the request path).
+    chunk_status: Mutex<HashMap<String, u16>>,
+    /// Extra milliseconds before answering requests for these chunks.
+    chunk_delay: Mutex<HashMap<String, u64>>,
 }
 
 #[derive(Clone)]
@@ -155,6 +165,11 @@ pub async fn start() -> FakeGog {
         cdn_delay_ms: AtomicU64::new(0),
         cdn_in_flight: AtomicU32::new(0),
         cdn_max_in_flight: AtomicU32::new(0),
+        links_issued: AtomicU32::new(0),
+        cdn_tokens: Mutex::default(),
+        all_cdn_tokens: Mutex::default(),
+        chunk_status: Mutex::default(),
+        chunk_delay: Mutex::default(),
     });
     install_fixtures(&state);
     let app = Router::new().fallback(handle).with_state(state.clone());
@@ -294,6 +309,41 @@ impl FakeGog {
         self.state.cdn_max_in_flight.load(Ordering::SeqCst)
     }
 
+    /// Secure links issued so far.
+    pub fn secure_link_calls(&self) -> u32 {
+        self.state.links_issued.load(Ordering::SeqCst)
+    }
+
+    /// Every CDN path token the fake has put in a secure link.
+    pub fn cdn_tokens(&self) -> Vec<String> {
+        self.state.all_cdn_tokens.lock().unwrap().clone()
+    }
+
+    /// Refuse (403) every CDN path token issued so far, as the CDN does
+    /// once a secure link expires.
+    pub fn revoke_cdn_tokens(&self) {
+        self.state.cdn_tokens.lock().unwrap().clear();
+    }
+
+    /// Answer requests for chunk `cmd5` with `status` and a body echoing
+    /// the request path (path token included), as some CDN error pages do.
+    pub fn fail_chunk(&self, cmd5: &str, status: u16) {
+        self.state
+            .chunk_status
+            .lock()
+            .unwrap()
+            .insert(cmd5.to_string(), status);
+    }
+
+    /// Hold responses for chunk `cmd5` an extra `ms` milliseconds.
+    pub fn delay_chunk(&self, cmd5: &str, ms: u64) {
+        self.state
+            .chunk_delay
+            .lock()
+            .unwrap()
+            .insert(cmd5.to_string(), ms);
+    }
+
     /// Serve `raw` as a chunk; its manifest record.
     pub fn add_chunk(&self, raw: &[u8]) -> Chunk {
         let packed = zlib(raw);
@@ -404,7 +454,9 @@ async fn handle(State(s): State<Arc<ServerState>>, req: Request) -> Response {
     if let Some(rest) = path.strip_prefix("/cdn/") {
         let now = s.cdn_in_flight.fetch_add(1, Ordering::SeqCst) + 1;
         s.cdn_max_in_flight.fetch_max(now, Ordering::SeqCst);
-        let delay = s.cdn_delay_ms.load(Ordering::SeqCst);
+        let md5 = rest.rsplit('/').next().unwrap_or("");
+        let extra = s.chunk_delay.lock().unwrap().get(md5).copied().unwrap_or(0);
+        let delay = s.cdn_delay_ms.load(Ordering::SeqCst) + extra;
         if delay > 0 {
             tokio::time::sleep(Duration::from_millis(delay)).await;
         }
@@ -501,6 +553,10 @@ fn content_system(s: &ServerState, rest: &str, q: &HashMap<String, String>) -> R
             {
                 return json_resp(400, json!({ "error": "bad query" }));
             }
+            let n = s.links_issued.fetch_add(1, Ordering::SeqCst) + 1;
+            let token = format!("SeCrEt-cdn-token-{n:03}");
+            s.cdn_tokens.lock().unwrap().insert(token.clone());
+            s.all_cdn_tokens.lock().unwrap().push(token.clone());
             json_resp(
                 200,
                 json!({
@@ -511,7 +567,7 @@ fn content_system(s: &ServerState, rest: &str, q: &HashMap<String, String>) -> R
                         "parameters": {
                             "base_url": format!("{}/cdn", s.base),
                             "path": format!("/content-system/v2/store/{id}"),
-                            "token": "tok",
+                            "token": token,
                             "expires_at": now() + 3600,
                             "dirs": 2,
                         },
@@ -526,13 +582,19 @@ fn content_system(s: &ServerState, rest: &str, q: &HashMap<String, String>) -> R
 }
 
 fn cdn(s: &ServerState, rest: &str) -> Response {
-    // token=nva=…~dirs=2~token=tok/content-system/v2/store/{id}/ab/cd/{md5}
+    // token=nva=…~dirs=2~token=SeCrEt…/content-system/v2/store/{id}/ab/cd/{md5}
     let parts: Vec<&str> = rest.split('/').collect();
     let [auth, "content-system", "v2", "store", _id, a, b, md5] = parts.as_slice() else {
         return respond(404, b"bad cdn path".to_vec());
     };
-    if !auth.ends_with("~token=tok") || md5.get(..2) != Some(*a) || md5.get(2..4) != Some(*b) {
+    let token_ok = auth
+        .rsplit_once("~token=")
+        .is_some_and(|(_, t)| s.cdn_tokens.lock().unwrap().contains(t));
+    if !token_ok || md5.get(..2) != Some(*a) || md5.get(2..4) != Some(*b) {
         return respond(403, b"forbidden".to_vec());
+    }
+    if let Some(st) = s.chunk_status.lock().unwrap().get(*md5) {
+        return respond(*st, format!("error serving /cdn/{rest}").into_bytes());
     }
     let Some(mut body) = s.chunks.lock().unwrap().get(*md5).cloned() else {
         return respond(404, b"no such chunk".to_vec());

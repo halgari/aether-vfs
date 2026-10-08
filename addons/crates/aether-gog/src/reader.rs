@@ -243,7 +243,8 @@ impl GogContent {
             Err(SourceError::Status {
                 status: 401 | 403, ..
             }) => {
-                self.drop_secure_link(product).await;
+                // Only this link: another download may have renewed it.
+                self.drop_secure_link(product, &link).await;
                 let link = self.secure_link(product).await?;
                 self.fetch_chunk(&link, c).await?
             }
@@ -256,6 +257,9 @@ impl GogContent {
         let http = &self.inner.http;
         let id = hex(&c.compressed_md5);
         let url = link.chunk_url(&id)?;
+        // The link's token may sit in the URL path, which `redact` keeps:
+        // errors name the chunk by a URL with the secrets replaced.
+        let shown = link.shown_chunk_url(&id);
         let job = http.start(format!("gog chunk {id}"), Some(c.compressed_size));
         let max = c.compressed_size.saturating_add(CHUNK_BODY_SLACK);
         let r = http
@@ -263,17 +267,21 @@ impl GogContent {
             .retry
             .run(&job, || async {
                 let _permit = http.permit(&url).await;
-                let resp = http
-                    .client()
-                    .get(url.clone())
-                    .send()
-                    .await
-                    .map_err(|e| SourceError::network(&url, e))?;
-                let body = read_body_max(check(resp, &url).await?, &url, &job, max).await?;
-                let chunk = *c;
-                tokio::task::spawn_blocking(move || verify_chunk(&body, &chunk))
-                    .await
-                    .map_err(|e| SourceError::Io(io::Error::other(e)))?
+                let attempt = async {
+                    let resp = http
+                        .client()
+                        .get(url.clone())
+                        .send()
+                        .await
+                        .map_err(|e| SourceError::network(&shown, e))?;
+                    let body = read_body_max(check(resp, &shown).await?, &shown, &job, max).await?;
+                    let chunk = *c;
+                    tokio::task::spawn_blocking(move || verify_chunk(&body, &chunk))
+                        .await
+                        .map_err(|e| SourceError::Io(io::Error::other(e)))?
+                };
+                // Scrubbed before the retry loop reports it.
+                attempt.await.map_err(|e| link.scrub(e))
             })
             .await;
         job.complete(r)
