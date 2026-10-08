@@ -31,8 +31,20 @@ impl SteamGame {
         Ok(SteamGame { app, depots: out })
     }
 
+    /// A game from manifests and readers already in hand (offline tests).
+    #[cfg(all(test, feature = "provider"))]
+    pub(crate) fn from_parts(app: AppId, depots: Vec<(Arc<DepotManifest>, DepotReader)>) -> Self {
+        SteamGame { app, depots }
+    }
+
     pub fn app(&self) -> AppId {
         self.app
+    }
+
+    /// Every depot's manifest and reader, earliest (winning) first.
+    #[cfg(feature = "provider")]
+    pub(crate) fn depots(&self) -> &[(Arc<DepotManifest>, DepotReader)] {
+        &self.depots
     }
 
     /// Where a Wabbajack `GameFile` path (backslashes, any case) lives.

@@ -16,6 +16,8 @@ mod ids;
 mod licenses;
 mod login;
 mod manifest;
+#[cfg(feature = "provider")]
+pub mod provider;
 mod reader;
 mod session;
 #[cfg(test)]
