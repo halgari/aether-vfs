@@ -10,6 +10,11 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+## `provider::DepotProvider`: a game's depots as a read-only
+## `vfs_provider::Provider`.
+provider = ["dep:vfs-provider", "dep:vfs-core"]
+
 [dependencies]
 aether-archive.workspace = true
 steamroom = { workspace = true, features = ["ring"] }
@@ -26,6 +31,8 @@ sha1_smol.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt", "time", "sync", "macros", "net"] }
 tracing.workspace = true
+vfs-core = { workspace = true, optional = true }
+vfs-provider = { workspace = true, optional = true }
 xxhash-rust = { workspace = true, features = ["xxh64"] }
 zeroize.workspace = true
 zip = { workspace = true, features = ["deflate"] }
@@ -34,4 +41,5 @@ zip = { workspace = true, features = ["deflate"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "io-util"] }
 tempfile.workspace = true
 rpassword.workspace = true
+vfs-provider = { workspace = true, features = ["conformance"] }
 zstd.workspace = true

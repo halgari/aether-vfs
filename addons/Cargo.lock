@@ -152,6 +152,8 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+ "vfs-core",
+ "vfs-provider",
  "xxhash-rust",
  "zeroize",
  "zip",
