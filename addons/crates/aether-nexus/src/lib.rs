@@ -3,6 +3,8 @@
 
 mod archive;
 mod links;
+#[cfg(feature = "provider")]
+pub mod provider;
 
 use std::collections::HashMap;
 use std::fmt;
