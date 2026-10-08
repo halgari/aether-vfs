@@ -1,0 +1,37 @@
+[package]
+name = "aether-steam"
+description = "Steam depot access: login, depot keys and manifests cached on disk, random-access reads from the Steam CDN"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+aether-archive.workspace = true
+steamroom = { workspace = true, features = ["ring"] }
+base64.workspace = true
+bytes.workspace = true
+futures-util = { workspace = true, features = ["std", "async-await", "async-await-macro"] }
+postcard = { workspace = true, features = ["use-std"] }
+prost.workspace = true
+qrcode.workspace = true
+reqwest = { workspace = true, features = ["http2", "rustls-no-provider"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+sha1_smol.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt", "time", "sync", "macros", "net"] }
+tracing.workspace = true
+xxhash-rust = { workspace = true, features = ["xxh64"] }
+zeroize.workspace = true
+zip = { workspace = true, features = ["deflate"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "io-util"] }
+tempfile.workspace = true
+rpassword.workspace = true
+zstd.workspace = true
