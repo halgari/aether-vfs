@@ -1,0 +1,169 @@
+//! Random-access reads of depot files from the fake CDN.
+mod fake_gog;
+
+use std::sync::Arc;
+
+use aether_archive::RangeRead;
+use aether_gog::{DepotManifest, GogContent, GogError, Os, ProductId, complete_login};
+use aether_net::SourceError;
+use fake_gog::{CHUNK, CODE, FakeGog, GAME, big, dlc_esp, http, readme, small_ini, start};
+
+async fn setup(fake: &FakeGog, dir: &std::path::Path) -> (GogContent, Vec<Arc<DepotManifest>>) {
+    let cfg = fake.config(dir);
+    complete_login(&http(), &cfg, CODE).await.unwrap();
+    let content = GogContent::open(http(), cfg).await.unwrap();
+    let builds = content.builds(ProductId(GAME), Os::Windows).await.unwrap();
+    let details = content.build_details(&builds[0]).await.unwrap();
+    let mut manifests = Vec::new();
+    for d in &details.depots {
+        manifests.push(content.depot(d).await.unwrap());
+    }
+    (content, manifests)
+}
+
+#[tokio::test]
+async fn read_spanning_chunks() {
+    let fake = start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (content, m) = setup(&fake, dir.path()).await;
+    let f = content
+        .file(ProductId(GAME), &m[0], "data/big.BIN")
+        .await
+        .unwrap();
+    let data = big();
+    assert_eq!(f.len(), data.len() as u64);
+
+    fake.clear_log();
+    let mut buf = [0u8; 200];
+    assert_eq!(f.read_at(4000, &mut buf).await.unwrap(), 200);
+    assert_eq!(buf[..], data[4000..4200]);
+    assert_eq!(fake.requests("/cdn/").len(), 2, "chunks 0 and 1 only");
+    // Cached now: no further requests for them.
+    assert_eq!(f.read_at(4090, &mut buf[..10]).await.unwrap(), 10);
+    assert_eq!(buf[..10], data[4090..4100]);
+    assert_eq!(fake.requests("/cdn/").len(), 2);
+
+    let mut all = vec![0u8; data.len()];
+    assert_eq!(f.read_at(0, &mut all).await.unwrap(), data.len());
+    assert_eq!(all, data);
+
+    // A single-chunk file, a file in the small-files container, and a file
+    // from the DLC's depot (its own product's secure link).
+    for (product, manifest, path, want) in [
+        (GAME, &m[0], "README.txt", readme()),
+        (GAME, &m[0], "Data/Small.ini", small_ini()),
+        (fake_gog::DLC, &m[1], "data\\dlc.ESP", dlc_esp()),
+    ] {
+        let f = content
+            .file(ProductId(product), manifest, path)
+            .await
+            .unwrap();
+        let mut got = vec![0u8; want.len()];
+        assert_eq!(f.read_at(0, &mut got).await.unwrap(), want.len(), "{path}");
+        assert_eq!(got, want, "{path}");
+    }
+    assert!(
+        fake.requests("/cs/products/1207658692/secure_link").len() == 1,
+        "{:?}",
+        fake.requests("/cs/")
+    );
+
+    let e = content
+        .file(ProductId(GAME), &m[0], "Data/Missing.esp")
+        .await
+        .err()
+        .unwrap();
+    assert!(matches!(e, GogError::NotInDepot(_)), "{e}");
+}
+
+#[tokio::test]
+async fn read_at_eof_returns_zero() {
+    let fake = start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (content, m) = setup(&fake, dir.path()).await;
+    let f = content
+        .file(ProductId(GAME), &m[0], "Data\\Big.bin")
+        .await
+        .unwrap();
+    let len = f.len();
+    let mut buf = [0u8; 200];
+    assert_eq!(f.read_at(len, &mut buf).await.unwrap(), 0);
+    assert_eq!(f.read_at(len + 10, &mut buf).await.unwrap(), 0);
+    assert_eq!(f.read_at(u64::MAX, &mut buf).await.unwrap(), 0);
+    // A read running past the end is short.
+    assert_eq!(f.read_at(len - 5, &mut buf).await.unwrap(), 5);
+    assert_eq!(buf[..5], big()[big().len() - 5..]);
+    assert_eq!(f.read_at(0, &mut []).await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn corrupt_chunk_is_never_served() {
+    let fake = start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (content, m) = setup(&fake, dir.path()).await;
+    let f = content
+        .file(ProductId(GAME), &m[0], "Data\\Big.bin")
+        .await
+        .unwrap();
+    let data = big();
+    let bad = FakeGog::chunk_id(&data[CHUNK..2 * CHUNK]);
+    fake.corrupt(&bad);
+
+    let mut buf = [0u8; 10];
+    let e = f.read_at(CHUNK as u64, &mut buf).await.unwrap_err();
+    assert!(
+        matches!(e, GogError::Source(SourceError::CorruptPart { .. })),
+        "{e:?}"
+    );
+    assert_eq!(fake.chunk_requests(&bad), 3, "retried per the RetryPolicy");
+    assert_eq!(buf, [0u8; 10], "nothing written");
+
+    // Other chunks still read.
+    assert_eq!(f.read_at(0, &mut buf).await.unwrap(), 10);
+    assert_eq!(buf[..], data[..10]);
+    // The bad chunk was not cached: once the CDN serves it whole, it reads.
+    fake.heal();
+    assert_eq!(f.read_at(CHUNK as u64, &mut buf).await.unwrap(), 10);
+    assert_eq!(buf[..], data[CHUNK..CHUNK + 10]);
+}
+
+#[test]
+fn blocking_reader_works_off_the_runtime() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let (fake, f) = rt.block_on(async {
+        let fake = start().await;
+        let (content, m) = setup(&fake, dir.path()).await;
+        let f = content
+            .file(ProductId(GAME), &m[0], "Data\\Big.bin")
+            .await
+            .unwrap();
+        (fake, f)
+    });
+    let bf = f.into_blocking(rt.handle().clone());
+    assert_eq!(RangeRead::len(&bf), big().len() as u64);
+    let t = bf.clone();
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 300];
+        t.read_at(4000, &mut buf).unwrap();
+        assert_eq!(buf[..], big()[4000..4300]);
+        // Past the end is UnexpectedEof, as for every RangeRead.
+        let e = t
+            .read_at(big().len() as u64 - 1, &mut [0u8; 2])
+            .unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::UnexpectedEof);
+    })
+    .join()
+    .unwrap();
+    // On a runtime worker: an error, not a hang.
+    let r = rt.block_on(async move {
+        tokio::spawn(async move { bf.read_at(0, &mut [0u8; 4]) })
+            .await
+            .unwrap()
+    });
+    assert!(r.is_err());
+    drop(fake);
+}
