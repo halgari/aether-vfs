@@ -3,8 +3,7 @@
 //!
 //! **This is not the API a host embeds.** Session lifecycle — roots,
 //! composition, serve, launch — lives in `vfs-embed` (design spec §4), which
-//! is the one public seam `vfs.exe` and the language bindings are written
-//! against. `Session` used to live here; it moved so that "the kernel" and
+//! is the one public seam every host is written against. `Session` used to live here; it moved so that "the kernel" and
 //! "the embeddable API" stopped being the same crate.
 //!
 //! What remains here, and what a host reaches for *through* `vfs-embed`:

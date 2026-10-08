@@ -1,167 +1,70 @@
-//! Daemon -> CreateSession -> AddSource -> Launch, driven through a
-//! `scenario.toml`, asserting that a fixture reads and writes virtual bytes
-//! through the ring; plus the rooted launch of a graph-only image.
+//! Session -> sources -> launch, asserting that a fixture reads and writes
+//! virtual bytes through the ring; plus the rooted launch of a graph-only
+//! image.
+//!
+//! Ported from the removed daemon, where each scenario was a `scenario.toml`
+//! applied over gRPC. The session is now built in code; what a scenario's
+//! `[[source]]` and `[launch]` tables said is what each test does here.
 
 // Every test here injects a real Windows process, so on other hosts the helpers are unused.
 #![cfg_attr(not(windows), allow(dead_code, unused_imports))]
 
-use std::net::SocketAddr;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::sync::Arc;
 
-use tokio::net::TcpListener;
-use tonic::transport::Server;
-use vfs_control::pb::director_server::DirectorServer;
-use vfs_control::SessionConfig;
-use vfs_directord::{apply_session_config, connect, DirectorService, SessionRegistry};
+use vfs_embed::{DiskProvider, LaunchOpts};
 
 mod support;
+use support::session::LiveSession;
 use support::{artifacts::*, launch::*};
 
 #[cfg(windows)]
-#[tokio::test(flavor = "multi_thread")]
-async fn scenario_toml_disk_source_fixture_read() {
-    let _guard = LAUNCH_LOCK.lock().await;
+#[test]
+fn scenario_toml_disk_source_fixture_read() {
+    let _guard = lock_launches();
     ensure_inject_artifacts();
-
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-    let addr: SocketAddr = listener.local_addr().unwrap();
-    let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
-
-    let registry = SessionRegistry::new();
-    let svc = DirectorService::new(registry);
-    let server = tokio::spawn(async move {
-        Server::builder()
-            .add_service(DirectorServer::new(svc))
-            .serve_with_incoming(incoming)
-            .await
-    });
-
-    // Give the server a moment to accept.
-    tokio::time::sleep(Duration::from_millis(20)).await;
 
     let content_dir = vfs_testkit::tempdir().expect("tempdir");
     std::fs::write(content_dir.path().join("hello.txt"), b"hello").unwrap();
 
     let fixture = locate_artifact("vfs-fixture-read.exe");
-    // Root is chosen by the daemon per session; we learn it after CreateSession
-    // and rewrite the fixture path. apply_session_config needs the env path
-    // up front — so we do the RPC steps manually after create to inject the root.
 
-    let mut client = connect(&format!("{addr}")).await.expect("connect");
+    // The scenario this used to be: one disk source at "/", and a launch of
+    // the read fixture told where `hello.txt` is under the session's root.
+    let mut session = LiveSession::create("m0-e2e");
+    assert!(!session.root().as_os_str().is_empty());
 
-    // Health
-    let h = client
-        .health(vfs_control::pb::HealthReq {})
-        .await
-        .expect("health")
-        .into_inner();
-    assert_eq!(h.sessions, 0);
-
-    // Prefer the shared config path for sources + launch meta; fill fixture env
-    // after we know the session root.
-    let toml = format!(
-        r#"
-[session]
-name = "m0-e2e"
-
-[[source]]
-type  = "disk"
-path  = {}
-mount = "/"
-
-[launch]
-exec      = {}
-wait      = true
-"#,
-        toml_string(&content_dir.path().to_string_lossy()),
-        toml_string(&fixture.to_string_lossy()),
-    );
-
-    let mut cfg: SessionConfig = toml::from_str(&toml).expect("parse scenario");
-    // Create session first to learn root, then set env and continue via helper-equivalent.
-
-    let session = client
-        .create_session(vfs_control::pb::CreateSessionReq {
-            name: "m0-e2e".into(),
-        })
-        .await
-        .expect("CreateSession")
-        .into_inner();
-    assert!(!session.id.is_empty());
-    assert!(!session.root.is_empty());
-
-    let fixture_path = PathBuf::from(&session.root).join("hello.txt");
-    if let Some(launch) = cfg.launch.as_mut() {
-        launch.env.insert(
-            "VFS_FIXTURE_PATH".into(),
+    let fixture_path = session.root().join("hello.txt");
+    let env: BTreeMap<String, String> = [
+        (
+            "VFS_FIXTURE_PATH".to_string(),
             fixture_path.to_string_lossy().into_owned(),
-        );
-        launch.env.insert("VFS_FIXTURE_EXPECT".into(), "5".into());
-    }
+        ),
+        ("VFS_FIXTURE_EXPECT".to_string(), "5".to_string()),
+    ]
+    .into_iter()
+    .collect();
 
-    // Add sources + launch using the same helper by rebuilding a config that
-    // already has the session's sources/launch, but CreateSession was already
-    // called — call apply pieces manually.
-    use vfs_control::pb::{
-        source_spec, AddSourceReq, DiskSource, LaunchReq, SourceSpec as PbSource,
-    };
+    session
+        .add_source(0, "/", 0, Arc::new(DiskProvider::new(content_dir.path())))
+        .expect("AddSource");
 
-    // Precedence is declaration order (the flat-list sugar), so position in
-    // `cfg.sources` becomes the RPC's numeric layer directly — see the
-    // comment in `apply_session_config` for why this is no longer a config
-    // field.
-    for (layer, entry) in cfg.sources.iter().enumerate() {
-        let path = match &entry.spec {
-            vfs_control::SourceSpec::Disk { path } => path.clone(),
-            other => panic!("expected disk source, got {other:?}"),
-        };
-        client
-            .add_source(AddSourceReq {
-                session_id: session.id.clone(),
-                source: Some(PbSource {
-                    kind: Some(source_spec::Kind::Disk(DiskSource { path })),
-                }),
-                mount: entry.mount.clone(),
-                layer: layer as i32,
-                root: entry.root,
-                write_layer: entry.write_layer,
-                cache_key: String::new(),
-            })
-            .await
-            .expect("AddSource");
-    }
-
-    let launch = cfg.launch.unwrap();
-    let mut stream = client
-        .launch(LaunchReq {
-            session_id: session.id.clone(),
-            exec: launch.exec,
-            args: launch.args,
-            wait: launch.wait,
-            env: launch.env.into_iter().collect(),
-        })
-        .await
-        .expect("Launch")
-        .into_inner();
-
-    let mut exit_code = None;
-    drain_launch_events(&mut stream, "log", &mut exit_code).await;
+    let exit_code = launch_bounded(
+        session.shared(),
+        LaunchOpts {
+            image: fixture.to_string_lossy().into_owned(),
+            wait: true,
+            env,
+            ..Default::default()
+        },
+        "log",
+    );
 
     assert_eq!(
-        exit_code,
-        Some(0),
+        exit_code, 0,
         "fixture should exit 0 after reading 5 bytes via injected shim"
     );
-
-    client
-        .teardown_session(vfs_control::pb::TeardownReq {
-            session_id: session.id,
-        })
-        .await
-        .expect("teardown");
-
-    server.abort();
 }
 
 /// The decisive end-to-end assertion for the whole write-path phase: a
@@ -176,24 +79,10 @@ wait      = true
 /// with that bypass fully intact; the decisive check is that overlay/ stays
 /// EMPTY, proving the write actually crossed the ring instead.
 #[cfg(windows)]
-#[tokio::test(flavor = "multi_thread")]
-async fn scenario_toml_disk_source_fixture_writepath() {
-    let _guard = LAUNCH_LOCK.lock().await;
+#[test]
+fn scenario_toml_disk_source_fixture_writepath() {
+    let _guard = lock_launches();
     ensure_inject_artifacts();
-
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-    let addr: SocketAddr = listener.local_addr().unwrap();
-    let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
-
-    let registry = SessionRegistry::new();
-    let svc = DirectorService::new(registry);
-    let server = tokio::spawn(async move {
-        Server::builder()
-            .add_service(DirectorServer::new(svc))
-            .serve_with_incoming(incoming)
-            .await
-    });
-    tokio::time::sleep(Duration::from_millis(20)).await;
 
     // Empty scratch directory: the DiskProvider's backing store. Nothing
     // pre-exists, so every byte the assertions find had to be written by the
@@ -208,40 +97,15 @@ async fn scenario_toml_disk_source_fixture_writepath() {
     let stats_log = stats_dir.path().join("shim-stats.log");
 
     let fixture = locate_artifact("vfs-fixture-writepath.exe");
-    let mut client = connect(&format!("{addr}")).await.expect("connect");
 
-    let session = client
-        .create_session(vfs_control::pb::CreateSessionReq {
-            name: "m0-e2e-writepath".into(),
-        })
-        .await
-        .expect("CreateSession")
-        .into_inner();
-    assert!(!session.id.is_empty());
-    assert!(!session.root.is_empty());
+    let mut session = LiveSession::create("m0-e2e-writepath");
+    assert!(!session.root().as_os_str().is_empty());
 
-    use vfs_control::pb::{
-        source_spec, AddSourceReq, DiskSource, LaunchReq, SourceSpec as PbSource,
-    };
-
-    client
-        .add_source(AddSourceReq {
-            session_id: session.id.clone(),
-            source: Some(PbSource {
-                kind: Some(source_spec::Kind::Disk(DiskSource {
-                    path: content_dir.path().to_string_lossy().into_owned(),
-                })),
-            }),
-            mount: "/".into(),
-            layer: 0,
-            root: 0,
-            write_layer: false,
-            cache_key: String::new(),
-        })
-        .await
+    session
+        .add_source(0, "/", 0, Arc::new(DiskProvider::new(content_dir.path())))
         .expect("AddSource");
 
-    let mut env = std::collections::HashMap::new();
+    let mut env = BTreeMap::new();
     env.insert(
         "VFS_SHIM_STATS_LOG".to_string(),
         stats_log.to_string_lossy().into_owned(),
@@ -258,30 +122,25 @@ async fn scenario_toml_disk_source_fixture_writepath() {
 
     // Baseline for the director's open count, taken right before the launch
     // that will drive real opens through `OP_OPEN`/`record_open`. `io_stats`
-    // is a process-wide static (not per-`DirectorService`), and this test
+    // is a process-wide static (not per-session), and this test
     // binary runs other tests concurrently, so a delta — not an absolute
     // reading — is what isolates this launch's own opens (same convention
     // `io_stats::tests::open_totals_counts_ok_and_err_separately` uses).
-    let (opens_ok_before, opens_err_before) = vfs_director::io_stats::open_totals();
+    let (opens_ok_before, opens_err_before) = vfs_embed::open_totals();
 
-    let mut stream = client
-        .launch(LaunchReq {
-            session_id: session.id.clone(),
-            exec: fixture.to_string_lossy().into_owned(),
-            args: Vec::new(),
+    let exit_code = launch_bounded(
+        session.shared(),
+        LaunchOpts {
+            image: fixture.to_string_lossy().into_owned(),
             wait: true,
             env,
-        })
-        .await
-        .expect("Launch")
-        .into_inner();
-
-    let mut exit_code = None;
-    drain_launch_events(&mut stream, "log", &mut exit_code).await;
+            ..Default::default()
+        },
+        "log",
+    );
 
     assert_eq!(
-        exit_code,
-        Some(0),
+        exit_code, 0,
         "fixture should exit 0 after create/write/append/rename/delete all round-trip \
          through the injected shim"
     );
@@ -289,7 +148,7 @@ async fn scenario_toml_disk_source_fixture_writepath() {
     // The process (and its reporter thread) has exited by now, `wait: true`
     // having blocked until it did, so the director's open count for this
     // launch is stable to read.
-    let (opens_ok_after, opens_err_after) = vfs_director::io_stats::open_totals();
+    let (opens_ok_after, opens_err_after) = vfs_embed::open_totals();
     // The reconciliation target is the director's *total* arrived-open
     // count, not `opens_ok` alone: this fixture's own error probes (a
     // failing re-open of a renamed-away name, a failing re-open of a
@@ -326,7 +185,8 @@ async fn scenario_toml_disk_source_fixture_writepath() {
     );
 
     // session.root is "<session-base>/root"; overlay is its sibling.
-    let overlay = PathBuf::from(&session.root)
+    let overlay = session
+        .root()
         .parent()
         .expect("session.root has a parent")
         .join("overlay");
@@ -369,15 +229,6 @@ async fn scenario_toml_disk_source_fixture_writepath() {
          got: {:?}",
         std::fs::read_to_string(&stats_log)
     );
-
-    client
-        .teardown_session(vfs_control::pb::TeardownReq {
-            session_id: session.id,
-        })
-        .await
-        .expect("teardown");
-
-    server.abort();
 }
 
 /// `read_dir(...).unwrap_or_default()` turns a wrong or missing overlay path
@@ -405,7 +256,7 @@ fn assert_overlay_empty(overlay: &std::path::Path) {
         // use (`Overlay::ensure_parent` runs before a decision that may not
         // need it), real diverted bytes underneath it, or — the one actually
         // observed — a previous process's litter inherited at the same path
-        // (see `SessionRegistry::create`, which now clears the base
+        // (see `LiveSession::create`, which starts from a fresh base
         // directory). All three fail this assertion, deliberately; a failure
         // that does not say which one costs an investigation.
         overlay_tree(overlay)
@@ -438,31 +289,17 @@ fn overlay_tree(dir: &std::path::Path) -> Vec<PathBuf> {
 /// returns a lone layer as-is), so the headline "writes cross the ring, not
 /// the overlay bypass" assertion above cannot see LayeredProvider's `open()`
 /// hard-rejecting `OPEN_WRITE` while its `capabilities()` advertised
-/// `ReadWrite` — exactly the shape `SessionRegistry::add_source` builds for
+/// `ReadWrite` — exactly the shape `RootSources` builds for
 /// any session with two or more root-mounted sources, the ordinary modded-
 /// game case. `layer = 1` mounts on top of `layer = 0`, and a layered stack
 /// routes every write to the topmost child that declares `ReadWrite` — both
 /// `DiskProvider`s here do — so the written bytes must land in the top
 /// content directory, not the bottom one and not the overlay fallback.
 #[cfg(windows)]
-#[tokio::test(flavor = "multi_thread")]
-async fn scenario_toml_two_disk_sources_fixture_writepath() {
-    let _guard = LAUNCH_LOCK.lock().await;
+#[test]
+fn scenario_toml_two_disk_sources_fixture_writepath() {
+    let _guard = lock_launches();
     ensure_inject_artifacts();
-
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-    let addr: SocketAddr = listener.local_addr().unwrap();
-    let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
-
-    let registry = SessionRegistry::new();
-    let svc = DirectorService::new(registry);
-    let server = tokio::spawn(async move {
-        Server::builder()
-            .add_service(DirectorServer::new(svc))
-            .serve_with_incoming(incoming)
-            .await
-    });
-    tokio::time::sleep(Duration::from_millis(20)).await;
 
     // Two empty scratch directories, mounted as two separate root sources.
     let bottom_dir = vfs_testkit::tempdir().expect("tempdir bottom");
@@ -476,57 +313,19 @@ async fn scenario_toml_two_disk_sources_fixture_writepath() {
     let stats_log = stats_dir.path().join("shim-stats.log");
 
     let fixture = locate_artifact("vfs-fixture-writepath.exe");
-    let mut client = connect(&format!("{addr}")).await.expect("connect");
 
-    let session = client
-        .create_session(vfs_control::pb::CreateSessionReq {
-            name: "m0-e2e-writepath-two-sources".into(),
-        })
-        .await
-        .expect("CreateSession")
-        .into_inner();
-    assert!(!session.id.is_empty());
-    assert!(!session.root.is_empty());
+    let mut session = LiveSession::create("m0-e2e-writepath-two-sources");
+    assert!(!session.root().as_os_str().is_empty());
 
-    use vfs_control::pb::{
-        source_spec, AddSourceReq, DiskSource, LaunchReq, SourceSpec as PbSource,
-    };
-
-    client
-        .add_source(AddSourceReq {
-            session_id: session.id.clone(),
-            source: Some(PbSource {
-                kind: Some(source_spec::Kind::Disk(DiskSource {
-                    path: bottom_dir.path().to_string_lossy().into_owned(),
-                })),
-            }),
-            mount: "/".into(),
-            layer: 0,
-            root: 0,
-            write_layer: false,
-            cache_key: String::new(),
-        })
-        .await
+    session
+        .add_source(0, "/", 0, Arc::new(DiskProvider::new(bottom_dir.path())))
         .expect("AddSource bottom");
 
-    client
-        .add_source(AddSourceReq {
-            session_id: session.id.clone(),
-            source: Some(PbSource {
-                kind: Some(source_spec::Kind::Disk(DiskSource {
-                    path: top_dir.path().to_string_lossy().into_owned(),
-                })),
-            }),
-            mount: "/".into(),
-            layer: 1,
-            root: 0,
-            write_layer: false,
-            cache_key: String::new(),
-        })
-        .await
+    session
+        .add_source(0, "/", 1, Arc::new(DiskProvider::new(top_dir.path())))
         .expect("AddSource top");
 
-    let mut env = std::collections::HashMap::new();
+    let mut env = BTreeMap::new();
     env.insert(
         "VFS_SHIM_STATS_LOG".to_string(),
         stats_log.to_string_lossy().into_owned(),
@@ -540,31 +339,26 @@ async fn scenario_toml_two_disk_sources_fixture_writepath() {
     // See the single-source test above for why this is a delta rather than
     // an absolute reading: `io_stats` is a process-wide static shared by
     // every test in this binary.
-    let (opens_ok_before, opens_err_before) = vfs_director::io_stats::open_totals();
+    let (opens_ok_before, opens_err_before) = vfs_embed::open_totals();
 
-    let mut stream = client
-        .launch(LaunchReq {
-            session_id: session.id.clone(),
-            exec: fixture.to_string_lossy().into_owned(),
-            args: Vec::new(),
+    let exit_code = launch_bounded(
+        session.shared(),
+        LaunchOpts {
+            image: fixture.to_string_lossy().into_owned(),
             wait: true,
             env,
-        })
-        .await
-        .expect("Launch")
-        .into_inner();
-
-    let mut exit_code = None;
-    drain_launch_events(&mut stream, "log", &mut exit_code).await;
+            ..Default::default()
+        },
+        "log",
+    );
 
     assert_eq!(
-        exit_code,
-        Some(0),
+        exit_code, 0,
         "fixture should exit 0 after create/write/append/rename/delete all round-trip \
          through the injected shim over a two-source (LayeredProvider) stack"
     );
 
-    let (opens_ok_after, opens_err_after) = vfs_director::io_stats::open_totals();
+    let (opens_ok_after, opens_err_after) = vfs_embed::open_totals();
     // See the single-source test above: the target is the director's total
     // arrived-open count, `opens_ok + opens_err`, not `opens_ok` alone —
     // this fixture's own error probes are real, correctly-`Routed` opens
@@ -605,7 +399,8 @@ async fn scenario_toml_two_disk_sources_fixture_writepath() {
          (found {bottom_entries:?})"
     );
 
-    let overlay = PathBuf::from(&session.root)
+    let overlay = session
+        .root()
         .parent()
         .expect("session.root has a parent")
         .join("overlay");
@@ -640,27 +435,19 @@ async fn scenario_toml_two_disk_sources_fixture_writepath() {
          got: {:?}",
         std::fs::read_to_string(&stats_log)
     );
-
-    client
-        .teardown_session(vfs_control::pb::TeardownReq {
-            session_id: session.id,
-        })
-        .await
-        .expect("teardown");
-
-    server.abort();
 }
 
-/// **Copy-on-write over a layered base, live, on the daemon surface**
-/// (gate 4, Task 6b).
+/// **Copy-on-write over a layered base, live, on the incremental-host
+/// surface** (gate 4, Task 6b; written against the removed daemon, whose
+/// registry built sessions this way).
 ///
 /// The two scenarios above prove writes cross the ring; neither proves a
 /// write can be *seeded* from content nothing writable holds. Everything that
-/// does is unit-level, and in a shape the daemon never builds — so this test
+/// does is unit-level, and in a shape the daemon never built — so this test
 /// exists for what had never run live:
 ///
 /// - **A layered base under the overlay.** `skyrim-live` hands `compose_root`
-///   four sibling `""` mounts; `SessionRegistry` collapses a root's sources
+///   four sibling `""` mounts; `RootSources` collapses a root's sources
 ///   with `stack_layers` and hands it *one* `""` mount. That distinction only
 ///   exists with **more than one** root-mounted source: `stack_layers` returns
 ///   a lone layer unwrapped, so a single-source session builds no
@@ -669,10 +456,9 @@ async fn scenario_toml_two_disk_sources_fixture_writepath() {
 /// - **The registry's own source wrapping under the overlay.** This bullet
 ///   was written when every registry source went through the old `vfs-cache` crate's
 ///   `CachingProvider`, so a copy-up seeded through the block cache had never
-///   happened live. That crate is gone: `vfs-storage` caches only slow,
-///   immutable sources, so the archive and directories here are mounted as
-///   they are, exactly as the daemon mounts them.
-/// - **The whole declaration path**, from `AddSourceReq.write_layer` to a real
+///   happened live. That crate is gone, and so is the daemon's registry: the
+///   archive and directories here are mounted as they are.
+/// - **The whole declaration path**, from the session's write layer to a real
 ///   `fopen(…, "r+b")` in an injected process.
 ///
 /// Two paths are edited in place, and the pair is the point:
@@ -699,24 +485,10 @@ async fn scenario_toml_two_disk_sources_fixture_writepath() {
 /// is also the first live exercise of those through an `OverlayProvider`
 /// upper rather than a bare writable mount.
 #[cfg(windows)]
-#[tokio::test(flavor = "multi_thread")]
-async fn scenario_layered_sources_with_write_layer_copy_up_in_place() {
-    let _guard = LAUNCH_LOCK.lock().await;
+#[test]
+fn scenario_layered_sources_with_write_layer_copy_up_in_place() {
+    let _guard = lock_launches();
     ensure_inject_artifacts();
-
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-    let addr: SocketAddr = listener.local_addr().unwrap();
-    let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
-
-    let registry = SessionRegistry::new();
-    let svc = DirectorService::new(registry);
-    let server = tokio::spawn(async move {
-        Server::builder()
-            .add_service(DirectorServer::new(svc))
-            .serve_with_incoming(incoming)
-            .await
-    });
-    tokio::time::sleep(Duration::from_millis(20)).await;
 
     // Layer 0, the read-only archive: one Stored zip entry, spelled as an
     // archive spells it. Its bytes are known exactly, so "the archive is
@@ -752,35 +524,16 @@ async fn scenario_layered_sources_with_write_layer_copy_up_in_place() {
     let stats_log = stats_dir.path().join("shim-stats.log");
 
     let fixture = locate_artifact("vfs-fixture-writepath.exe");
-    let mut client = connect(&format!("{addr}")).await.expect("connect");
 
-    let session = client
-        .create_session(vfs_control::pb::CreateSessionReq {
-            name: "m0-e2e-cow-write-layer".into(),
-        })
-        .await
-        .expect("CreateSession")
-        .into_inner();
+    let mut session = LiveSession::create("m0-e2e-cow-write-layer");
 
-    use vfs_control::pb::{
-        source_spec, AddSourceReq, DiskSource, LaunchReq, SourceSpec as PbSource, ZipSource,
-    };
-
-    client
-        .add_source(AddSourceReq {
-            session_id: session.id.clone(),
-            source: Some(PbSource {
-                kind: Some(source_spec::Kind::Zip(ZipSource {
-                    path: zip.to_string_lossy().into_owned(),
-                })),
-            }),
-            mount: "/".into(),
-            layer: 0,
-            root: 0,
-            write_layer: false,
-            cache_key: String::new(),
-        })
-        .await
+    session
+        .add_source(
+            0,
+            "/",
+            0,
+            Arc::new(vfs_zip::ZipProvider::open(&zip).expect("zip index")),
+        )
         .expect("AddSource (archive)");
 
     // The two mod directories, as ordinary sources. These are what turn the
@@ -788,42 +541,16 @@ async fn scenario_layered_sources_with_write_layer_copy_up_in_place() {
     // `stack_layers` would hand back the archive unwrapped and the layered
     // path this test exists for would never execute.
     for (layer, dir) in [(10, &mods_bottom), (20, &mods_top)] {
-        client
-            .add_source(AddSourceReq {
-                session_id: session.id.clone(),
-                source: Some(PbSource {
-                    kind: Some(source_spec::Kind::Disk(DiskSource {
-                        path: dir.path().to_string_lossy().into_owned(),
-                    })),
-                }),
-                mount: "/".into(),
-                layer,
-                root: 0,
-                write_layer: false,
-                cache_key: String::new(),
-            })
-            .await
+        session
+            .add_source(0, "/", layer, Arc::new(DiskProvider::new(dir.path())))
             .unwrap_or_else(|e| panic!("AddSource (mods layer {layer}): {e}"));
     }
 
-    client
-        .add_source(AddSourceReq {
-            session_id: session.id.clone(),
-            source: Some(PbSource {
-                kind: Some(source_spec::Kind::Disk(DiskSource {
-                    path: overwrite.to_string_lossy().into_owned(),
-                })),
-            }),
-            mount: "/".into(),
-            layer: 0,
-            root: 0,
-            write_layer: true,
-            cache_key: String::new(),
-        })
-        .await
+    session
+        .set_write_layer(0, Arc::new(DiskProvider::new(&overwrite)))
         .expect("AddSource (write layer)");
 
-    let mut env = std::collections::HashMap::new();
+    let mut env = BTreeMap::new();
     env.insert(
         "VFS_SHIM_STATS_LOG".to_string(),
         stats_log.to_string_lossy().into_owned(),
@@ -838,31 +565,26 @@ async fn scenario_layered_sources_with_write_layer_copy_up_in_place() {
         format!("{ZIP_ENTRY};{MOD_ENTRY}"),
     );
 
-    let (opens_ok_before, opens_err_before) = vfs_director::io_stats::open_totals();
+    let (opens_ok_before, opens_err_before) = vfs_embed::open_totals();
 
-    let mut stream = client
-        .launch(LaunchReq {
-            session_id: session.id.clone(),
-            exec: fixture.to_string_lossy().into_owned(),
-            args: Vec::new(),
+    let exit_code = launch_bounded(
+        session.shared(),
+        LaunchOpts {
+            image: fixture.to_string_lossy().into_owned(),
             wait: true,
             env,
-        })
-        .await
-        .expect("Launch")
-        .into_inner();
-
-    let mut exit_code = None;
-    drain_launch_events(&mut stream, "log", &mut exit_code).await;
+            ..Default::default()
+        },
+        "log",
+    );
     assert_eq!(
-        exit_code,
-        Some(0),
+        exit_code, 0,
         "the fixture exits 17 if the in-place open of archive content was refused, 18 if the \
          write layer produced a blank file instead of a seeded copy-up, 19 on the write and \
          20 if the readback lost the untouched bytes"
     );
 
-    let (opens_ok_after, opens_err_after) = vfs_director::io_stats::open_totals();
+    let (opens_ok_after, opens_err_after) = vfs_embed::open_totals();
     let opens_ok_delta = (opens_ok_after - opens_ok_before) + (opens_err_after - opens_err_before);
 
     // The copied-up file, on disk, in the directory the wire named — with the
@@ -948,7 +670,8 @@ async fn scenario_layered_sources_with_write_layer_copy_up_in_place() {
     // The bypass detector, unchanged: nothing may have landed in the
     // shim-local overlay, and every open the shim believed it routed must
     // have arrived at the director.
-    let overlay = PathBuf::from(&session.root)
+    let overlay = session
+        .root()
         .parent()
         .expect("session.root has a parent")
         .join("overlay");
@@ -968,42 +691,27 @@ async fn scenario_layered_sources_with_write_layer_copy_up_in_place() {
         recon.outcomes_section_found,
         "no outcomes section: {recon:?}"
     );
-
-    client
-        .teardown_session(vfs_control::pb::TeardownReq {
-            session_id: session.id,
-        })
-        .await
-        .expect("teardown");
-
-    server.abort();
 }
 
-/// A rooted launch on Windows: `{Game}\fixture.exe` resolves to the graph-only
-/// `fixture.exe` (a copy living only in the disk source, absent from `loc`),
-/// which the session stages, and the launched process reads `hello.txt` through
-/// the injected shim at `<loc>\hello.txt`. Then the same image spelled as an
-/// absolute path inside root 0's location launches too — but by then the first
-/// launch's staged copy is a real file at that path, so this second launch takes
-/// the **real-file** branch, not staging: it proves the absolute form resolves
-/// to the same root-0 vpath, not that it stages.
+/// A rooted launch on Windows: `fixture.exe` — a relative name, root 0's
+/// shorthand — resolves to the graph-only `fixture.exe` (a copy living only in
+/// the disk source, absent from `loc`), which the session stages, and the
+/// launched process reads `hello.txt` through the injected shim at
+/// `<loc>\hello.txt`. Then the same image spelled as an absolute path inside
+/// root 0's location launches too — but by then the first launch's staged copy
+/// is a real file at that path, so this second launch takes the **real-file**
+/// branch, not staging: it proves the absolute form resolves to the same
+/// root-0 vpath, not that it stages.
+///
+/// The daemon spelled the first launch `{Game}\fixture.exe` — its own root-name
+/// vocabulary, which it expanded to the absolute path before `Session::launch`
+/// saw it. That expansion went with the daemon; the relative name is the
+/// session's own way to name a root-0 vpath.
 #[cfg(windows)]
-#[tokio::test(flavor = "multi_thread")]
-async fn rooted_launch_by_name_and_absolute_path_stages_a_graph_only_image() {
-    let _guard = LAUNCH_LOCK.lock().await;
+#[test]
+fn rooted_launch_by_name_and_absolute_path_stages_a_graph_only_image() {
+    let _guard = lock_launches();
     ensure_inject_artifacts();
-
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-    let addr: SocketAddr = listener.local_addr().unwrap();
-    let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
-    let svc = DirectorService::new(SessionRegistry::new());
-    let server = tokio::spawn(async move {
-        Server::builder()
-            .add_service(DirectorServer::new(svc))
-            .serve_with_incoming(incoming)
-            .await
-    });
-    tokio::time::sleep(Duration::from_millis(20)).await;
 
     // The disk source holds a COPY of the fixture plus hello.txt.
     let content = vfs_testkit::tempdir().expect("content tempdir");
@@ -1024,36 +732,14 @@ async fn rooted_launch_by_name_and_absolute_path_stages_a_graph_only_image() {
         .replace('/', "\\");
     assert!(!Path::new(&loc).exists());
 
-    let cfg = SessionConfig {
-        session: vfs_control::SessionMeta {
-            name: Some("rooted-launch".into()),
-        },
-        roots: vec![vfs_control::RootEntry {
-            id: 0,
-            name: "Game".into(),
-            path: loc.clone(),
-        }],
-        sources: vec![vfs_control::SourceEntry {
-            spec: vfs_control::SourceSpec::Disk {
-                path: content.path().to_string_lossy().into_owned(),
-            },
-            mount: "/".into(),
-            root: 0,
-            write_layer: false,
-            cache_key: None,
-        }],
-        launch: None,
-        ..Default::default()
-    };
+    let mut session = LiveSession::create("rooted-launch");
+    session.declare_root(0, &loc);
+    session
+        .add_source(0, "/", 0, Arc::new(DiskProvider::new(content.path())))
+        .expect("AddSource");
 
-    let mut client = connect(&format!("{addr}")).await.expect("connect");
-    let (id, _) = apply_session_config(&mut client, &cfg)
-        .await
-        .expect("apply_session_config");
-
-    let launch_with = |exec: String| vfs_control::LaunchConfig {
-        exec,
-        args: vec![],
+    let launch_with = |image: String| LaunchOpts {
+        image,
         wait: true,
         env: [
             ("VFS_FIXTURE_PATH".to_string(), format!(r"{loc}\hello.txt")),
@@ -1061,60 +747,20 @@ async fn rooted_launch_by_name_and_absolute_path_stages_a_graph_only_image() {
         ]
         .into_iter()
         .collect(),
+        ..Default::default()
     };
 
-    // Bounded like `drain_launch_events`: `run_launch` itself waits forever, and
-    // this test holds LAUNCH_LOCK.
-    let stall = |which: &str| -> String {
-        format!(
-            "launch {which} stalled after {:?}; raise VFS_TEST_LAUNCH_TIMEOUT_SECS \
-             if this machine is merely slow",
-            launch_timeout()
-        )
-    };
-
-    let by_name = tokio::time::timeout(
-        launch_timeout(),
-        vfs_directord::run_launch(&mut client, &id, &launch_with(r"{Game}\fixture.exe".into())),
-    )
-    .await
-    .unwrap_or_else(|_| panic!("{}", stall(r"{Game}\fixture.exe")))
-    .expect("launch by root name");
-    assert_eq!(
-        by_name,
-        Some(0),
-        "{{Game}}\\fixture.exe should stage and exit 0"
+    let by_name = launch_bounded(
+        session.shared(),
+        launch_with("fixture.exe".into()),
+        "fixture.exe",
     );
+    assert_eq!(by_name, 0, "fixture.exe should stage and exit 0");
 
     let abs = format!(r"{loc}\fixture.exe");
-    let by_path = tokio::time::timeout(
-        launch_timeout(),
-        vfs_directord::run_launch(&mut client, &id, &launch_with(abs.clone())),
-    )
-    .await
-    .unwrap_or_else(|_| panic!("{}", stall(&abs)))
-    .expect("launch by absolute path");
+    let by_path = launch_bounded(session.shared(), launch_with(abs.clone()), &abs);
     assert_eq!(
-        by_path,
-        Some(0),
+        by_path, 0,
         "absolute path inside root 0 (now the staged real file) should launch and exit 0"
     );
-
-    client
-        .teardown_session(vfs_control::pb::TeardownReq { session_id: id })
-        .await
-        .expect("teardown");
-    server.abort();
-}
-
-fn toml_string(s: &str) -> String {
-    // Quote a path for TOML (escape backslashes).
-    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
-}
-
-/// Sessions default to a directory under the system temp dir, and the daemons
-/// these tests spawn inherit this process's environment. Point both at `target/`.
-#[ctor::ctor]
-fn scratch_tmpdir() {
-    vfs_testkit::use_scratch_as_tmpdir();
 }

@@ -47,7 +47,8 @@ fn locate_artifact(name: &str) -> std::path::PathBuf {
 /// the decisive "did this process actually run" signal below) once per test
 /// process, then co-locate them beside the test binary so `Session::launch`'s
 /// own DLL search (near `current_exe()`) finds them — the same convention
-/// `vfs-inject`'s and `vfs-directord`'s test harnesses use.
+/// `vfs-inject`'s test harness and this crate's `tests/support/artifacts.rs`
+/// use.
 fn ensure_fixtures() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {

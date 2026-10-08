@@ -313,7 +313,7 @@ fn under_root_recognises_an_8dot3_style_spelling_of_the_root() {
 /// `with_capacity`, so the root is stored in the spelling an unfolded path
 /// presents — **was implemented and reverted.** It works at this layer and
 /// breaks the layer above: measured under a short-spelled `TMP`, the
-/// `vfs-directord`/`vfs-shim`/`vfs-redirect` suites went from 271 passed /
+/// daemon e2e/`vfs-shim`/`vfs-redirect` suites went from 271 passed /
 /// 11 failed to 250 passed / 33 failed.
 ///
 /// The reason is that `RootMap` is not the only thing that holds a root.

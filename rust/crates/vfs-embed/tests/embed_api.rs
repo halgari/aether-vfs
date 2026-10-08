@@ -3,8 +3,8 @@
 //! **nothing else**.
 //!
 //! The interesting assertion is not any single `assert_eq!` below; it is the
-//! import list. This file names no engine crate. If a host cannot do what the
-//! daemon does without reaching past `vfs-embed`, the crate is not the seam
+//! import list. This file names no engine crate. If a host cannot compose,
+//! serve and write without reaching past `vfs-embed`, the crate is not the seam
 //! spec §4 says it is, and the next host would discover that instead of this
 //! test. `no_engine_crate_is_named_here`
 //! makes that literal by reading this file back.
@@ -418,12 +418,11 @@ fn launching_a_relative_image_reports_which_of_the_three_ways_it_failed() {
 #[test]
 fn no_engine_crate_is_named_here() {
     let src = include_str!("embed_api.rs");
-    for needle in [concat!("vfs_", "director"), concat!("vfs_", "directord")] {
-        assert!(
-            !src.contains(needle),
-            "a host must be able to do all of this without naming `{needle}` — \
-             if this file needs it, the missing piece belongs in vfs-embed, \
-             not in the test"
-        );
-    }
+    let needle = concat!("vfs_", "director");
+    assert!(
+        !src.contains(needle),
+        "a host must be able to do all of this without naming `{needle}` — \
+         if this file needs it, the missing piece belongs in vfs-embed, \
+         not in the test"
+    );
 }

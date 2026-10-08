@@ -19,22 +19,15 @@
 //! sibling instead, not a promotion. The two also fold directories differently
 //! on purpose (see `inline.rs`'s module docs), so they are not merged.
 //!
-//! **Why this lives in `vfs-compose` and not `vfs-provider` or `vfs-source`.**
+//! **Why this lives in `vfs-compose` and not `vfs-provider`.**
 //! `vfs-provider` already has an in-memory `ReadWrite` type
 //! ([`vfs_provider::RwMemFixture`]), but it exists to test the conformance
 //! suite itself and always serves the fixed `FIXTURE_FILES` tree — it has no
 //! constructor from an arbitrary name→bytes map, so it cannot stand in here.
-//! `vfs-source` is where a host would look for a source *registered by name*,
-//! but `vfs-embed` — the crate a Node/Python binding actually links —
-//! deliberately does not depend on `vfs-source`: reaching it would drag in
-//! `vfs-control`, tonic, prost and a vendored `protoc` just to construct a
-//! provider that needs none of that. `vfs-embed` already depends on
+//! `vfs-embed` — the crate a host actually links — already depends on
 //! `vfs-compose` for its other combinators (`InlineProvider`,
 //! `LayeredProvider`, `OverlayProvider`, ...) and re-exports them wholesale,
-//! so putting `MemoryProvider` here means a host constructs one directly, and
-//! `vfs-source::build_provider`'s `SourceSpec::Memory` arm builds the same
-//! type for the declarative-config path — one implementation, two routes to
-//! it, neither route paying for the other's dependencies.
+//! so putting `MemoryProvider` here means a host constructs one directly.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;

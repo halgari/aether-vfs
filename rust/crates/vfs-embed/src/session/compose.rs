@@ -17,8 +17,8 @@ use super::Session;
 ///
 /// The one place in the workspace that turns "these sources, that write
 /// layer" into a provider. Every surface funnels through it —
-/// [`Session::mount`], the daemon's `SessionRegistry`, and the config →
-/// graph builder — because the two halves compose in a way neither
+/// [`Session::mount`], [`Session::set_root_mounts`] and `skyrim-live` —
+/// because the two halves compose in a way neither
 /// `MountGraph` nor `stack_layers` can express: an overlay upper is what
 /// makes a write to content only a read-only source holds **copy up** rather
 /// than fail. A surface that composes its own graph instead gets a session
@@ -35,8 +35,8 @@ pub fn compose_root(
     // `Session::set_root_mounts` both check before they record, so they never
     // reach here with one; this catches the **third** route, which does not go
     // through `Session` at all: `compose_root` is public and re-exported, and
-    // both `vfs-directord`'s `SessionRegistry::compose` and `skyrim-live` call
-    // it directly and hand the result to `Director::mount`.
+    // `skyrim-live` calls it directly and hands the result to
+    // `Director::mount`.
     reject_sequential(mounts.iter().map(|(_, p)| p))?;
     let graph: Arc<dyn Provider> = Arc::new(MountGraph::new(mounts)?);
     match write_layer {
@@ -60,9 +60,9 @@ pub fn compose_root(
 /// **One function because there is more than one way in, and the check has to
 /// mean the same thing through all of them.** It previously lived inline in
 /// `Session::mount_at` only, so `Session::set_root_mounts` accepted what
-/// `mount_at` refused — and `set_root_mounts` is the path
-/// `vfs-directord`'s `SessionRegistry::add_source` takes for *every* source, so
-/// the daemon had no gate at all. Callers: [`Session::mount_at`],
+/// `mount_at` refused — and `set_root_mounts` is the path a host adding
+/// sources one at a time ([`crate::RootSources`]) takes for *every* source, so
+/// such a host had no gate at all. Callers: [`Session::mount_at`],
 /// [`Session::set_root_mounts`], and [`compose_root`].
 fn reject_sequential<'a>(
     providers: impl IntoIterator<Item = &'a Arc<dyn Provider>>,
@@ -98,7 +98,7 @@ pub(super) struct RootComposition {
     /// and a `MountGraph` resolves by walking its mounts in **reverse**, so
     /// first means last-tried means lowest precedence.
     ///
-    /// The daemon expressed the same rule as `STAGING_LAYER = i32::MIN` inside
+    /// The removed daemon expressed the same rule as `STAGING_LAYER = i32::MIN` inside
     /// a `stack_layers` stack, where ascending layer order makes the first
     /// entry the bottom. The two orderings are opposite, which is exactly why
     /// this is a named slot rather than "just mount it and rely on ordering":
@@ -179,8 +179,9 @@ impl Session {
     /// layer, and recompose.
     ///
     /// For a host that keeps its own record of what a root serves and rebuilds
-    /// the list from scratch whenever it changes — `SessionRegistry`, which
-    /// re-derives a root's layer stack on every `add_source`. Such a host must
+    /// the list from scratch whenever it changes — typically with a
+    /// [`crate::RootSources`], re-deriving a root's layer stack on every new
+    /// source. Such a host must
     /// not compose the result itself and hand it to `kernel().mount`: doing so
     /// replaces the root's provider with one that has no knowledge of the
     /// write layer, silently removing copy-on-write. Going through here keeps
@@ -319,8 +320,8 @@ impl Session {
     /// [`Session::set_write_layer_at`].
     ///
     /// The last of those is why this exists rather than callers keeping their
-    /// own list: a host that records sources per root (as `SessionRegistry`
-    /// does) has no entry for a root that was given *only* a write layer, so
+    /// own list: a host that records sources per root (as a
+    /// [`crate::RootSources`] per root does) has no entry for a root that was given *only* a write layer, so
     /// its own bookkeeping cannot enumerate what the session actually serves.
     pub fn composed_roots(&self) -> Vec<RootId> {
         self.roots
@@ -330,8 +331,8 @@ impl Session {
     }
 
     /// Whether `root` has a write layer — i.e. whether a write to content
-    /// only a read-only source holds can copy up, or must fail. The daemon
-    /// reports this per root when a session is composed, since an absent
+    /// only a read-only source holds can copy up, or must fail. A host can
+    /// report this per root when a session is composed, since an absent
     /// write layer is otherwise invisible until the first in-place edit
     /// fails, inside a running game.
     pub fn has_write_layer(&self, root: RootId) -> bool {
@@ -443,10 +444,10 @@ mod root_ownership_tests {
 
     /// A root given only a write layer is still a root this session composes.
     ///
-    /// The daemon enumerates roots through this to report whether each can
-    /// copy up. Its own per-root bookkeeping is filled in by `add_source`
-    /// alone, so a root declared with a write layer and no ordinary source
-    /// was missing from that report entirely — silently absent from the one
+    /// A host enumerates roots through this to report whether each can copy
+    /// up. Per-root source bookkeeping is filled in by adding sources alone,
+    /// so a root declared with a write layer and no ordinary source would be
+    /// missing from that report entirely — silently absent from the one
     /// place that says whether writes copy up.
     #[test]
     fn composed_roots_includes_a_root_that_has_only_a_write_layer() {

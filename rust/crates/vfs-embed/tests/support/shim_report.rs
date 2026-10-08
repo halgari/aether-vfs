@@ -174,8 +174,8 @@ pub struct Reconciliation {
 pub const WRITE_FALLBACK_LABEL: &str = "fell-through: write-fallback";
 
 /// `vfs_shim::hookstats::UNROUTED_OPEN_LABEL`'s value. Hand-copied for the
-/// same reason `WRITE_FALLBACK_LABEL` is: `vfs-directord` does not depend on
-/// `vfs-shim`. A rename there without one here does *not* fail silently the
+/// same reason `WRITE_FALLBACK_LABEL` is: these parsers build on every host,
+/// and `vfs-shim` is a dependency on Windows only. A rename there without one here does *not* fail silently the
 /// way a missing fall-through count would — it turns the reconciliation into
 /// a hard failure the moment either drift source fires, which is the safe
 /// direction for a copy to drift in.

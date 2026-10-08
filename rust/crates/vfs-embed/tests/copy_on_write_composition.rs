@@ -23,12 +23,17 @@
 //! tests build the same five layers `skyrim-live` builds — root disk, staging
 //! disk, zip, mods disk, write layer — and drive `Director`, which is what
 //! the ring's `OP_OPEN` calls.
+//!
+//! The second half composes the same archive and mod tree the way a host that
+//! learns its sources one at a time does — [`RootSources`] and
+//! `Session::set_root_mounts` — where a rebuild on every source must keep the
+//! write layer composed.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use vfs_embed::{DiskProvider, RootId, Session, OPEN_READ, OPEN_WRITE};
+use vfs_embed::{DiskProvider, Provider, RootId, RootSources, Session, OPEN_READ, OPEN_WRITE};
 
 /// The zip-only file every test here edits, spelled as a real archive spells
 /// it (`Data/…`) while every lookup uses the folded vpath the shim sends.
@@ -406,6 +411,345 @@ fn a_read_only_write_layer_is_refused_at_declaration() {
         .set_write_layer(Arc::new(vfs_zip::ZipProvider::open(&l.zip).unwrap()))
         .expect_err("a read-only provider cannot be a write layer");
     assert_eq!(err, vfs_provider::ST_BAD_REQUEST);
+}
+
+// ── The incremental-host surface: `RootSources` + `set_root_mounts` ──────────
+//
+// Ported from the removed daemon's `copy_on_write_daemon.rs`. The tests above
+// compose with `Session::mount`, as `skyrim-live` does. A host that learns its
+// sources one at a time — the daemon was one, a config loader or a UI is
+// another — records them in a `RootSources` and reinstalls the root's whole
+// mount list with `Session::set_root_mounts` on every source, because
+// `Director` holds one provider per root. That rebuild once composed the graph
+// itself and mounted it on `Director`, bypassing the write layer entirely: a
+// session with an archive plus a writable directory could not edit archive
+// content in place — the write routed to the topmost writable *sibling*,
+// which does not hold the file, and failed `ST_NOT_FOUND` (recorded before
+// the fix, by the negative control below).
+//
+// These tests build that shape — sources added one at a time through
+// `RootSources`, then a write layer — and drive `Director`, which is what the
+// ring's `OP_OPEN` calls.
+
+/// A modded game's directories, as an incremental host declares them: one
+/// read-only archive, one mod tree, one place writes go.
+struct SourcesLayout {
+    _base: vfs_testkit::Scratch,
+    zip: PathBuf,
+    mods: PathBuf,
+}
+
+fn sources_layout() -> SourcesLayout {
+    let base = vfs_testkit::scratch_dir("vfs-cow-sources");
+    let zip = base.path().join("content.zip");
+    write_stored_zip(&zip, ZIP_ENTRY, ORIGINAL);
+    let mods = base.path().join("mods");
+    std::fs::create_dir_all(&mods).unwrap();
+    SourcesLayout {
+        _base: base,
+        zip,
+        mods,
+    }
+}
+
+/// A session whose directories live in a scratch directory of its own, with
+/// the per-root source lists it is composed from.
+struct SourcedSession {
+    session: Session,
+    roots: std::collections::BTreeMap<u32, RootSources>,
+    _dirs: vfs_testkit::Scratch,
+}
+
+impl SourcedSession {
+    fn new() -> Self {
+        let dirs = vfs_testkit::scratch_dir("vfs-cow-session");
+        let mut session = Session::new();
+        session.set_root(dirs.path().join("root"));
+        session.set_overlay(dirs.path().join("overlay"));
+        session.set_state_dir(dirs.path().join("state"));
+        SourcedSession {
+            session,
+            roots: Default::default(),
+            _dirs: dirs,
+        }
+    }
+
+    /// Record one source and reinstall `root`'s whole mount list.
+    fn add_source(
+        &mut self,
+        root: u32,
+        mount: &str,
+        layer: i32,
+        provider: Arc<dyn Provider>,
+    ) -> Result<(), i32> {
+        let sources = self.roots.entry(root).or_default();
+        sources.add(mount, layer, provider);
+        let mounts = sources.mounts().expect("compose root");
+        self.session.set_root_mounts(RootId(root), mounts)
+    }
+
+    /// The read sources, added the way a config's `[[source]]` list is
+    /// added: archive first, mod tree above it.
+    fn add_read_sources(&mut self, l: &SourcesLayout) {
+        let zip = vfs_zip::ZipProvider::open(&l.zip).expect("zip source");
+        self.add_source(0, "/", 0, Arc::new(zip)).unwrap();
+        self.add_source(0, "/", 10, Arc::new(DiskProvider::new(&l.mods)))
+            .unwrap();
+    }
+
+    /// Where this session's writes land: the root-scoped subdirectory of the
+    /// session's own overlay, which is the same physical location the injected
+    /// shim's overlay uses (see `Session::overlay_layer_dir`) — so host and
+    /// shim agree on one directory for root 0's writes.
+    fn write_layer_dir(&self) -> PathBuf {
+        let dir = self.session.overlay_layer_dir(RootId::DEFAULT);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn open_for_in_place_edit(&self) -> Result<(u64, u64), i32> {
+        // Exactly what `fopen(path, "r+b")` becomes by the time it reaches
+        // the ring: OPEN_WRITE with **no** create/truncate bits. Nothing
+        // writable holds this path, so only copy-up can answer it.
+        self.session
+            .kernel()
+            .open(RootId::DEFAULT, ZIP_VPATH, OPEN_WRITE)
+            .map(|(fh, size, is_dir)| {
+                assert!(!is_dir);
+                (fh, size)
+            })
+    }
+}
+
+/// The headline: a session built the way an incremental host builds one
+/// edits content only the archive holds — and the archive is untouched
+/// afterwards.
+#[test]
+fn an_in_place_edit_of_archive_content_copies_up_on_the_daemon_surface() {
+    let l = sources_layout();
+    let zip_before = std::fs::read(&l.zip).unwrap();
+
+    let mut s = SourcedSession::new();
+    s.add_read_sources(&l);
+    let overrides = s.write_layer_dir();
+    s.session
+        .set_write_layer_at(RootId::DEFAULT, Arc::new(DiskProvider::new(&overrides)))
+        .expect("the write layer must be accepted");
+
+    let (fh, size) = s.open_for_in_place_edit().expect(
+        "an in-place edit of archive content must be served by copy-up on the incremental \
+         surface. ST_NOT_FOUND here is the gap this test exists for: the rebuild composed \
+         the graph itself and mounted it on `Director`, so the write layer was never part \
+         of the composition",
+    );
+    assert_eq!(
+        size as usize,
+        ORIGINAL.len(),
+        "the handle must open onto the copied-up content, not an empty file — a zero size \
+         means the write layer created a blank file instead of seeding from the archive"
+    );
+
+    // Overwrite in the middle and leave both ends alone: a truncating or
+    // blank-file implementation cannot produce this result.
+    let mut expected = ORIGINAL.to_vec();
+    expected[9..15].copy_from_slice(b"EDITED");
+    let k = s.session.kernel();
+    assert_eq!(k.write(fh, 9, b"EDITED").unwrap(), 6);
+    k.close(fh).unwrap();
+    assert_eq!(
+        s.session.read_file(ZIP_VPATH).unwrap(),
+        expected,
+        "the edit must be visible through the director, with the untouched bytes preserved"
+    );
+
+    assert_eq!(
+        std::fs::read(overrides.join("data").join("x.esp")).ok(),
+        Some(expected),
+        "the edited file must physically live in the write layer"
+    );
+    assert_eq!(
+        std::fs::read(&l.zip).unwrap(),
+        zip_before,
+        "copy-up mutated the archive it copied from"
+    );
+    assert!(
+        !l.mods.join("data").join("x.esp").exists(),
+        "the write leaked into the mod tree at {:?}",
+        l.mods
+    );
+}
+
+/// The negative control, and the **pre-fix state recorded as a test**: the
+/// same session, differing by one call — the writable directory arrives as
+/// one more source instead of as the write layer. That is the only thing the
+/// incremental surface could express before the write layer existed, and it
+/// cannot copy up: the layered stack routes the write to its topmost
+/// `ReadWrite` child, which does not hold the file.
+///
+/// Kept so the test above cannot be read as "writes work anyway".
+#[test]
+fn the_writable_directory_added_as_an_ordinary_source_cannot_edit_in_place() {
+    let l = sources_layout();
+    let mut s = SourcedSession::new();
+    s.add_read_sources(&l);
+    let overrides = s.write_layer_dir();
+    s.add_source(0, "/", 20, Arc::new(DiskProvider::new(&overrides)))
+        .unwrap();
+
+    let err = s
+        .open_for_in_place_edit()
+        .expect_err("a sibling writable source cannot copy up, so this open cannot succeed");
+    assert_eq!(
+        err,
+        vfs_provider::ST_NOT_FOUND,
+        "the layered stack sends the write to the topmost writable source, which does not \
+         hold the file — the exact failure the write-layer composition removes"
+    );
+
+    // The control that keeps the assertion above honest: the same path still
+    // reads fine through this session, so the refusal is about writes.
+    assert_eq!(s.session.read_file(ZIP_VPATH).unwrap(), ORIGINAL);
+}
+
+/// The trap: a host reinstalls a root's whole mount list on every source. A
+/// rebuild that composed the graph itself would **clobber** a write layer set
+/// earlier — leaving a session that had copy-on-write until the next source
+/// arrived. Sources are added in config order, so any config declaring its
+/// write layer before its last source would silently lose it.
+#[test]
+fn a_source_added_after_the_write_layer_does_not_clobber_it() {
+    let l = sources_layout();
+    let mut s = SourcedSession::new();
+
+    let overrides = s.write_layer_dir();
+    s.session
+        .set_write_layer_at(RootId::DEFAULT, Arc::new(DiskProvider::new(&overrides)))
+        .unwrap();
+    // Both sources arrive *after* the write layer, each triggering a rebuild.
+    s.add_read_sources(&l);
+
+    let (fh, size) = s
+        .open_for_in_place_edit()
+        .expect("the write layer set before the sources must survive their rebuilds");
+    assert_eq!(size as usize, ORIGINAL.len());
+    let k = s.session.kernel();
+    k.write(fh, 9, b"EDITED").unwrap();
+    k.close(fh).unwrap();
+    let mut expected = ORIGINAL.to_vec();
+    expected[9..15].copy_from_slice(b"EDITED");
+    assert_eq!(
+        std::fs::read(overrides.join("data").join("x.esp")).ok(),
+        Some(expected)
+    );
+}
+
+/// A write layer only some *other* root has must not give root 0 copy-up —
+/// roots compose independently, and a session that silently shared one
+/// writable directory across roots would put a second root's writes in the
+/// game directory's overwrite folder.
+#[test]
+fn a_write_layer_on_another_root_does_not_serve_root_zero() {
+    let l = sources_layout();
+    let mut s = SourcedSession::new();
+    s.add_read_sources(&l);
+    let overrides = s.write_layer_dir();
+    s.session
+        .set_write_layer_at(RootId(1), Arc::new(DiskProvider::new(&overrides)))
+        .unwrap();
+
+    // Root 0 must still be root 0: composing a *second* root must not
+    // republish itself over the first, which would take the archive away
+    // from every reader as well as leaving the write unanswered.
+    assert_eq!(
+        s.session.read_file(ZIP_VPATH).unwrap(),
+        ORIGINAL,
+        "root 0's own sources must survive another root being composed"
+    );
+
+    let err = s
+        .open_for_in_place_edit()
+        .expect_err("root 1's write layer must not answer for root 0");
+    assert_eq!(
+        err,
+        vfs_provider::ST_NOT_FOUND,
+        "root 0 is composed without a write layer, so it fails exactly as it did before \
+         the write layer existed — the layered stack routes the write to the writable mod \
+         source, which does not hold the file"
+    );
+}
+
+/// A read-only provider is refused **where it is declared**, not at the first
+/// write — a session that accepted an unwritable write layer would look
+/// configured and fail hours later, on the first in-place edit.
+#[test]
+fn a_read_only_write_layer_is_refused_by_the_registry() {
+    let l = sources_layout();
+    let mut s = SourcedSession::new();
+    s.add_read_sources(&l);
+    let zip = vfs_zip::ZipProvider::open(&l.zip).unwrap();
+    let err = s
+        .session
+        .set_write_layer_at(RootId::DEFAULT, Arc::new(zip))
+        .expect_err("a read-only provider cannot be a write layer");
+    assert_eq!(
+        err,
+        vfs_provider::ST_BAD_REQUEST,
+        "expected a bad-request status"
+    );
+
+    // …and the session is left exactly as it was, not holding a refused layer
+    // that would poison the next rebuild: adding another source still
+    // succeeds, and reads still work.
+    s.add_source(0, "/", 20, Arc::new(DiskProvider::new(&l.mods)))
+        .expect("a refused write layer must not break later composition");
+    assert_eq!(s.session.read_file(ZIP_VPATH).unwrap(), ORIGINAL);
+}
+
+/// A write layer whose directory does not exist yet still gives the session
+/// copy-on-write: a user's overwrite folder need not exist before the first
+/// edit, and copy-up has to make it rather than failing.
+///
+/// The core half of the daemon's
+/// `a_write_layer_declared_over_grpc_gives_the_session_copy_on_write`, which
+/// declared the layer over the wire; the wire's own validation (a sub-path
+/// write layer, an unknown session) went with the daemon — `Session` has no
+/// way to express either.
+#[test]
+fn a_write_layer_whose_directory_does_not_exist_yet_gives_copy_on_write() {
+    let l = sources_layout();
+    let zip_before = std::fs::read(&l.zip).unwrap();
+
+    let mut s = SourcedSession::new();
+    let zip = vfs_zip::ZipProvider::open(&l.zip).expect("zip source");
+    s.add_source(0, "/", 0, Arc::new(zip)).unwrap();
+
+    // Deliberately **not** created here.
+    let overwrite_parent = vfs_testkit::tempdir().unwrap();
+    let overrides = overwrite_parent.path().join("declared-overwrite");
+    s.session
+        .set_write_layer_at(RootId::DEFAULT, Arc::new(DiskProvider::new(&overrides)))
+        .expect("the write layer must be accepted");
+
+    let mut expected = ORIGINAL.to_vec();
+    expected[9..15].copy_from_slice(b"EDITED");
+    let (fh, size) = s
+        .open_for_in_place_edit()
+        .expect("a write layer whose directory does not exist yet must still give copy-up");
+    assert_eq!(size as usize, ORIGINAL.len());
+    let k = s.session.kernel();
+    k.write(fh, 9, b"EDITED").unwrap();
+    k.close(fh).unwrap();
+    assert_eq!(s.session.read_file(ZIP_VPATH).unwrap(), expected);
+    assert_eq!(
+        std::fs::read(overrides.join("data").join("x.esp")).ok(),
+        Some(expected),
+        "the edit must land in the directory the host named"
+    );
+    assert_eq!(
+        std::fs::read(&l.zip).unwrap(),
+        zip_before,
+        "copy-up mutated the archive it copied from"
+    );
 }
 
 // ── a one-entry Stored zip, as `unicode_case_fold_across_the_ring` writes one ──

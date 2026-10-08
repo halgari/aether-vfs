@@ -45,11 +45,11 @@ rather than a mutation, and confines failure to one process.
 ## 2. Topology
 
 ```text
-┌─ Host process (CLI, daemon, or embedding app) ────────────────────────────┐
+┌─ Host process (a launcher, a binding, or a harness) ──────────────────────┐
 │                                                                           │
 │  Session          (vfs-embed) roots, mounts, serve, launch                │
 │  Director         userspace FUSE kernel: resolve, overlay, handle table   │
-│  Providers        zip · disk · cache · compose · gRPC plugin              │
+│  Providers        zip · disk · cache · compose · the host's own           │
 │                                                                           │
 └───────────────────────────────┬───────────────────────────────────────────┘
                                 │  shared memory:
@@ -91,7 +91,7 @@ answers `resolve(vpath)`. It knows about:
 Keeping this layer pure is what makes the merge semantics testable without a
 game, a driver, or even a filesystem.
 
-### 3.2 Providers and composition — `vfs-provider`, `vfs-source`, `vfs-zip`, `vfs-compose` (and the `aether-storage` add-on)
+### 3.2 Providers and composition — `vfs-provider`, `vfs-zip`, `vfs-compose` (and the `aether-storage` add-on)
 
 Everything that can supply bytes implements the `Provider` trait
 (`vfs-provider`), addressed by `(RootId, relative path)` via `VPath` rather
@@ -150,13 +150,10 @@ never cached).
   blocks, and serves two things from it: `Storage::cached` wraps an
   immutable, slow source (a remote one) as a pull-through cache keyed by a
   stable `SourceKey`, and `Storage::layer` hands out a named, persistent
-  read-write layer — a session's write layer that survives the session. The
-  daemon opens one `Storage` per process (`vfs daemon --storage-dir`). What is
+  read-write layer — a session's write layer that survives the session. A
+  host opens one `Storage` per storage directory. What is
   durable when is in [`durability.md`](../../addons/crates/aether-storage/DURABILITY.md); the design is
   [the vfs-storage design](../../docs/superpowers/specs/2026-09-29-vfs-storage-design.md).
-- **`vfs-source`** turns a declarative spec into a live provider, including
-  `RemoteProvider`, which forwards every op to an out-of-process gRPC plugin
-  — so a provider can be written in any language.
 
 ### 3.3 The director — `vfs-director`
 
@@ -366,12 +363,15 @@ enableable by accident), and `opt_out` is on unless explicitly disabled.
 `vfs_env::describe()` prints the whole surface; the rustdoc on each constant is
 the reference.
 
-### 3.8 Control plane — `vfs-control`, `vfs-directord`
+### 3.8 Hosting — `vfs-embed`
 
-A gRPC contract plus a declarative config schema (`vfs-control`), and a daemon
-(`vfs-directord`) that can hold many sessions, with the `vfs` CLI. The daemon
-builds each session through `vfs-embed`, as any other host would. The control
-plane is language-agnostic; the data plane is the ring.
+There is no control plane: a host embeds `vfs-embed` (§3.11) and composes each
+session in code. A host that learns its sources one at a time records them in a
+`RootSources` per root and installs them with `Session::set_root_mounts`, which
+keeps the root's write layer composed. The daemon (`vfs-directord`,
+`vfs-control`, `vfs-source`) was removed on 2026-10-08: no host used it. Its
+end-to-end tests (the escape matrix, enumeration, the launch scenarios) moved
+to `vfs-embed/tests/`.
 
 ### 3.9 Registry overlay — `vfs-registry`, `vfs-director`'s `registry` module, the shim's `reg*` modules
 
@@ -450,7 +450,7 @@ Windows path.
 
 `vfs-embed` is the one crate a host names. It owns a `Session`: the roots, the
 provider graph each root serves, the ring the injected shim talks over, and the
-launch (Windows or Proton). `vfs.exe` and the daemon are hosts like any other;
+launch (Windows or Proton). Every host goes through it;
 if a host has to reach past `vfs-embed`, the fix belongs in `vfs-embed`. It
 re-exports what a host needs (the provider and composition types, the storage
 types, and a `proton` module for runtime, prefix and GPU probes). Its Proton
@@ -844,13 +844,10 @@ observer before concluding the process is idle.
 | `vfs-unix` | Unix shared memory: the file-backed ring (the mirror of `vfs-win`) |
 | `vfs-zip` | ZIP64 central directory, Stored windows, `ZipProvider` |
 | `vfs-compose` | provider combinators: layered, overlay (copy-up), router, subdir, seekable, readonly, disk, memory, inline, `MountGraph` |
-| `vfs-source` | declarative spec to provider, incl. `RemoteProvider` gRPC plugins |
 | `vfs-director` | the kernel: root to provider table, handle namespace, ring server, staging, registry host |
 | `vfs-embed` | **the embeddable API**: `Session`, roots, composition, serve, launch (Windows and Proton) |
 | `vfs-proton` | GE-Proton install, prefix, Wine launch, Steam and NVAPI probes; the Windows artefact list |
 | `vfs-registry` | registry overlay tree, its file format, the merge with a real key, NT query layouts |
-| `vfs-directord` | daemon + `vfs` CLI (a host of `vfs-embed`) |
-| `vfs-control` | gRPC contract + config schema |
 | `vfs-env` | every `VFS_*` switch, defined once, with a drift test |
 | `vfs-redirect` | pure path core: root map and canonicalisation |
 | `vfs-ntlayout` | pure NT byte layouts and decisions for the shim's hooks |

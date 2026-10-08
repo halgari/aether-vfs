@@ -7,7 +7,9 @@
 > `decide`, `cow_seed` and `whiteout`) was deleted: the shim always has a director and the
 > overlay's copy-up lives in `vfs-compose`. `vfs-directord::registry` is gone with the daemon's
 > old registry, and `vfs-launch` with the CLI. A child process is now injected **fail closed**:
-> see vector 14 below. Read the names in this document as the names of their day; the
+> see vector 14 below. The daemon was removed on 2026-10-08, and its e2e tests named here
+> (`crates/vfs-directord/tests/*.rs`) now live in `crates/vfs-embed/tests/`, built on a
+> `vfs_embed::Session` instead of gRPC. Read the names in this document as the names of their day; the
 > invariants the code keeps now are in [`../../docs/shim-invariants.md`](../../docs/shim-invariants.md).
 
 **Provenance.** `crates/vfs-directord/tests/escape_matrix.rs`'s

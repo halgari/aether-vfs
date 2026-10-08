@@ -5,8 +5,8 @@ archives** (and disk folders, and remote sources) without extracting PE/BSA/ESP 
 the launch PE closure, and inject a thin NT-API shim into the game. The game runs on Windows, or
 on Linux under GE-Proton.
 
-The top-level [README](../README.md) is the main guide (build, Linux/Proton, tests, the `vfs`
-CLI, storage, embedding). This file is the short map of the workspace.
+The top-level [README](../README.md) is the main guide (build, Linux/Proton, tests, roots and
+launches, storage, embedding). This file is the short map of the workspace.
 
 ## Docs
 
@@ -50,17 +50,10 @@ fn run() -> Result<(), String> {
 See the top-level README's *Embedding* section and `vfs-embed`'s crate docs for the full API,
 including the Proton (Linux) options.
 
-Control plane is gRPC-only. Prefer the `vfs` CLI / `vfs-directord` daemon:
-
-```sh
-cargo run -p vfs-directord -- daemon
-cargo run -p vfs-directord -- up --config scenario.toml
-```
-
 ## Build and test
 
 ```sh
-cargo build -p vfs-directord -p vfs-shim-dll -p vfs-fixture-read    # Windows
+cargo build -p vfs-embed -p vfs-shim-dll -p vfs-fixture-read    # Windows
 ```
 
 On Linux the Windows half is cross-built with `../bin/build-windows`; the shim's own tests run
@@ -81,9 +74,8 @@ first:
 | Crate | Role |
 |-------|------|
 | `vfs-embed` | The embeddable API: `Session`, roots, composition, serve, launch |
-| `vfs-directord` | Daemon + `vfs` CLI |
 | `vfs-director` | Kernel: root to provider table, ring server, staging |
-| `vfs-compose`, `vfs-zip`, `vfs-source` | Providers and composition (overlay copy-up, layered, router, zip, remote) |
+| `vfs-compose`, `vfs-zip` | Providers and composition (overlay copy-up, layered, router, zip) |
 | `aether-storage`, `aether-block-store` (add-ons, `../addons/crates/`) | Pull-through cache and named write layers on a deduplicating block store |
 | `vfs-proton` | GE-Proton install, prefix and Wine launch (Linux host) |
 | `vfs-shim`, `vfs-inject` | The Windows half: NT detours, launch and injection |

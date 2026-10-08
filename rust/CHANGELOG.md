@@ -4,6 +4,18 @@ Changes to the host-facing API of `vfs-embed`, `vfs-proton`, `vfs-provider`
 and `vfs-env` that a host (Haskill) has to adapt to or can start using. Newest
 first. Internal refactors are in the git history, not here.
 
+## Unreleased (add-ons)
+
+### Removed
+
+- The daemon stack: `vfs-directord` (the `vfs` CLI and gRPC daemon),
+  `vfs-control` (its gRPC contract and TOML config schema) and `vfs-source`
+  (`SourceSpec` → provider, and the out-of-process gRPC `RemoteProvider`).
+  No host used them; a host composes sessions with `vfs_embed::Session`, and
+  one that adds sources one at a time uses `vfs_embed::RootSources` with
+  `Session::set_root_mounts`. `tools/python_source_plugin` went with
+  `vfs-source`'s proto.
+
 ## Unreleased (cleanup pass)
 
 ### Breaking

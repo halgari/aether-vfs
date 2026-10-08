@@ -31,7 +31,7 @@ For the full technical narrative (architecture, PE loading, performance, lessons
 
 The **game** never calls host open/read. It sees normal paths under the virtual root; hooks + ring deliver bytes from backends.
 
-CLI: `vfs` (the `vfs-directord` binary).
+A host embeds `vfs-embed`; there is no CLI or daemon (removed 2026-10-08).
 
 ---
 

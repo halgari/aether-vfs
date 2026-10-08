@@ -1,14 +1,13 @@
 //! **The public embeddable API.** Session lifecycle, roots, composition,
 //! launch — design spec §4.
 //!
-//! Everything above this crate is a *host*: `vfs.exe` and its daemon, or any
-//! program that embeds a session (a language binding, a launcher). Everything
-//! below it is the engine:
+//! Everything above this crate is a *host*: any program that embeds a session
+//! (a launcher, a language binding, the `skyrim-live`
+//! harness). Everything below it is the engine:
 //! the [`Director`] kernel, the provider contract, and the composition
 //! primitives. A host is expected to name **only this crate**; if a host has
-//! to `use vfs_director::…` or `use vfs_directord::…` to get something done,
-//! the seam is in the wrong place and the fix belongs here rather than in the
-//! host.
+//! to `use vfs_director::…` to get something done, the seam is in the wrong
+//! place and the fix belongs here rather than in the host.
 //!
 //! ```no_run
 //! use std::sync::Arc;
@@ -45,12 +44,12 @@
 //!
 //! It owns **one session**: its roots, the provider graph each root serves,
 //! the ring the injected shim talks over, and the launch. It does not own a
-//! *table* of sessions, a control plane, or a config file format. The daemon
-//! in `vfs-directord` keeps those, because they are properties of that
-//! particular host rather than of embedding — an embedding host addresses its
-//! sessions with its own object references, not with `"s1"` strings over
-//! gRPC, and composes its graph from code rather than from TOML (spec §6:
-//! "Config is a serialization of the graph, not the other way round").
+//! *table* of sessions, a control plane, or a config file format: those are
+//! properties of a particular host rather than of embedding — an embedding
+//! host addresses its sessions with its own object references and composes
+//! its graph from code (spec §6: "Config is a serialization of the graph, not
+//! the other way round"). The gRPC daemon that once kept all three was
+//! removed on 2026-10-08: no host used it.
 //!
 //! ## Composition
 //!
@@ -109,12 +108,9 @@
 //!   [`Session::set_overlay`]. [`Session::new`]'s own defaults handle this for
 //!   themselves; a host that calls `set_root`/`set_overlay`/`set_state_dir`
 //!   takes it on.
-//! * **Building a provider from a name** (`"disk"`, `"zip"`, `"remote"`)
-//!   rather than calling its constructor. `vfs-source` does that and reaches
-//!   the gRPC `remote` provider, which is not in the catalog below; it also
-//!   pulls tonic, prost and a vendored `protoc`, which is why it is not a
-//!   dependency here. Spec §6's `register_provider` is the intended answer and
-//!   does not exist yet.
+//! * **Building a provider from a name** (`"disk"`, `"zip"`) rather than
+//!   calling its constructor. Spec §6's `register_provider` is the intended
+//!   answer and does not exist yet.
 
 #![deny(unsafe_code)]
 
@@ -255,9 +251,8 @@ pub fn reset_rejected_writes() {
 /// took, and these are the ones that actually arrived here. A host comparing
 /// the two numbers is asking "did anything under the managed root get served
 /// by real disk behind my back", which is the question a VFS has to be able to
-/// answer about itself. `vfs-directord` reports it on its `Stats` RPC; it is
-/// here because a host without a control plane needs the same number and had
-/// to name the kernel crate to get it.
+/// answer about itself. It is here because a host needs the number and would
+/// otherwise have to name the kernel crate to get it.
 ///
 /// **Process-wide**, with the same caveat as [`rejected_writes`]: no session or
 /// root dimension.
@@ -306,11 +301,11 @@ mod tests {
     /// The same hard error through the **other** mount entry point.
     ///
     /// `mount_at` checked this and `set_root_mounts` did not, so the gate did
-    /// not exist for the surface that actually matters: `vfs-directord`'s
-    /// `SessionRegistry::add_source` rebuilds a root's list and installs it with
-    /// `set_root_mounts` on *every* source, so in the daemon a `SeqRead`
-    /// provider mounted cleanly and failed every read instead. Two entry points,
-    /// one contract.
+    /// not exist for the surface that actually matters: a host adding sources
+    /// one at a time ([`RootSources`]) rebuilds a root's list and installs it
+    /// with `set_root_mounts` on *every* source, so there a `SeqRead` provider
+    /// mounted cleanly and failed every read instead. Two entry points, one
+    /// contract.
     #[test]
     fn set_root_mounts_refuses_a_sequential_provider_too() {
         let seq: Arc<dyn Provider> = Arc::new(vfs_provider::conformance::SeqFixture::new());
@@ -330,9 +325,8 @@ mod tests {
 
     /// The third route into a root's provider, and the reason the check lives in
     /// `compose_root` as well as in the two `Session` methods: `compose_root` is
-    /// public, and `skyrim-live` and `SessionRegistry::compose` both call it
-    /// directly and hand the result to `Director::mount`, never touching
-    /// `mount_at` or `set_root_mounts`.
+    /// public, and `skyrim-live` calls it directly and hands the result to
+    /// `Director::mount`, never touching `mount_at` or `set_root_mounts`.
     #[test]
     fn compose_root_refuses_a_sequential_mount() {
         let seq: Arc<dyn Provider> = Arc::new(vfs_provider::conformance::SeqFixture::new());

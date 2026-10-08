@@ -28,8 +28,7 @@ use vfs_embed::{InlineProvider, Provider, RootId, Session, StageOpts};
 use vfs_embed::{DiskProvider, LaunchOpts};
 
 /// Minimal PE: MZ header, e_lfanew, PE32+ optional header, no imports — the
-/// same shape `vfs_director::stage`'s own tests and `vfs-directord`'s
-/// `staging.rs` use. The trailing marker is what makes "which copy answered"
+/// same shape `vfs_director::stage`'s own tests and `staging.rs` use. The trailing marker is what makes "which copy answered"
 /// an observable fact rather than an inference.
 fn bare_pe(marker: &[u8]) -> Vec<u8> {
     let mut pe = vec![0u8; 0x400];
@@ -139,7 +138,7 @@ fn a_staged_copy_must_not_shadow_curated_content_at_the_same_path() {
     );
 
     // A host that keeps its own source list and rebuilds a root wholesale
-    // (`SessionRegistry::add_source` does this on every source) must not
+    // (a `RootSources` host does this on every source) must not
     // knock staging out of the graph, and must not promote it either.
     s.set_root_mounts(
         RootId::DEFAULT,
@@ -180,7 +179,7 @@ fn a_staged_copy_must_not_shadow_curated_content_at_the_same_path() {
 /// neither, and that is what stopped Cyberpunk 2077 and Stardew Valley.
 ///
 /// The bytes are `bare_pe`s, so the launch itself cannot succeed. What
-/// happened before that failure is the point, exactly as in `vfs-directord`'s
+/// happened before that failure is the point, exactly as in `staging.rs`'s
 /// `production_launch_stages_a_relative_image_before_create_process` — the
 /// staged files survive it because the session holds the `StagedDir`.
 // Needs a real `CreateProcess` + inject by `vfs-inject`: Windows-only.
@@ -276,8 +275,9 @@ fn locate_artifact(name: &str) -> std::path::PathBuf {
 ///
 /// Duplicated from `fuse_init_gate.rs` rather than shared: this is the
 /// convention every launch-capable test harness in the workspace follows
-/// (`vfs-inject`'s and `vfs-directord`'s do the same), and a `tests/support`
-/// module for two callers would be the only shared build step in the crate.
+/// (`vfs-inject`'s does the same), and `tests/support/artifacts.rs`, which
+/// rebuilds on staleness, serves the e2e tests that need the full fixture
+/// set.
 #[cfg(windows)]
 fn ensure_fixtures() {
     static ONCE: std::sync::Once = std::sync::Once::new();

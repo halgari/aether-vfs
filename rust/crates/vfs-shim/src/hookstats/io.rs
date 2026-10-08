@@ -422,7 +422,7 @@ pub(crate) enum ReadDirSource {
 
 impl ReadDirSource {
     /// The token this renders as in the report. Parsed by
-    /// `vfs-directord`'s test `support::readdir_records`; keep them in step.
+    /// `vfs-embed`'s test `support::readdir_records`; keep them in step.
     pub(crate) fn label(self) -> &'static str {
         match self {
             ReadDirSource::Director => "director",
@@ -456,7 +456,7 @@ pub(crate) fn note_readdir(dir: &str, wildcard: Option<&str>, count: usize, sour
     //
     // Not hypothetical: one enumeration of a developer `%TEMP%` holding ~12k
     // entries filled all 300 rows, so the director-served listing that
-    // `vfs-directord`'s e2e test
+    // `vfs-embed`'s e2e test
     // `directory_enumeration_under_a_managed_root_hides_an_unserved_real_file`
     // asserts on was never recorded. The listing itself was correct; only the
     // evidence was gone, and the test failed on its own vacuity guard — on
@@ -484,7 +484,7 @@ pub(super) fn render_readdirs(snap: &Snapshot) -> String {
     // duplicates — and `of N calls` is what those duplicates were worth.
     // `dropped` prints whenever it is nonzero, because the failure this
     // guards against was a table that had quietly stopped recording.
-    // `vfs-directord`'s `support::readdir_records` finds this section by the
+    // `vfs-embed`'s test `support::readdir_records` finds this section by the
     // text up to `(` and then skips the header line, so extra fields are safe
     // to add here.
     let dropped = snap.readdirs_dropped;

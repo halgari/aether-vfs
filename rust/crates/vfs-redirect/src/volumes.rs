@@ -222,9 +222,10 @@ fn nt_key_for_win32_path(win32_path: &str) -> String {
 /// **Depth, bounded tightly and for a second, load-bearing reason beyond
 /// cost.** Only [`MAX_ANCESTOR_LEVELS`] levels are climbed — deliberately
 /// just enough to reach past this project's own two session-wrapper
-/// directories (`vfs-directord::sessions`'s `<TEMP>/vfs-daemon-<pid>-<seq>-<id>/root`:
-/// one level for the per-session base directory, one more for the system
-/// temp directory itself), not one level further into the broader user
+/// directories (the removed daemon's `<TEMP>/vfs-daemon-<pid>-<seq>-<id>/root`,
+/// and `vfs-embed`'s test sessions' `target/tmp/vfs-session-<name>-<pid>-<seq>/root`:
+/// one level for the per-session base directory, one more for the temp
+/// directory itself), not one level further into the broader user
 /// profile tree. Climbing further was tried during verification and found
 /// to cost more than time: a real Windows profile's own built-in
 /// legacy-compatibility junctions (`AppData\Local\Application Data`,

@@ -58,8 +58,8 @@ impl Session {
     ///   `RootComposition::staging` — a staged copy outranking curated
     ///   content is a silent wrong answer on exactly the paths staging touches.
     ///
-    /// Staging again replaces the previous directory (and deletes it), the same
-    /// way a relaunch did in the daemon.
+    /// Staging again replaces the previous directory (and deletes it), so a
+    /// relaunch never sees a previous launch's staged images.
     pub fn stage_launch(
         &self,
         source: &dyn ImageSource,
@@ -316,7 +316,7 @@ mod launch_image_tests {
 
     /// Minimal PE32+ with no imports — staging parses the import table, so
     /// the bytes must be a real (if empty) PE. Same shape as
-    /// `vfs-directord/tests/staging.rs`'s `bare_pe`.
+    /// `vfs-embed/tests/staging.rs`'s `bare_pe`.
     fn bare_pe() -> Vec<u8> {
         let mut pe = vec![0u8; 0x400];
         pe[0] = b'M';

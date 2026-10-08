@@ -153,7 +153,7 @@ fn no_outcome_paths_renders_nothing() {
 }
 
 /// The unrouted-open row must render inside the outcomes section, in the
-/// same shape as an outcome row: `vfs-directord`'s `assert_reconciled`
+/// same shape as an outcome row: `vfs-embed`'s test `assert_reconciled`
 /// parses that one section and needs both halves of the reconciliation
 /// out of it. Its label must also not collide with any outcome's, or the
 /// count would parse as a fall-through class instead.

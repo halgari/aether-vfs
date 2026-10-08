@@ -17,9 +17,9 @@ pub type RootMounts = Vec<(String, Arc<dyn Provider>)>;
 /// `Director` holds exactly **one** provider per root, so there is no
 /// incremental mount to append to — every new source rebuilds the whole root.
 /// A host therefore has to keep the source list somewhere, and this is that
-/// somewhere. It was `SessionRegistry`'s private `RootBuild`; it is public
-/// here because the daemon is not the only host that adds sources one at a
-/// time, and the alternative was every host reinventing the two rules below.
+/// somewhere. It began as the removed daemon's private `RootBuild`; it is
+/// public here because any host that adds sources one at a time needs it, and
+/// the alternative was every such host reinventing the two rules below.
 ///
 /// **The two rules it encodes:**
 ///

@@ -105,7 +105,7 @@ fn newest_mtime(dir: &Path) -> Option<SystemTime> {
 /// `crate_dir` through its transitive local dependency graph.
 ///
 /// This is the check the old `ensure_inject_artifacts` skipped: it rebuilt
-/// only when an artifact file did not exist, so `cargo test -p vfs-directord`
+/// only when an artifact file did not exist, so `cargo test -p vfs-embed`
 /// would silently validate a change to `vfs-redirect` or `vfs-shim` against
 /// whatever DLL a previous, unrelated build had left behind — no error, just
 /// a passing test that measured the wrong binary. A needless rebuild costs

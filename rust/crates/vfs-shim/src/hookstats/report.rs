@@ -235,8 +235,8 @@ pub(super) static START: OnceLock<Instant> = OnceLock::new();
 /// From `DLL_PROCESS_DETACH` — the only place a DLL can act on process exit —
 /// every other thread is already terminated, and one killed mid-`std::fs::write`
 /// leaves a lock (the CRT heap's, among others) that the flush then waits on
-/// forever, inside the loader lock. Measured 2026-08-15 on the `vfs-directord`
-/// e2e suite: with the flush, the suite wedged on 2 of 2 runs, each leaving an
+/// forever, inside the loader lock. Measured 2026-08-15 on the daemon's
+/// e2e suite (now `vfs-embed`'s): with the flush, the suite wedged on 2 of 2 runs, each leaving an
 /// unreapable fixture process holding the shim DLL's image lock; without it,
 /// the same suite finished in 3 seconds. Reading counters with `try_lock` does
 /// not save it, because rendering has to allocate.

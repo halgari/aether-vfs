@@ -4,16 +4,13 @@
 // Every test here injects a real Windows process, so on other hosts the helpers are unused.
 #![cfg_attr(not(windows), allow(dead_code, unused_imports))]
 
-use std::net::SocketAddr;
-use std::path::PathBuf;
-use std::time::Duration;
+use std::collections::BTreeMap;
+use std::sync::Arc;
 
-use tokio::net::TcpListener;
-use tonic::transport::Server;
-use vfs_control::pb::director_server::DirectorServer;
-use vfs_directord::{connect, DirectorService, SessionRegistry};
+use vfs_embed::{DiskProvider, LaunchOpts};
 
 mod support;
+use support::session::LiveSession;
 use support::{artifacts::*, launch::*};
 
 /// One tab-separated line of `vfs-fixture-prefs`' output: the operation, the
@@ -76,24 +73,10 @@ const PREFS_DEFAULT: &str = "MISSING";
 /// that only compared against the director's bytes without a decoy on disk
 /// could not tell a served read from a passthrough at all.
 #[cfg(windows)]
-#[tokio::test(flavor = "multi_thread")]
-async fn profile_api_reads_a_managed_root_ini_through_the_director() {
-    let _guard = LAUNCH_LOCK.lock().await;
+#[test]
+fn profile_api_reads_a_managed_root_ini_through_the_director() {
+    let _guard = lock_launches();
     ensure_inject_artifacts();
-
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-    let addr: SocketAddr = listener.local_addr().unwrap();
-    let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
-
-    let registry = SessionRegistry::new();
-    let svc = DirectorService::new(registry);
-    let server = tokio::spawn(async move {
-        Server::builder()
-            .add_service(DirectorServer::new(svc))
-            .serve_with_incoming(incoming)
-            .await
-    });
-    tokio::time::sleep(Duration::from_millis(20)).await;
 
     // CRLF: what an INI on Windows actually contains, and what the profile
     // API's own parser is fed in a live session.
@@ -109,41 +92,18 @@ async fn profile_api_reads_a_managed_root_ini_through_the_director() {
     let stats_log = stats_dir.path().join("shim-stats.log");
 
     let fixture = locate_artifact("vfs-fixture-prefs.exe");
-    let mut client = connect(&format!("{addr}")).await.expect("connect");
 
-    let session = client
-        .create_session(vfs_control::pb::CreateSessionReq {
-            name: "prefs-read".into(),
-        })
-        .await
-        .expect("CreateSession")
-        .into_inner();
+    let mut session = LiveSession::create("prefs-read");
 
-    use vfs_control::pb::{
-        source_spec, AddSourceReq, DiskSource, LaunchReq, SourceSpec as PbSource,
-    };
-    client
-        .add_source(AddSourceReq {
-            session_id: session.id.clone(),
-            source: Some(PbSource {
-                kind: Some(source_spec::Kind::Disk(DiskSource {
-                    path: content_dir.path().to_string_lossy().into_owned(),
-                })),
-            }),
-            mount: "/".into(),
-            layer: 0,
-            root: 0,
-            write_layer: false,
-            cache_key: String::new(),
-        })
-        .await
+    session
+        .add_source(0, "/", 0, Arc::new(DiskProvider::new(content_dir.path())))
         .expect("AddSource");
 
     // The decoy: a real file, physically present under the managed root, with
     // *different* content at the same path the fixture will ask for. Written
     // and read back from this never-injected harness process first, so
     // "the fixture did not see DISK" can never mean "DISK was never there".
-    let root = PathBuf::from(&session.root);
+    let root = session.root();
     let ini_path = root.join("prefs.ini");
     std::fs::write(&ini_path, disk_ini.as_bytes()).expect("write on-disk decoy");
     let decoy_readback = std::fs::read(&ini_path).expect("read decoy back");
@@ -154,7 +114,7 @@ async fn profile_api_reads_a_managed_root_ini_through_the_director() {
          VIRTUAL-vs-DISK discrimination below proves nothing"
     );
 
-    let mut env = std::collections::HashMap::new();
+    let mut env = BTreeMap::new();
     env.insert(
         "VFS_FIXTURE_INI_PATH".to_string(),
         ini_path.to_string_lossy().into_owned(),
@@ -176,23 +136,18 @@ async fn profile_api_reads_a_managed_root_ini_through_the_director() {
     // call rather than merely somewhere during the run.
     env.insert("VFS_SHIM_STATS_INTERVAL_MS".to_string(), "5".to_string());
 
-    let mut stream = client
-        .launch(LaunchReq {
-            session_id: session.id.clone(),
-            exec: fixture.to_string_lossy().into_owned(),
-            args: vec![],
+    let exit_code = launch_bounded(
+        session.shared(),
+        LaunchOpts {
+            image: fixture.to_string_lossy().into_owned(),
             wait: true,
             env,
-        })
-        .await
-        .expect("Launch")
-        .into_inner();
-
-    let mut exit_code = None;
-    drain_launch_events(&mut stream, "prefs fixture log", &mut exit_code).await;
+            ..Default::default()
+        },
+        "prefs fixture log",
+    );
     assert_eq!(
-        exit_code,
-        Some(0),
+        exit_code, 0,
         "the prefs fixture must exit 0 (it reports what it saw in its output file rather than \
          through its exit code; a nonzero exit means it could not run at all)"
     );
@@ -403,14 +358,6 @@ async fn profile_api_reads_a_managed_root_ini_through_the_director() {
          `LockFileEx` supplied one and reported success. An unclassified lock is one the \
          report cannot show waiting on a completion we never deliver. Report:\n{report}"
     );
-
-    client
-        .teardown_session(vfs_control::pb::TeardownReq {
-            session_id: session.id,
-        })
-        .await
-        .expect("teardown");
-    server.abort();
 }
 
 /// The write half of the same mechanism: `WritePrivateProfileStringW` must
@@ -427,24 +374,10 @@ async fn profile_api_reads_a_managed_root_ini_through_the_director() {
 /// the **provider's own backing file** on disk holds the new value while the
 /// decoy under the session root is untouched.
 #[cfg(windows)]
-#[tokio::test(flavor = "multi_thread")]
-async fn profile_api_writes_a_managed_root_ini_through_the_director() {
-    let _guard = LAUNCH_LOCK.lock().await;
+#[test]
+fn profile_api_writes_a_managed_root_ini_through_the_director() {
+    let _guard = lock_launches();
     ensure_inject_artifacts();
-
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-    let addr: SocketAddr = listener.local_addr().unwrap();
-    let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
-
-    let registry = SessionRegistry::new();
-    let svc = DirectorService::new(registry);
-    let server = tokio::spawn(async move {
-        Server::builder()
-            .add_service(DirectorServer::new(svc))
-            .serve_with_incoming(incoming)
-            .await
-    });
-    tokio::time::sleep(Duration::from_millis(20)).await;
 
     const PREFS_WRITTEN: &str = "WRITTEN";
     let virtual_ini = format!("[Display]\r\nsTest={PREFS_VIRTUAL}\r\niTest=42\r\n");
@@ -458,41 +391,18 @@ async fn profile_api_writes_a_managed_root_ini_through_the_director() {
     let out_file = out_dir.path().join("prefs-write-out.tsv");
 
     let fixture = locate_artifact("vfs-fixture-prefs.exe");
-    let mut client = connect(&format!("{addr}")).await.expect("connect");
 
-    let session = client
-        .create_session(vfs_control::pb::CreateSessionReq {
-            name: "prefs-write".into(),
-        })
-        .await
-        .expect("CreateSession")
-        .into_inner();
+    let session = LiveSession::create("prefs-write");
 
-    use vfs_control::pb::{
-        source_spec, AddSourceReq, DiskSource, LaunchReq, SourceSpec as PbSource,
-    };
-    client
-        .add_source(AddSourceReq {
-            session_id: session.id.clone(),
-            source: Some(PbSource {
-                kind: Some(source_spec::Kind::Disk(DiskSource {
-                    path: content_dir.path().to_string_lossy().into_owned(),
-                })),
-            }),
-            mount: "/".into(),
-            layer: 0,
-            root: 0,
-            write_layer: true,
-            cache_key: String::new(),
-        })
-        .await
+    session
+        .set_write_layer(0, Arc::new(DiskProvider::new(content_dir.path())))
         .expect("AddSource");
 
-    let root = PathBuf::from(&session.root);
+    let root = session.root();
     let ini_path = root.join("prefs.ini");
     std::fs::write(&ini_path, disk_ini.as_bytes()).expect("write on-disk decoy");
 
-    let mut env = std::collections::HashMap::new();
+    let mut env = BTreeMap::new();
     env.insert(
         "VFS_FIXTURE_INI_PATH".to_string(),
         ini_path.to_string_lossy().into_owned(),
@@ -506,21 +416,17 @@ async fn profile_api_writes_a_managed_root_ini_through_the_director() {
         PREFS_WRITTEN.to_string(),
     );
 
-    let mut stream = client
-        .launch(LaunchReq {
-            session_id: session.id.clone(),
-            exec: fixture.to_string_lossy().into_owned(),
-            args: vec![],
+    let exit_code = launch_bounded(
+        session.shared(),
+        LaunchOpts {
+            image: fixture.to_string_lossy().into_owned(),
             wait: true,
             env,
-        })
-        .await
-        .expect("Launch")
-        .into_inner();
-
-    let mut exit_code = None;
-    drain_launch_events(&mut stream, "prefs fixture log", &mut exit_code).await;
-    assert_eq!(exit_code, Some(0), "the prefs fixture must exit 0");
+            ..Default::default()
+        },
+        "prefs fixture log",
+    );
+    assert_eq!(exit_code, 0, "the prefs fixture must exit 0");
 
     let text = std::fs::read_to_string(&out_file).unwrap_or_default();
     let lines = parse_prefs_lines(&text);
@@ -561,19 +467,4 @@ async fn profile_api_writes_a_managed_root_ini_through_the_director() {
         "the write escaped to the real file under the managed root instead of going to the \
          director"
     );
-
-    client
-        .teardown_session(vfs_control::pb::TeardownReq {
-            session_id: session.id,
-        })
-        .await
-        .expect("teardown");
-    server.abort();
-}
-
-/// Sessions default to a directory under the system temp dir, and the daemons
-/// these tests spawn inherit this process's environment. Point both at `target/`.
-#[ctor::ctor]
-fn scratch_tmpdir() {
-    vfs_testkit::use_scratch_as_tmpdir();
 }
