@@ -14,6 +14,8 @@ mod error;
 mod fsutil;
 mod ids;
 mod manifest;
+#[cfg(feature = "provider")]
+pub mod provider;
 mod reader;
 
 pub use auth::{complete_login, login_url};
