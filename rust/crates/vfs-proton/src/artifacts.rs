@@ -62,6 +62,6 @@ mod tests {
 
     #[test]
     fn the_launch_artifacts_are_the_first_of_the_list() {
-        assert_eq!(WINDOWS_ARTIFACTS[..3], LAUNCH);
+        assert_eq!(WINDOWS_ARTIFACTS[..LAUNCH.len()], LAUNCH);
     }
 }

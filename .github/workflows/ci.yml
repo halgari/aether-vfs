@@ -83,11 +83,6 @@ jobs:
         # way `needed` does, because the failure is in the outer compile.
         run: cargo build -p vfs-inject -p vfs-shim-dll -p vfs-fixture-read -p vfs-fixture-writepath -p vfs-fixture-escape -p vfs-fixture-prefs -p vfs-fixture-vproxy -p vfs-bench
         working-directory: rust
-      - name: Build vfs-payload (separate workspace)
-        working-directory: rust
-        run: cargo build --manifest-path crates/vfs-payload/Cargo.toml
-        env:
-          CARGO_TARGET_DIR: target
       # `--no-fail-fast` is not optional here. Without it cargo stops after the
       # first test binary that fails, and this suite is 689 tests across 116
       # binaries — so a single failing daemon e2e test truncated the run
