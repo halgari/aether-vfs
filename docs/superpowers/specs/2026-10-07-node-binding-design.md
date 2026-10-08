@@ -133,7 +133,12 @@ The existing API stays (Haskill and `vfs-directord` use it). Three additions:
    `ProtonOptions { home, prefix_name, steam_client, app_id, steam_helper }` maps onto the existing
    Proton setters; unset fields keep today's defaults.
 
-The binding uses only: `Session::new`, `set_state_dir`, `add_root`, `mount_at` with read-only
+The binding derives the shim's write-overlay directory from `stateDir` (`<stateDir>/overlay`) and
+empties it before each `start`, because `Session::set_overlay`'s contract is that a reused overlay
+hides bypassed writes. A write that reaches it is a bypass, not an overwrite; overwrites go to
+`writeTo`.
+
+The binding uses only: `Session::new`, `set_state_dir`, `set_overlay`, `add_root`, `mount_at` with read-only
 `DiskProvider`s, `set_write_layer_at`, `clear_root`, `set_proton`, `serve`, `launch_detached`,
 `LaunchHandle`, `root_locations`, `stop_serve`, and `LaunchOpts`. A seam test in the binding fails if
 it names anything else.
