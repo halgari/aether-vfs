@@ -3,16 +3,13 @@
 // Every test here injects a real Windows process, so on other hosts the helpers are unused.
 #![cfg_attr(not(windows), allow(dead_code, unused_imports))]
 
-use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::sync::Arc;
 
-use tokio::net::TcpListener;
-use tonic::transport::Server;
-use vfs_control::pb::director_server::DirectorServer;
-use vfs_directord::{connect, DirectorService, SessionRegistry};
+use vfs_embed::DiskProvider;
 
 mod support;
+use support::session::LiveSession;
 use support::{artifacts::*, escape::*, launch::*};
 
 /// Gate 4, Task 8b: **a directory listing under a managed root never reveals
@@ -42,7 +39,7 @@ use support::{artifacts::*, escape::*, launch::*};
 /// absence.
 ///
 /// This test is the measurement that replaced the argument. It runs the
-/// escape fixture's `enum` vector under a real composed session — daemon,
+/// escape fixture's `enum` vector under a real composed session — session,
 /// director, injected shim — against the same two-canary geometry the read
 /// matrix uses, and asserts **both** directions of one listing:
 ///
@@ -69,24 +66,10 @@ use support::{artifacts::*, escape::*, launch::*};
 /// behind "latent, not live" above. See `task-8b-report.md` for both
 /// mutations and their output.
 #[cfg(windows)]
-#[tokio::test(flavor = "multi_thread")]
-async fn directory_enumeration_under_a_managed_root_hides_an_unserved_real_file() {
-    let _guard = LAUNCH_LOCK.lock().await;
+#[test]
+fn directory_enumeration_under_a_managed_root_hides_an_unserved_real_file() {
+    let _guard = lock_launches();
     ensure_inject_artifacts();
-
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-    let addr: SocketAddr = listener.local_addr().unwrap();
-    let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
-
-    let registry = SessionRegistry::new();
-    let svc = DirectorService::new(registry);
-    let server = tokio::spawn(async move {
-        Server::builder()
-            .add_service(DirectorServer::new(svc))
-            .serve_with_incoming(incoming)
-            .await
-    });
-    tokio::time::sleep(Duration::from_millis(20)).await;
 
     // Same geometry as the read matrix: the provider's backing store is a
     // separate directory, so a file written only onto `session.root` is a
@@ -98,35 +81,13 @@ async fn directory_enumeration_under_a_managed_root_hides_an_unserved_real_file(
     let out_file = out_dir.path().join("escape-enum-out.tsv");
 
     let fixture = locate_artifact("vfs-fixture-escape.exe");
-    let mut client = connect(&format!("{addr}")).await.expect("connect");
 
-    let session = client
-        .create_session(vfs_control::pb::CreateSessionReq {
-            name: "escape-enum".into(),
-        })
-        .await
-        .expect("CreateSession")
-        .into_inner();
-
-    use vfs_control::pb::{source_spec, AddSourceReq, DiskSource, SourceSpec as PbSource};
-    client
-        .add_source(AddSourceReq {
-            session_id: session.id.clone(),
-            source: Some(PbSource {
-                kind: Some(source_spec::Kind::Disk(DiskSource {
-                    path: content_dir.path().to_string_lossy().into_owned(),
-                })),
-            }),
-            mount: "/".into(),
-            layer: 0,
-            root: 0,
-            write_layer: false,
-            cache_key: String::new(),
-        })
-        .await
+    let mut session = LiveSession::create("escape-enum");
+    session
+        .add_source(0, "/", 0, Arc::new(DiskProvider::new(content_dir.path())))
         .expect("AddSource");
 
-    let root = PathBuf::from(&session.root);
+    let root = session.root();
     let sub = PathBuf::from("Games").join("Skyrim").join("Data");
     std::fs::create_dir_all(root.join(&sub)).expect("mkdir under session root");
     std::fs::create_dir_all(content_dir.path().join(&sub)).expect("mkdir under content dir");
@@ -153,20 +114,14 @@ async fn directory_enumeration_under_a_managed_root_hides_an_unserved_real_file(
     );
 
     let ctx = EscapeFixtureCtx {
-        session_id: &session.id,
+        session: session.shared(),
         fixture: &fixture,
         stats_log: &stats_log,
         vector7_link_dir: None,
         write_access: false,
     };
-    let (exit, lines, _classified, _truncated) = run_escape_fixture(
-        &mut client,
-        &ctx,
-        &root.join(&served_rel),
-        &out_file,
-        Some("enum"),
-    )
-    .await;
+    let (exit, lines, _classified, _truncated) =
+        run_escape_fixture(&ctx, &root.join(&served_rel), &out_file, Some("enum"));
 
     assert_eq!(
         exit, 0,
@@ -237,19 +192,4 @@ async fn directory_enumeration_under_a_managed_root_hides_an_unserved_real_file(
         ours.iter().any(|r| r.count > 0),
         "every recorded listing of {want_dir:?} came back with zero entries: {ours:?}"
     );
-
-    client
-        .teardown_session(vfs_control::pb::TeardownReq {
-            session_id: session.id,
-        })
-        .await
-        .expect("teardown");
-    server.abort();
-}
-
-/// Sessions default to a directory under the system temp dir, and the daemons
-/// these tests spawn inherit this process's environment. Point both at `target/`.
-#[ctor::ctor]
-fn scratch_tmpdir() {
-    vfs_testkit::use_scratch_as_tmpdir();
 }

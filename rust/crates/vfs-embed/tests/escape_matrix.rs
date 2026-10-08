@@ -4,16 +4,13 @@
 // Every test here injects a real Windows process, so on other hosts the helpers are unused.
 #![cfg_attr(not(windows), allow(dead_code, unused_imports))]
 
-use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::sync::Arc;
 
-use tokio::net::TcpListener;
-use tonic::transport::Server;
-use vfs_control::pb::director_server::DirectorServer;
-use vfs_directord::{connect, DirectorService, SessionRegistry};
+use vfs_embed::DiskProvider;
 
 mod support;
+use support::session::LiveSession;
 use support::{artifacts::*, escape::*, launch::*};
 
 /// The full, fixed vector-id order `vfs-fixture-escape` emits — used to
@@ -206,7 +203,7 @@ fn classification_marker(vector: &str, basename: &str) -> Option<String> {
 }
 
 /// Task 6: the canary matrix. Runs `vfs-fixture-escape` under a real,
-/// composed session — daemon, director, injected shim, the works — against
+/// composed session — session, director, injected shim, the works — against
 /// two targets, and checks the two halves the gate's scope note draws:
 ///
 /// - **Positive canary** (`escape-positive-canary.esp`, mirrored
@@ -250,24 +247,10 @@ fn classification_marker(vector: &str, basename: &str) -> Option<String> {
 /// branch made its own hooked `CreateFileW` call with no re-entrancy guard.
 /// See `task-6-report.md` for the full account.
 #[cfg(windows)]
-#[tokio::test(flavor = "multi_thread")]
-async fn escape_matrix_positive_and_negative_canary() {
-    let _guard = LAUNCH_LOCK.lock().await;
+#[test]
+fn escape_matrix_positive_and_negative_canary() {
+    let _guard = lock_launches();
     ensure_inject_artifacts();
-
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-    let addr: SocketAddr = listener.local_addr().unwrap();
-    let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
-
-    let registry = SessionRegistry::new();
-    let svc = DirectorService::new(registry);
-    let server = tokio::spawn(async move {
-        Server::builder()
-            .add_service(DirectorServer::new(svc))
-            .serve_with_incoming(incoming)
-            .await
-    });
-    tokio::time::sleep(Duration::from_millis(20)).await;
 
     // The DiskProvider's backing store — deliberately NOT session.root, so
     // the negative canary (written only to session.root below) is a real
@@ -280,38 +263,15 @@ async fn escape_matrix_positive_and_negative_canary() {
     let out_file = out_dir.path().join("escape-out.tsv");
 
     let fixture = locate_artifact("vfs-fixture-escape.exe");
-    let mut client = connect(&format!("{addr}")).await.expect("connect");
 
-    let session = client
-        .create_session(vfs_control::pb::CreateSessionReq {
-            name: "escape-matrix".into(),
-        })
-        .await
-        .expect("CreateSession")
-        .into_inner();
-    assert!(!session.id.is_empty());
-    assert!(!session.root.is_empty());
+    let mut session = LiveSession::create("escape-matrix");
+    assert!(!session.root().as_os_str().is_empty());
 
-    use vfs_control::pb::{source_spec, AddSourceReq, DiskSource, SourceSpec as PbSource};
-
-    client
-        .add_source(AddSourceReq {
-            session_id: session.id.clone(),
-            source: Some(PbSource {
-                kind: Some(source_spec::Kind::Disk(DiskSource {
-                    path: content_dir.path().to_string_lossy().into_owned(),
-                })),
-            }),
-            mount: "/".into(),
-            layer: 0,
-            root: 0,
-            write_layer: false,
-            cache_key: String::new(),
-        })
-        .await
+    session
+        .add_source(0, "/", 0, Arc::new(DiskProvider::new(content_dir.path())))
         .expect("AddSource");
 
-    let root = PathBuf::from(&session.root);
+    let root = session.root();
     let sub = PathBuf::from("Games").join("Skyrim").join("Data");
     std::fs::create_dir_all(root.join(&sub)).expect("mkdir under session root");
     std::fs::create_dir_all(content_dir.path().join(&sub)).expect("mkdir under content dir");
@@ -360,7 +320,7 @@ async fn escape_matrix_positive_and_negative_canary() {
         .unwrap_or(false);
     let vector7_link_dir = vector7_link_ready.then(|| vector7_link.to_string_lossy().into_owned());
     let ctx = EscapeFixtureCtx {
-        session_id: &session.id,
+        session: session.shared(),
         fixture: &fixture,
         stats_log: &stats_log,
         vector7_link_dir: vector7_link_dir.as_deref(),
@@ -371,7 +331,7 @@ async fn escape_matrix_positive_and_negative_canary() {
     // Positive canary: every buildable spelling opens it, byte-identical.
     // ---------------------------------------------------------------
     let (pos_exit, pos_lines, _pos_classified, _pos_truncated) =
-        run_escape_fixture(&mut client, &ctx, &root.join(&pos_rel), &out_file, None).await;
+        run_escape_fixture(&ctx, &root.join(&pos_rel), &out_file, None);
     if std::env::var("VFS_TEST_MATRIX_DUMP").is_ok() {
         eprintln!("=== POSITIVE lines ===");
         for l in &pos_lines {
@@ -416,7 +376,7 @@ async fn escape_matrix_positive_and_negative_canary() {
     // establish.
     // ---------------------------------------------------------------
     let (neg_exit, neg_lines, neg_classified, neg_truncated) =
-        run_escape_fixture(&mut client, &ctx, &root.join(&neg_rel), &out_file, None).await;
+        run_escape_fixture(&ctx, &root.join(&neg_rel), &out_file, None);
     if std::env::var("VFS_TEST_MATRIX_DUMP").is_ok() {
         eprintln!("=== NEGATIVE lines ===");
         for l in &neg_lines {
@@ -500,13 +460,11 @@ async fn escape_matrix_positive_and_negative_canary() {
             continue; // `5b` / `14` — see `classification_marker`'s doc comment.
         };
         let (iso_exit, iso_lines, iso_classified, iso_truncated) = run_escape_fixture(
-            &mut client,
             &ctx,
             &root.join(&neg_rel),
             &out_file,
             Some(line.vector.as_str()),
-        )
-        .await;
+        );
         assert_eq!(
             iso_exit, 0,
             "negative canary, isolated run for vector {}: must exit 0. Lines: {iso_lines:?}",
@@ -539,14 +497,6 @@ async fn escape_matrix_positive_and_negative_canary() {
         );
     }
 
-    client
-        .teardown_session(vfs_control::pb::TeardownReq {
-            session_id: session.id,
-        })
-        .await
-        .expect("teardown");
-
-    server.abort();
     if vector7_link_ready {
         let _ = std::fs::remove_dir(&vector7_link);
     }
@@ -684,7 +634,7 @@ fn make_escape_junction(tag: &str, target: &Path) -> (PathBuf, Option<String>) {
 /// **The real-filesystem assertions are the point, and they are made from
 /// this process.** A write that is refused at the API while still leaving a
 /// zero-byte file under the root has breached containment and reported
-/// success. `vfs-directord`'s test harness is never injected, so `read_dir`,
+/// success. This test harness is never injected, so `read_dir`,
 /// `exists` and `read` here answer about physical disk — the equivalent of
 /// `write_seal.rs`'s `drop(hooks)` before it inspects the root, and stronger,
 /// because there is no detour in this process to drop. Four things are
@@ -718,24 +668,10 @@ fn make_escape_junction(tag: &str, target: &Path) -> (PathBuf, Option<String>) {
 /// buildable because the physical file the 8.3-name and hardlink
 /// constructions need is really there.
 #[cfg(windows)]
-#[tokio::test(flavor = "multi_thread")]
-async fn escape_matrix_write_access_positive_and_negative_canary() {
-    let _guard = LAUNCH_LOCK.lock().await;
+#[test]
+fn escape_matrix_write_access_positive_and_negative_canary() {
+    let _guard = lock_launches();
     ensure_inject_artifacts();
-
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-    let addr: SocketAddr = listener.local_addr().unwrap();
-    let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
-
-    let registry = SessionRegistry::new();
-    let svc = DirectorService::new(registry);
-    let server = tokio::spawn(async move {
-        Server::builder()
-            .add_service(DirectorServer::new(svc))
-            .serve_with_incoming(incoming)
-            .await
-    });
-    tokio::time::sleep(Duration::from_millis(20)).await;
 
     let content_dir = vfs_testkit::tempdir().expect("tempdir");
     let stats_dir = vfs_testkit::tempdir().expect("stats tempdir");
@@ -744,43 +680,25 @@ async fn escape_matrix_write_access_positive_and_negative_canary() {
     let out_file = out_dir.path().join("escape-write-out.tsv");
 
     let fixture = locate_artifact("vfs-fixture-escape.exe");
-    let mut client = connect(&format!("{addr}")).await.expect("connect");
 
-    let session = client
-        .create_session(vfs_control::pb::CreateSessionReq {
-            name: "escape-matrix-write".into(),
-        })
-        .await
-        .expect("CreateSession")
-        .into_inner();
-    assert!(!session.id.is_empty());
-    assert!(!session.root.is_empty());
-
-    use vfs_control::pb::{source_spec, AddSourceReq, DiskSource, SourceSpec as PbSource};
+    let mut session = LiveSession::create("escape-matrix-write");
+    assert!(!session.root().as_os_str().is_empty());
 
     // Mounted at a sub-path, deliberately — see the test's own doc comment.
     // Everything under `Games/Skyrim/Data` is served (and writable, since a
     // `DiskProvider` declares `Access::ReadWrite`); everything else under the
     // managed root is owned by no provider at all.
     const SERVED_MOUNT: &str = "/Games/Skyrim/Data";
-    client
-        .add_source(AddSourceReq {
-            session_id: session.id.clone(),
-            source: Some(PbSource {
-                kind: Some(source_spec::Kind::Disk(DiskSource {
-                    path: content_dir.path().to_string_lossy().into_owned(),
-                })),
-            }),
-            mount: SERVED_MOUNT.into(),
-            layer: 0,
-            root: 0,
-            write_layer: false,
-            cache_key: String::new(),
-        })
-        .await
+    session
+        .add_source(
+            0,
+            SERVED_MOUNT,
+            0,
+            Arc::new(DiskProvider::new(content_dir.path())),
+        )
         .expect("AddSource");
 
-    let root = PathBuf::from(&session.root);
+    let root = session.root();
     let served_sub = PathBuf::from("Games").join("Skyrim").join("Data");
     let unserved_sub = PathBuf::from("Games").join("Skyrim").join("Unserved");
     std::fs::create_dir_all(root.join(&served_sub)).expect("mkdir served dir under session root");
@@ -834,14 +752,14 @@ async fn escape_matrix_write_access_positive_and_negative_canary() {
     // payload back through the same spelling.
     // ---------------------------------------------------------------
     let pos_ctx = EscapeFixtureCtx {
-        session_id: &session.id,
+        session: session.shared(),
         fixture: &fixture,
         stats_log: &stats_log,
         vector7_link_dir: pos_link_dir.as_deref(),
         write_access: true,
     };
     let (pos_exit, pos_lines, _pos_classified, pos_truncated) =
-        run_escape_fixture(&mut client, &pos_ctx, &pos_on_disk, &out_file, None).await;
+        run_escape_fixture(&pos_ctx, &pos_on_disk, &out_file, None);
     if std::env::var("VFS_TEST_MATRIX_DUMP").is_ok() {
         eprintln!("=== POSITIVE WRITE lines ===");
         for l in &pos_lines {
@@ -909,14 +827,14 @@ async fn escape_matrix_write_access_positive_and_negative_canary() {
     // untouched.
     // ---------------------------------------------------------------
     let neg_ctx = EscapeFixtureCtx {
-        session_id: &session.id,
+        session: session.shared(),
         fixture: &fixture,
         stats_log: &stats_log,
         vector7_link_dir: neg_link_dir.as_deref(),
         write_access: true,
     };
     let (neg_exit, neg_lines, _neg_classified, neg_truncated) =
-        run_escape_fixture(&mut client, &neg_ctx, &neg_on_disk, &out_file, None).await;
+        run_escape_fixture(&neg_ctx, &neg_on_disk, &out_file, None);
     if std::env::var("VFS_TEST_MATRIX_DUMP").is_ok() {
         eprintln!("=== NEGATIVE WRITE lines ===");
         for l in &neg_lines {
@@ -968,14 +886,6 @@ async fn escape_matrix_write_access_positive_and_negative_canary() {
         "negative canary",
     );
 
-    client
-        .teardown_session(vfs_control::pb::TeardownReq {
-            session_id: session.id,
-        })
-        .await
-        .expect("teardown");
-
-    server.abort();
     let _ = std::fs::remove_dir(&pos_link);
     let _ = std::fs::remove_dir(&neg_link);
 }
@@ -983,8 +893,8 @@ async fn escape_matrix_write_access_positive_and_negative_canary() {
 /// The real-filesystem half of the write matrix, for one canary: nothing was
 /// created in its directory and no named stream was created on it.
 ///
-/// **Called with the detours nowhere in sight.** This is the `vfs-directord`
-/// test process, which is never injected, so every `std::fs` call here reads
+/// **Called with the detours nowhere in sight.** This is the test process,
+/// which is never injected, so every `std::fs` call here reads
 /// physical disk — the same ordering `write_seal.rs` gets by doing
 /// `drop(hooks)` before it inspects the root, and stronger, because there is
 /// no detour in this process to drop in the first place. A hook-live
@@ -1042,7 +952,7 @@ fn assert_no_escaped_real_files(dir: &Path, canary: &str, canary_path: &Path, la
 /// not just the first.**
 ///
 /// `escape_matrix_positive_and_negative_canary` above proves containment for
-/// root 0 — the session's own root, the one the daemon creates and the one
+/// root 0 — the session's own root, the one the session creates and the one
 /// every path in this tree used to be measured against. That proves nothing
 /// about a second root, and the failure it would miss is not subtle: the
 /// canonicaliser could have a root-index assumption baked into it (matching
@@ -1053,41 +963,21 @@ fn assert_no_escaped_real_files(dir: &Path, canary: &str, canary_path: &Path, la
 /// So this runs the same fixture, the same two canaries, and the same
 /// `positive_expectation`/`negative_expectation` tables against a target
 /// under **root 1**: a second real host directory, declared with
-/// `SessionRegistry::declare_root` and served by its own provider mounted at
-/// `RootId(1)` through the ordinary `AddSourceReq { root: 1 }` path.
+/// `Session::declare_root` and served by its own provider mounted at
+/// `RootId(1)` through the ordinary per-root source path.
 ///
 /// It exercises the whole chain end to end and nothing about it is stubbed:
-/// the daemon publishes root 1 into `VFS_VIRTUAL_ROOTS`, the shim's
+/// the session publishes root 1 into `VFS_VIRTUAL_ROOTS`, the shim's
 /// `RootMap` holds both roots, `vpath_under_root` answers `RootId(1)`, the
 /// ring payload carries that 1, and `dispatch_director` routes on it. Any
 /// link missing turns the positive canary's ordinary spelling into
 /// `not-found`, which is what makes this worth its runtime rather than a
 /// duplicate of the root-0 run.
 #[cfg(windows)]
-#[tokio::test(flavor = "multi_thread")]
-async fn escape_matrix_holds_against_a_second_root() {
-    let _guard = LAUNCH_LOCK.lock().await;
+#[test]
+fn escape_matrix_holds_against_a_second_root() {
+    let _guard = lock_launches();
     ensure_inject_artifacts();
-
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-    let addr: SocketAddr = listener.local_addr().unwrap();
-    let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
-
-    let registry = SessionRegistry::new();
-    // Cloned before the service takes it: `declare_root` has no RPC of its own
-    // (a root's *host path* comes from a config's `[[root]] path`, and
-    // `AddSourceReq` carries a root id and no path), so the test declares it
-    // the same way a config-driven daemon would. Everything else here — the
-    // session, the source on root 1, the launch — goes over gRPC.
-    let reg_handle = registry.clone();
-    let svc = DirectorService::new(registry);
-    let server = tokio::spawn(async move {
-        Server::builder()
-            .add_service(DirectorServer::new(svc))
-            .serve_with_incoming(incoming)
-            .await
-    });
-    tokio::time::sleep(Duration::from_millis(20)).await;
 
     // Root 1's own host directory — the "Documents\My Games\Skyrim" shape —
     // and its own backing content dir, deliberately separate so the negative
@@ -1100,59 +990,22 @@ async fn escape_matrix_holds_against_a_second_root() {
     let out_file = out_dir.path().join("escape-root1-out.tsv");
 
     let fixture = locate_artifact("vfs-fixture-escape.exe");
-    let mut client = connect(&format!("{addr}")).await.expect("connect");
 
-    let session = client
-        .create_session(vfs_control::pb::CreateSessionReq {
-            name: "escape-matrix-root1".into(),
-        })
-        .await
-        .expect("CreateSession")
-        .into_inner();
-
-    use vfs_control::pb::{source_spec, AddSourceReq, DiskSource, SourceSpec as PbSource};
+    let mut session = LiveSession::create("escape-matrix-root1");
 
     // Root 0 still gets a provider: a session whose game directory serves
     // nothing is not the shape being tested, and leaving it unmounted would
     // let a root-0 regression hide here.
     let game_content = vfs_testkit::tempdir().expect("game content tempdir");
-    client
-        .add_source(AddSourceReq {
-            session_id: session.id.clone(),
-            source: Some(PbSource {
-                kind: Some(source_spec::Kind::Disk(DiskSource {
-                    path: game_content.path().to_string_lossy().into_owned(),
-                })),
-            }),
-            mount: "/".into(),
-            layer: 0,
-            root: 0,
-            write_layer: false,
-            cache_key: String::new(),
-        })
-        .await
+    session
+        .add_source(0, "/", 0, Arc::new(DiskProvider::new(game_content.path())))
         .expect("AddSource root 0");
 
-    client
-        .add_source(AddSourceReq {
-            session_id: session.id.clone(),
-            source: Some(PbSource {
-                kind: Some(source_spec::Kind::Disk(DiskSource {
-                    path: docs_content.path().to_string_lossy().into_owned(),
-                })),
-            }),
-            mount: "/".into(),
-            layer: 0,
-            root: 1,
-            write_layer: false,
-            cache_key: String::new(),
-        })
-        .await
+    session
+        .add_source(1, "/", 0, Arc::new(DiskProvider::new(docs_content.path())))
         .expect("AddSource root 1");
 
-    reg_handle
-        .declare_root(&session.id, 1, docs_root.path(), "docs")
-        .expect("declare root 1");
+    session.declare_root(1, docs_root.path());
 
     let sub = PathBuf::from("Saves");
     std::fs::create_dir_all(docs_root.path().join(&sub)).expect("mkdir under root 1");
@@ -1193,21 +1046,15 @@ async fn escape_matrix_holds_against_a_second_root() {
         .unwrap_or(false);
     let vector7_link_dir = vector7_link_ready.then(|| vector7_link.to_string_lossy().into_owned());
     let ctx = EscapeFixtureCtx {
-        session_id: &session.id,
+        session: session.shared(),
         fixture: &fixture,
         stats_log: &stats_log,
         vector7_link_dir: vector7_link_dir.as_deref(),
         write_access: false,
     };
 
-    let (pos_exit, pos_lines, _, _) = run_escape_fixture(
-        &mut client,
-        &ctx,
-        &docs_root.path().join(&pos_rel),
-        &out_file,
-        None,
-    )
-    .await;
+    let (pos_exit, pos_lines, _, _) =
+        run_escape_fixture(&ctx, &docs_root.path().join(&pos_rel), &out_file, None);
     assert_eq!(
         pos_exit, 0,
         "vfs-fixture-escape must exit 0 against root 1's positive canary. Lines: {pos_lines:?}"
@@ -1235,14 +1082,8 @@ async fn escape_matrix_holds_against_a_second_root() {
         );
     }
 
-    let (neg_exit, neg_lines, _, _) = run_escape_fixture(
-        &mut client,
-        &ctx,
-        &docs_root.path().join(&neg_rel),
-        &out_file,
-        None,
-    )
-    .await;
+    let (neg_exit, neg_lines, _, _) =
+        run_escape_fixture(&ctx, &docs_root.path().join(&neg_rel), &out_file, None);
     assert_eq!(
         neg_exit, 0,
         "vfs-fixture-escape must exit 0 against root 1's negative canary. Lines: {neg_lines:?}"
@@ -1263,14 +1104,6 @@ async fn escape_matrix_holds_against_a_second_root() {
         );
     }
 
-    client
-        .teardown_session(vfs_control::pb::TeardownReq {
-            session_id: session.id,
-        })
-        .await
-        .expect("teardown");
-
-    server.abort();
     if vector7_link_ready {
         let _ = std::fs::remove_dir(&vector7_link);
     }
@@ -1316,24 +1149,10 @@ async fn escape_matrix_holds_against_a_second_root() {
 /// canonicalisation. Do not relax the assertion — find what stopped
 /// consulting `RootMap`.
 #[cfg(windows)]
-#[tokio::test(flavor = "multi_thread")]
-async fn metadata_queries_are_sealed_for_canonicaliser_only_spellings() {
-    let _guard = LAUNCH_LOCK.lock().await;
+#[test]
+fn metadata_queries_are_sealed_for_canonicaliser_only_spellings() {
+    let _guard = lock_launches();
     ensure_inject_artifacts();
-
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-    let addr: SocketAddr = listener.local_addr().unwrap();
-    let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
-
-    let registry = SessionRegistry::new();
-    let svc = DirectorService::new(registry);
-    let server = tokio::spawn(async move {
-        Server::builder()
-            .add_service(DirectorServer::new(svc))
-            .serve_with_incoming(incoming)
-            .await
-    });
-    tokio::time::sleep(Duration::from_millis(20)).await;
 
     // The DiskProvider's backing store — deliberately NOT session.root, same
     // shape as the escape matrix test's own negative canary: a real file
@@ -1345,38 +1164,15 @@ async fn metadata_queries_are_sealed_for_canonicaliser_only_spellings() {
     let out_file = out_dir.path().join("metadata-gap-out.tsv");
 
     let fixture = locate_artifact("vfs-fixture-escape.exe");
-    let mut client = connect(&format!("{addr}")).await.expect("connect");
 
-    let session = client
-        .create_session(vfs_control::pb::CreateSessionReq {
-            name: "metadata-gap".into(),
-        })
-        .await
-        .expect("CreateSession")
-        .into_inner();
-    assert!(!session.id.is_empty());
-    assert!(!session.root.is_empty());
+    let mut session = LiveSession::create("metadata-gap");
+    assert!(!session.root().as_os_str().is_empty());
 
-    use vfs_control::pb::{source_spec, AddSourceReq, DiskSource, SourceSpec as PbSource};
-
-    client
-        .add_source(AddSourceReq {
-            session_id: session.id.clone(),
-            source: Some(PbSource {
-                kind: Some(source_spec::Kind::Disk(DiskSource {
-                    path: content_dir.path().to_string_lossy().into_owned(),
-                })),
-            }),
-            mount: "/".into(),
-            layer: 0,
-            root: 0,
-            write_layer: false,
-            cache_key: String::new(),
-        })
-        .await
+    session
+        .add_source(0, "/", 0, Arc::new(DiskProvider::new(content_dir.path())))
         .expect("AddSource");
 
-    let root = PathBuf::from(&session.root);
+    let root = session.root();
     let sub = PathBuf::from("Games").join("Skyrim").join("Data");
     std::fs::create_dir_all(root.join(&sub)).expect("mkdir under session root");
 
@@ -1388,21 +1184,15 @@ async fn metadata_queries_are_sealed_for_canonicaliser_only_spellings() {
         .expect("write negative canary");
 
     let ctx = EscapeFixtureCtx {
-        session_id: &session.id,
+        session: session.shared(),
         fixture: &fixture,
         stats_log: &stats_log,
         vector7_link_dir: None,
         write_access: false,
     };
 
-    let (exit, lines, _classified, _truncated) = run_escape_fixture(
-        &mut client,
-        &ctx,
-        &root.join(&neg_rel),
-        &out_file,
-        Some("4m"),
-    )
-    .await;
+    let (exit, lines, _classified, _truncated) =
+        run_escape_fixture(&ctx, &root.join(&neg_rel), &out_file, Some("4m"));
 
     assert_eq!(
         exit, 0,
@@ -1436,20 +1226,4 @@ async fn metadata_queries_are_sealed_for_canonicaliser_only_spellings() {
          the qattr_hook/qfull_hook/qibn_hook family is reaching real disk again.",
         line.spelling, line.outcome, line.note
     );
-
-    client
-        .teardown_session(vfs_control::pb::TeardownReq {
-            session_id: session.id,
-        })
-        .await
-        .expect("teardown");
-
-    server.abort();
-}
-
-/// Sessions default to a directory under the system temp dir, and the daemons
-/// these tests spawn inherit this process's environment. Point both at `target/`.
-#[ctor::ctor]
-fn scratch_tmpdir() {
-    vfs_testkit::use_scratch_as_tmpdir();
 }

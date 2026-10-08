@@ -85,6 +85,11 @@ vfs-pe.workspace = true
 vfs-zip.workspace = true
 # `conformance::SeqFixture` in the lib tests.
 vfs-provider = { workspace = true, features = ["conformance"] }
+# The Windows end-to-end tests (escape matrix, enumeration, launch scenarios,
+# profile API) rebuild the shim and fixtures when any crate feeding them is
+# newer, which means walking `path` dependencies through each `Cargo.toml`
+# (`tests/support/artifacts.rs`).
+toml.workspace = true
 
 [lints]
 workspace = true

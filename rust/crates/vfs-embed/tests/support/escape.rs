@@ -2,8 +2,11 @@
 //! shared by the escape matrix and the enumeration test.
 
 use std::path::Path;
+use std::sync::Arc;
 
-use super::launch::{drain_launch_events, LAUNCH_LOCK};
+use vfs_embed::{LaunchOpts, Session};
+
+use super::launch::launch_bounded;
 
 /// One parsed line of `vfs-fixture-escape`'s TSV output — see that crate's
 /// module doc for the exact format this mirrors.
@@ -30,8 +33,8 @@ pub fn parse_escape_lines(text: &str) -> Vec<EscapeLine> {
         .collect()
 }
 
-/// Launch `vfs-fixture-escape.exe` against `target` under `client`'s
-/// `session_id`, with hook-stats logging enabled, and return its own parsed
+/// Launch `vfs-fixture-escape.exe` against `target` under `ctx.session`,
+/// with hook-stats logging enabled, and return its own parsed
 /// TSV lines plus the shim's classified-paths set (see
 /// `super::classified_paths`) built from the same run.
 /// The parts of an escape-matrix fixture launch that stay constant across
@@ -40,7 +43,7 @@ pub fn parse_escape_lines(text: &str) -> Vec<EscapeLine> {
 /// positional parameter for every future per-vector wrinkle.
 #[derive(Clone, Copy)]
 pub struct EscapeFixtureCtx<'a> {
-    pub session_id: &'a str,
+    pub session: &'a Arc<Session>,
     pub fixture: &'a Path,
     pub stats_log: &'a Path,
     /// See `VFS_ESCAPE_VECTOR7_LINK_DIR`'s doc comment in `vfs-env`: a
@@ -54,8 +57,7 @@ pub struct EscapeFixtureCtx<'a> {
     pub write_access: bool,
 }
 
-pub async fn run_escape_fixture(
-    client: &mut vfs_control::pb::director_client::DirectorClient<tonic::transport::Channel>,
+pub fn run_escape_fixture(
     ctx: &EscapeFixtureCtx<'_>,
     target: &Path,
     out_file: &Path,
@@ -66,9 +68,8 @@ pub async fn run_escape_fixture(
     std::collections::BTreeSet<String>,
     bool,
 ) {
-    use vfs_control::pb::LaunchReq;
     let EscapeFixtureCtx {
-        session_id,
+        session,
         fixture,
         stats_log,
         vector7_link_dir,
@@ -78,7 +79,7 @@ pub async fn run_escape_fixture(
     let _ = std::fs::remove_file(stats_log);
     let _ = std::fs::remove_file(out_file);
 
-    let mut env = std::collections::HashMap::new();
+    let mut env = std::collections::BTreeMap::new();
     env.insert(
         "VFS_SHIM_STATS_LOG".to_string(),
         stats_log.to_string_lossy().into_owned(),
@@ -114,28 +115,25 @@ pub async fn run_escape_fixture(
         env.insert("VFS_ESCAPE_ONLY_VECTOR".to_string(), v.to_string());
     }
 
-    let mut stream = client
-        .launch(LaunchReq {
-            session_id: session_id.to_string(),
-            exec: fixture.to_string_lossy().into_owned(),
+    let exit_code = launch_bounded(
+        session,
+        LaunchOpts {
+            image: fixture.to_string_lossy().into_owned(),
             args: vec![
                 target.to_string_lossy().into_owned(),
                 out_file.to_string_lossy().into_owned(),
             ],
             wait: true,
             env,
-        })
-        .await
-        .expect("Launch")
-        .into_inner();
-
-    let mut exit_code = None;
-    drain_launch_events(&mut stream, "escape fixture log", &mut exit_code).await;
+            ..Default::default()
+        },
+        "escape fixture",
+    );
 
     let text = std::fs::read_to_string(out_file).unwrap_or_default();
     let lines = parse_escape_lines(&text);
     let (classified, truncated) = super::classified_paths(stats_log);
-    (exit_code.unwrap_or(-1), lines, classified, truncated)
+    (exit_code, lines, classified, truncated)
 }
 
 /// Every name directly inside `dir` on the **real** filesystem. Called only

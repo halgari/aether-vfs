@@ -2739,6 +2739,7 @@ dependencies = [
 name = "vfs-embed"
 version = "0.1.0"
 dependencies = [
+ "toml",
  "tracing",
  "vfs-compose",
  "vfs-director",
