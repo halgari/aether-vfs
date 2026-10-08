@@ -330,7 +330,7 @@ pub(crate) struct LoggedInConn {
     steam_id: u64,
     session_id: i32,
     /// The package ids of the licence list the CM pushes after logon,
-    /// captured by whichever of Haskill's own reads sees it first.
+    /// captured by whichever of this crate's own reads sees it first.
     licenses: std::sync::Mutex<Option<Vec<u32>>>,
 }
 
@@ -936,7 +936,7 @@ pub(crate) mod tests {
             }),
         };
         let err = Cm::start(c, cfg()).await.err().unwrap();
-        assert!(err.to_string().contains("haskill login steam"), "{err}");
+        assert!(err.to_string().contains("log in to Steam again"), "{err}");
     }
 
     fn info(ty: &str, host: &str, load: f32) -> Info {

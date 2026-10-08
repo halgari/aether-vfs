@@ -1,9 +1,17 @@
 //! Live tests against real Steam. Ignored by default; run with
 //! `cargo test -p aether-steam --test live -- --ignored --nocapture`.
+//! The logged-in tests read the login file `$AETHER_STEAM_LOGIN` names
+//! (written by the `steam_login` example, or a host's own login).
 use aether_steam::{
-    AppId, CdnConfig, CredentialFile, DepotId, SessionConfig, SteamCache, SteamContent, SteamGame,
-    SteamSession,
+    AppId, CdnConfig, CredentialFile, DepotId, SessionConfig, SteamCache, SteamContent,
+    SteamCredentials, SteamGame, SteamSession,
 };
+
+/// The saved login `$AETHER_STEAM_LOGIN` names, if any.
+fn saved_login() -> Option<SteamCredentials> {
+    let path = std::env::var_os("AETHER_STEAM_LOGIN")?;
+    CredentialFile::new(path).load().unwrap()
+}
 
 /// Anonymous: Spacewar (app 480, depot 481) is the one depot an anonymous
 /// session may decrypt. Covers CM connect, PICS, depot key, request code,
@@ -55,17 +63,13 @@ async fn anonymous_spacewar_end_to_end() {
     assert_eq!(f.read_range(0, 64).await.unwrap(), all[..64]);
 }
 
-/// The ticket Bethesda.net's `external-login` takes, minted by Haskill's
+/// The ticket Bethesda.net's `external-login` takes, minted by this crate's
 /// own session. Prints only its length.
 #[tokio::test]
-#[ignore = "network: needs a saved Haskill Steam login that owns Skyrim SE"]
+#[ignore = "network: needs a saved Steam login ($AETHER_STEAM_LOGIN) that owns Skyrim SE"]
 async fn encrypted_app_ticket_for_skyrim_se() {
-    let file = match std::env::var_os("HASKILL_STEAM_LOGIN") {
-        Some(p) => CredentialFile::new(p),
-        None => CredentialFile::new(CredentialFile::default_path().unwrap()),
-    };
-    let Some(creds) = file.load().unwrap() else {
-        eprintln!("skipping: no Haskill Steam login");
+    let Some(creds) = saved_login() else {
+        eprintln!("skipping: no saved Steam login (set AETHER_STEAM_LOGIN)");
         return;
     };
     let s = SteamSession::login(&creds, SessionConfig::default())
@@ -80,14 +84,10 @@ async fn encrypted_app_ticket_for_skyrim_se() {
 /// The licence check Creations need: this account owns Skyrim SE and the
 /// Anniversary Upgrade.
 #[tokio::test]
-#[ignore = "network: needs a saved Haskill Steam login that owns the Anniversary Upgrade"]
+#[ignore = "network: needs a saved Steam login ($AETHER_STEAM_LOGIN) that owns the Anniversary Upgrade"]
 async fn owns_the_anniversary_upgrade() {
-    let file = match std::env::var_os("HASKILL_STEAM_LOGIN") {
-        Some(p) => CredentialFile::new(p),
-        None => CredentialFile::new(CredentialFile::default_path().unwrap()),
-    };
-    let Some(creds) = file.load().unwrap() else {
-        eprintln!("skipping: no Haskill Steam login");
+    let Some(creds) = saved_login() else {
+        eprintln!("skipping: no saved Steam login (set AETHER_STEAM_LOGIN)");
         return;
     };
     let s = SteamSession::login(&creds, SessionConfig::default())

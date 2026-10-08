@@ -1,4 +1,4 @@
-//! `haskill login steam` until the real CLI exists:
+//! A Steam login from the terminal, saved for the live tests:
 //!
 //! ```text
 //! cargo run -p aether-steam --example steam_login              # QR code
@@ -6,7 +6,7 @@
 //! cargo run -p aether-steam --example steam_login -- --check    # silent re-login
 //! ```
 //!
-//! Saves to `CredentialFile::default_path()`, or `$HASKILL_STEAM_LOGIN`.
+//! Saves to (or, with `--check`, reads) the file `$AETHER_STEAM_LOGIN` names.
 use aether_steam::{
     CodeKind, CredentialFile, GuardOffer, LoginConfig, LoginMethod, LoginPrompter, SessionConfig,
     SteamError, SteamSession, login_interactive,
@@ -152,10 +152,11 @@ async fn main() {
 }
 
 async fn run() -> Result<(), SteamError> {
-    let file = match std::env::var_os("HASKILL_STEAM_LOGIN") {
-        Some(p) => CredentialFile::new(p),
-        None => CredentialFile::new(CredentialFile::default_path()?),
+    let Some(path) = std::env::var_os("AETHER_STEAM_LOGIN") else {
+        eprintln!("set AETHER_STEAM_LOGIN to the login file to write (e.g. ./steam-login.json)");
+        std::process::exit(2);
     };
+    let file = CredentialFile::new(path);
     let args: Vec<String> = std::env::args().skip(1).collect();
     let method = match args.iter().map(String::as_str).collect::<Vec<_>>()[..] {
         [] => LoginMethod::Qr,
@@ -178,7 +179,7 @@ async fn run() -> Result<(), SteamError> {
         method,
         &mut term,
         &file,
-        &LoginConfig::default(),
+        &LoginConfig::new("aether-steam"),
         Duration::from_secs(600),
     )
     .await?;

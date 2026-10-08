@@ -28,14 +28,15 @@ fn app_name(app: u32) -> String {
 }
 
 /// Every fallible public function in this crate returns this error. Messages
-/// are written for the person running Haskill and name the fix where there
-/// is one.
+/// are written for the person running the host application and name the fix
+/// where there is one; how to log in is the host's to add (match
+/// [`NotLoggedIn`](Self::NotLoggedIn) and [`LoginExpired`](Self::LoginExpired)).
 #[derive(Debug, thiserror::Error)]
 pub enum SteamError {
-    #[error("not logged in to Steam; run `haskill login steam`")]
+    #[error("not logged in to Steam; log in to Steam first")]
     NotLoggedIn,
     #[error(
-        "the saved Steam login for {account} has expired or was revoked; run `haskill login steam` again"
+        "the saved Steam login for {account} has expired or was revoked; log in to Steam again"
     )]
     LoginExpired { account: String },
     #[error("Steam rejected the account name or password")]
@@ -44,7 +45,7 @@ pub enum SteamError {
     InvalidGuardCode,
     #[error("the Steam login request expired before it was approved; start the login again")]
     AuthSessionExpired,
-    #[error("Steam offered no sign-in confirmation Haskill supports (code or mobile approval)")]
+    #[error("Steam offered no sign-in confirmation this login supports (code or mobile approval)")]
     NoSupportedGuard,
     #[error("Steam denied access to depot {0}; is the game owned by the logged-in account?")]
     AccessDenied(DepotId),

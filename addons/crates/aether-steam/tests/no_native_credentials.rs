@@ -1,4 +1,4 @@
-//! Haskill does its own Steam login and never reads or reuses the native
+//! This crate does its own Steam login and never reads or reuses the native
 //! Steam client's credentials or configuration. steamroom-client has helpers
 //! that do exactly that, so it must stay out of the dependency graph, and
 //! nothing in this crate may name the Steam client's files.

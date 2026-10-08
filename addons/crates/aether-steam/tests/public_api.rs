@@ -70,7 +70,7 @@ async fn _never_called() {
         device_name: "test".into(),
         rpc_timeout: Duration::from_secs(1),
     };
-    let _default_cfg = LoginConfig::default();
+    let _new_cfg: LoginConfig = LoginConfig::new("test");
 
     let mut qr: QrLogin = QrLogin::begin(&cfg).await.unwrap();
     let _url: &str = qr.challenge_url();

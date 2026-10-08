@@ -1,4 +1,4 @@
-//! Haskill's own Steam sign-in, as small steps a CLI can drive: QR code, or
+//! The host's own Steam sign-in, as small steps a CLI can drive: QR code, or
 //! account name + password with Steam Guard (e-mail code, authenticator
 //! code, or approval in the Steam mobile app). Every step is one request with
 //! a deadline; steps take `&mut self`, so they can never overlap on the
@@ -34,10 +34,12 @@ pub struct LoginConfig {
     pub rpc_timeout: Duration,
 }
 
-impl Default for LoginConfig {
-    fn default() -> Self {
+impl LoginConfig {
+    /// A sign-in that shows up in Steam as `device_name` (the host
+    /// application's name), with a 30 s deadline per request.
+    pub fn new(device_name: impl Into<String>) -> Self {
         LoginConfig {
-            device_name: "Haskill".into(),
+            device_name: device_name.into(),
             rpc_timeout: Duration::from_secs(30),
         }
     }
@@ -77,7 +79,7 @@ impl GuardOffer {
 }
 
 /// Which Steam Guard code [`GuardChallenge::submit_code`] is being given.
-/// The caller picks, rather than Haskill guessing, because only the caller
+/// The caller picks, rather than this crate guessing, because only the caller
 /// knows which code the person actually has in hand.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CodeKind {
@@ -126,7 +128,7 @@ fn guard_offer(
                 any_offered = true;
             }
             // Type 6 (MachineToken) or an unknown future type: no code or
-            // approval link Haskill can show, but Steam may still confirm
+            // approval link the host can show, but Steam may still confirm
             // the sign-in on its own — poll instead of refusing outright.
             _ => any_offered = true,
         }
@@ -738,7 +740,7 @@ mod tests {
     async fn submit_code_rejects_a_kind_steam_did_not_offer() {
         let mut gc = GuardChallenge {
             pending: Pending {
-                conn: AuthConn::new(&LoginConfig::default()),
+                conn: AuthConn::new(&LoginConfig::new("test")),
                 client_id: 1,
                 request_id: vec![],
                 interval: Duration::from_secs(5),

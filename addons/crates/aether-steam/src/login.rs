@@ -1,7 +1,7 @@
-//! The interactive `haskill login steam` flow as a library function. The CLI
+//! The interactive Steam login flow as a library function. The host's CLI
 //! supplies a [`LoginPrompter`] (terminal I/O); this module drives the
 //! sign-in steps in order, never overlapping two requests, and saves the
-//! result to Haskill's own credential file.
+//! result to the credential file the host names.
 use crate::auth::{
     CodeKind, GuardChallenge, GuardOffer, LoginConfig, LoginPoll, PasswordLogin, QrLogin,
     begin_password_login,
