@@ -30,7 +30,9 @@ vfs-testkit = { path = "../rust/crates/vfs-testkit" }
 # Add-on crates.
 aether-archive = { path = "crates/aether-archive" }
 aether-net = { path = "crates/aether-net" }
+aether-nexus = { path = "crates/aether-nexus" }
 aether-steam = { path = "crates/aether-steam" }
+aether-wj-cdn = { path = "crates/aether-wj-cdn" }
 
 # Shared external crates: one version spec each, as in the core workspace.
 # Members add their own `features` / `optional` on top.

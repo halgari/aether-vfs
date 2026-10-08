@@ -71,6 +71,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-nexus"
+version = "0.1.0"
+dependencies = [
+ "aether-archive",
+ "aether-net",
+ "axum",
+ "futures-util",
+ "humantime",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "url",
+ "xxhash-rust",
+ "zstd 0.14.0",
+]
+
+[[package]]
 name = "aether-steam"
 version = "0.1.0"
 dependencies = [
@@ -94,6 +114,24 @@ dependencies = [
  "xxhash-rust",
  "zeroize",
  "zip",
+ "zstd 0.14.0",
+]
+
+[[package]]
+name = "aether-wj-cdn"
+version = "0.1.0"
+dependencies = [
+ "aether-archive",
+ "aether-net",
+ "axum",
+ "flate2",
+ "futures-util",
+ "humantime",
+ "serde",
+ "serde_json",
+ "tokio",
+ "url",
+ "xxhash-rust",
  "zstd 0.14.0",
 ]
 
