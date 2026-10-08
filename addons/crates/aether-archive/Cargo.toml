@@ -1,0 +1,26 @@
+[package]
+name = "aether-archive"
+description = "Random-access archive formats (seekable zstd, zip, 7z extraction) and the Xxh64 file hash"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+base64.workspace = true
+serde.workspace = true
+sevenz-rust2 = { workspace = true, features = ["bzip2", "deflate", "ppmd"] }
+thiserror.workspace = true
+xxhash-rust = { workspace = true, features = ["xxh64"] }
+zip = { workspace = true, features = ["deflate"] }
+zstd.workspace = true
+
+[dev-dependencies]
+postcard = { workspace = true, features = ["use-std"] }
+serde_json.workspace = true
+sevenz-rust2 = { workspace = true, features = ["compress"] }
+zip = { workspace = true, features = ["deflate-flate2-zlib-rs"] }
