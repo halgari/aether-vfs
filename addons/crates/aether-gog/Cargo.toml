@@ -10,6 +10,11 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+## `provider::DepotProvider`: depot manifests as a read-only
+## `vfs_provider::Provider` tree.
+provider = ["dep:vfs-provider"]
+
 [dependencies]
 aether-archive.workspace = true
 aether-net.workspace = true
@@ -24,9 +29,15 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
 tracing.workspace = true
 url.workspace = true
+vfs-provider = { workspace = true, optional = true }
 zeroize.workspace = true
 
 [dev-dependencies]
 axum = { workspace = true, features = ["http1", "tokio", "query"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "macros"] }
+vfs-provider = { workspace = true, features = ["conformance"] }
+
+[[test]]
+name = "provider"
+required-features = ["provider"]

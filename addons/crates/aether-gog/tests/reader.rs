@@ -167,3 +167,59 @@ fn blocking_reader_works_off_the_runtime() {
     assert!(r.is_err());
     drop(fake);
 }
+
+/// Game I/O is many small concurrent reads: those landing in one chunk
+/// download it once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_reads_of_one_chunk_fetch_it_once() {
+    let fake = start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (content, m) = setup(&fake, dir.path()).await;
+    let f = content
+        .file(ProductId(GAME), &m[0], "Data\\Big.bin")
+        .await
+        .unwrap();
+    let data = big();
+    fake.delay_cdn(100);
+    fake.clear_log();
+    let reads = (0..16u64).map(|i| {
+        let f = f.clone();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 16];
+            let off = CHUNK as u64 + i * 100;
+            let n = f.read_at(off, &mut buf).await.unwrap();
+            (off, n, buf)
+        })
+    });
+    for r in futures_util::future::join_all(reads).await {
+        let (off, n, buf) = r.unwrap();
+        assert_eq!(n, 16);
+        assert_eq!(buf[..], data[off as usize..off as usize + 16]);
+    }
+    let id = FakeGog::chunk_id(&data[CHUNK..2 * CHUNK]);
+    assert_eq!(fake.chunk_requests(&id), 1, "{:?}", fake.requests("/cdn/"));
+}
+
+/// A large read fetches its chunks a few at a time (the `Http`'s
+/// `parallel_parts`), not all at once, so it never holds more than that
+/// many inflated chunks beyond the cache.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn large_read_fetches_a_bounded_number_of_chunks_at_once() {
+    let fake = start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = fake.config(dir.path());
+    complete_login(&http(), &cfg, CODE).await.unwrap();
+    let content = GogContent::open(fake_gog::http_with_parts(3), cfg)
+        .await
+        .unwrap();
+    let parts: Vec<Vec<u8>> = (0..12u8).map(|i| vec![i; 1000]).collect();
+    let refs: Vec<&[u8]> = parts.iter().map(Vec::as_slice).collect();
+    let m = fake.manifest(&[("Huge.bin", &refs)]);
+    let f = content.file(ProductId(GAME), &m, "huge.bin").await.unwrap();
+    fake.delay_cdn(30);
+    let mut all = vec![0u8; 12_000];
+    assert_eq!(f.read_at(0, &mut all).await.unwrap(), 12_000);
+    assert_eq!(all, parts.concat());
+    let max = fake.max_cdn_in_flight();
+    assert!((2..=3).contains(&max), "{max} chunk requests at once");
+}

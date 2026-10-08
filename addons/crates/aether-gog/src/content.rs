@@ -20,7 +20,7 @@ use crate::ids::{Os, ProductId};
 use crate::manifest::{
     Build, BuildDetails, DepotManifest, DepotRef, parse_builds, valid_manifest_id,
 };
-use crate::reader::{ChunkLru, GogDepotFile};
+use crate::reader::{ChunkFetch, ChunkLru, GogDepotFile};
 
 const MAX_JSON_BODY: u64 = 16 << 20;
 /// Compressed build details / depot manifest bodies.
@@ -47,6 +47,9 @@ pub(crate) struct Inner {
     manifests: Mutex<HashMap<String, Arc<DepotManifest>>>,
     links: tokio::sync::Mutex<HashMap<ProductId, SecureLink>>,
     pub(crate) chunks: Mutex<ChunkLru>,
+    /// Chunk downloads under way, by compressed MD5: a read needing one
+    /// awaits it instead of fetching it again.
+    pub(crate) inflight: Mutex<HashMap<[u8; 16], ChunkFetch>>,
 }
 
 impl GogContent {
@@ -69,6 +72,7 @@ impl GogContent {
                 manifests: Mutex::default(),
                 links: tokio::sync::Mutex::default(),
                 chunks,
+                inflight: Mutex::default(),
             }),
         }
     }
@@ -178,7 +182,7 @@ impl GogContent {
         Ok(GogDepotFile::new(
             self.clone(),
             product,
-            chunks,
+            chunks.into(),
             base,
             item.size,
         ))
