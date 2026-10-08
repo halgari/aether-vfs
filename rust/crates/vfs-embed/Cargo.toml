@@ -35,10 +35,6 @@ vfs-provider.workspace = true
 # `compose_root` builds a root's writable upper out of it — and the rest are
 # re-exported so a host composes a graph without a second dependency.
 vfs-compose.workspace = true
-# Persistent storage — the pull-through cache for slow, immutable sources and
-# named write layers — re-exported for the same reason: a host opens its own
-# `Storage` and wraps its providers with it (vfs-storage spec §3).
-vfs-storage.workspace = true
 tracing.workspace = true
 vfs-env.workspace = true
 vfs-zip = { workspace = true, optional = true }

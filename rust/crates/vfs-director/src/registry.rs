@@ -58,7 +58,7 @@ const SAVE_INTERVAL: Duration = Duration::from_secs(1);
 pub const SYNC_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 /// A host's durable point for the store the registry layer lives in: everything written to the
-/// layer so far is durable when it returns `Ok`. For a `vfs_storage` layer it is the owning
+/// layer so far is durable when it returns `Ok`. For an `aether_storage` layer it is the owning
 /// storage's `Storage::sync` (its error mapped to a ring status with `StorageError::to_status`).
 /// Called from the saver thread and from [`RegistryHost::durable`]; it must not call back into
 /// the host.

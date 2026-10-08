@@ -5,7 +5,7 @@
 are solved. Implementation detail lives in module docs; this is the map.
 
 Companion documents: [`../../docs/product-overview.md`](../../docs/product-overview.md)
-(non-technical), [`durability.md`](./durability.md) (what is durable when, for
+(non-technical), [`durability.md`](../../addons/crates/aether-storage/DURABILITY.md) (what is durable when, for
 the storage layers and the registry overlay),
 [`../../docs/shim-invariants.md`](../../docs/shim-invariants.md) (the shim's
 invariants and the incidents behind them), [`benchmarks/`](./benchmarks/)
@@ -91,7 +91,7 @@ answers `resolve(vpath)`. It knows about:
 Keeping this layer pure is what makes the merge semantics testable without a
 game, a driver, or even a filesystem.
 
-### 3.2 Providers and composition — `vfs-provider`, `vfs-source`, `vfs-zip`, `vfs-compose`, `vfs-storage`
+### 3.2 Providers and composition — `vfs-provider`, `vfs-source`, `vfs-zip`, `vfs-compose` (and the `aether-storage` add-on)
 
 Everything that can supply bytes implements the `Provider` trait
 (`vfs-provider`), addressed by `(RootId, relative path)` via `VPath` rather
@@ -144,14 +144,15 @@ never cached).
   write access), `disk` (a directory, served read-write), `memory` and
   `inline` (in-memory trees, the second read-only), and `MountGraph` (mounts
   providers at paths and resolves a path to the mount that serves it).
-- **`vfs-storage`** owns one `vfs-block-store` block store (deduplicated,
+- **`aether-storage`** (an add-on, in `addons/crates/`; the core does not
+  depend on it) owns one `aether-block-store` block store (deduplicated,
   compressed packs), a redb catalog beside it and a RAM tier of decompressed
   blocks, and serves two things from it: `Storage::cached` wraps an
   immutable, slow source (a remote one) as a pull-through cache keyed by a
   stable `SourceKey`, and `Storage::layer` hands out a named, persistent
   read-write layer — a session's write layer that survives the session. The
   daemon opens one `Storage` per process (`vfs daemon --storage-dir`). What is
-  durable when is in [`durability.md`](./durability.md); the design is
+  durable when is in [`durability.md`](../../addons/crates/aether-storage/DURABILITY.md); the design is
   [the vfs-storage design](../../docs/superpowers/specs/2026-09-29-vfs-storage-design.md).
 - **`vfs-source`** turns a declarative spec into a live provider, including
   `RemoteProvider`, which forwards every op to an out-of-process gRPC plugin
@@ -843,8 +844,6 @@ observer before concluding the process is idle.
 | `vfs-unix` | Unix shared memory: the file-backed ring (the mirror of `vfs-win`) |
 | `vfs-zip` | ZIP64 central directory, Stored windows, `ZipProvider` |
 | `vfs-compose` | provider combinators: layered, overlay (copy-up), router, subdir, seekable, readonly, disk, memory, inline, `MountGraph` |
-| `vfs-storage` | pull-through cache for slow sources + named persistent layers, on `vfs-block-store` |
-| `vfs-block-store` | deduplicating, compressing block store (redb index + zstd packs) |
 | `vfs-source` | declarative spec to provider, incl. `RemoteProvider` gRPC plugins |
 | `vfs-director` | the kernel: root to provider table, handle namespace, ring server, staging, registry host |
 | `vfs-embed` | **the embeddable API**: `Session`, roots, composition, serve, launch (Windows and Proton) |

@@ -11,11 +11,10 @@ use std::sync::{Arc, Mutex};
 // into the engine is evidence the seam is in the wrong place. The cache and
 // composition primitives below are re-exports from `vfs-embed`'s own catalog,
 // not a second route to the same crates. `daemon_names_only_the_embed_api`
-// (bottom of this file) keeps it that way. Storage too: `vfs_embed::Storage`
+// (bottom of this file) keeps it that way. Storage too: `aether_storage::Storage`
 // is `vfs-storage`'s, re-exported.
-use vfs_embed::{
-    LaunchOpts, Provider, RootId, RootSources, Session, SourceKey, Storage, StorageError,
-};
+use aether_storage::{SourceKey, Storage, StorageError};
+use vfs_embed::{LaunchOpts, Provider, RootId, RootSources, Session};
 
 /// Build the composed provider each root in a [`vfs_control::SessionConfig`]
 /// serves — the config → provider-graph half of stage 2b's "one provider per
@@ -1570,8 +1569,9 @@ root = 1
         assert_eq!(reg.list().unwrap()[0].root, Path::new(loc));
     }
 
-    fn open_storage(dir: &Path) -> Arc<vfs_embed::Storage> {
-        vfs_embed::Storage::open(dir, vfs_embed::StorageConfig::default()).expect("open storage")
+    fn open_storage(dir: &Path) -> Arc<aether_storage::Storage> {
+        aether_storage::Storage::open(dir, aether_storage::StorageConfig::default())
+            .expect("open storage")
     }
 
     /// A named layer is persistent: what a session writes into it survives
@@ -1605,7 +1605,10 @@ root = 1
         );
         let storage = Arc::clone(reg.storage().expect("storage"));
         drop(reg);
-        assert_eq!(storage.close().unwrap(), vfs_embed::CloseOutcome::Released);
+        assert_eq!(
+            storage.close().unwrap(),
+            aether_storage::CloseOutcome::Released
+        );
 
         let reg = SessionRegistry::with_storage(open_storage(store_dir.path()));
         let s = reg.create("layer-b".into()).unwrap();
@@ -1695,8 +1698,15 @@ root = 1
         let slow: Arc<dyn Provider> = Arc::new(SlowImmutable(
             vfs_embed::MemoryProvider::from_files([("blob.bin", vec![5u8; 100_000])]),
         ));
-        reg.add_source_keyed(&s.id, 0, "/", 0, slow, vfs_embed::SourceKey("k".into()))
-            .unwrap();
+        reg.add_source_keyed(
+            &s.id,
+            0,
+            "/",
+            0,
+            slow,
+            aether_storage::SourceKey("k".into()),
+        )
+        .unwrap();
         for _ in 0..2 {
             let got = reg
                 .with_session_mut(&s.id, |l| Ok(l.session.read_file("blob.bin")))

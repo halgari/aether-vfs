@@ -114,9 +114,8 @@ jobs:
       LINUX_CRATES: >-
         -p vfs-ipc -p vfs-protocol -p vfs-provider -p vfs-compose -p vfs-pe
         -p vfs-source -p vfs-zip -p vfs-core -p vfs-env -p vfs-unix -p vfs-proton
-        -p vfs-embed -p vfs-director -p vfs-directord -p vfs-block-store
-        -p vfs-storage -p vfs-registry -p vfs-testkit -p vfs-bench -p vfs-ntlayout
-        -p vfs-redirect -p vfs-control
+        -p vfs-embed -p vfs-director -p vfs-directord -p vfs-registry
+        -p vfs-testkit -p vfs-bench -p vfs-ntlayout -p vfs-redirect -p vfs-control
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -167,29 +166,6 @@ jobs:
       # `#[ignore]`d and run by `proton-linux`.
       - name: Portable Rust crates (compile+test on Linux)
         run: cargo test --no-fail-fast $LINUX_CRATES
-        working-directory: rust
-      # Feature-gated code the default run compiles out: the storage crate's
-      # test hooks and the block store's abort-at-crash-point hooks that its
-      # subprocess crash tests drive.
-      - name: Feature-gated tests (test-hooks, crash-points)
-        run: |
-          cargo test -p vfs-storage --features test-hooks
-          cargo test -p vfs-block-store --features crash-points
-          cargo clippy -p vfs-storage --features test-hooks --all-targets -- -D warnings
-        working-directory: rust
-      # The block store's own gates, carried over from its repository:
-      # `crash-points` compiles in the abort hooks its subprocess crash tests
-      # drive (off by default, so the plain run above skips them), and the
-      # model test runs 512 proptest cases in release, where it is fast
-      # enough to be worth the depth.
-      - name: Block store (all features, clippy, deep model test)
-        run: |
-          cargo clippy -p vfs-block-store --all-targets --all-features -- -D warnings
-          cargo test -p vfs-block-store --all-features
-          cargo test -p vfs-block-store --release --test model
-          cargo bench -p vfs-block-store --no-run
-        env:
-          PROPTEST_CASES: "512"
         working-directory: rust
       # Doc build: warn-only for now. rustdoc reports about 35 broken or
       # private intra-doc links across vfs-embed, vfs-ipc, vfs-redirect,
@@ -304,3 +280,24 @@ jobs:
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: test
         run: cargo test --workspace --all-features
+      # Feature-gated code the default run compiles out: the storage crate's
+      # test hooks and the block store's abort-at-crash-point hooks that its
+      # subprocess crash tests drive.
+      - name: Feature-gated tests (test-hooks, crash-points)
+        run: |
+          cargo test -p aether-storage --features test-hooks
+          cargo test -p aether-block-store --features crash-points
+          cargo clippy -p aether-storage --features test-hooks --all-targets -- -D warnings
+      # The block store's own gates, carried over from its repository:
+      # `crash-points` compiles in the abort hooks its subprocess crash tests
+      # drive (off by default, so the plain run above skips them), and the
+      # model test runs 512 proptest cases in release, where it is fast
+      # enough to be worth the depth.
+      - name: Block store (all features, clippy, deep model test)
+        run: |
+          cargo clippy -p aether-block-store --all-targets --all-features -- -D warnings
+          cargo test -p aether-block-store --all-features
+          cargo test -p aether-block-store --release --test model
+          cargo bench -p aether-block-store --no-run
+        env:
+          PROPTEST_CASES: "512"

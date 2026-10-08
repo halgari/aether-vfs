@@ -6,6 +6,7 @@
 
 use std::sync::Arc;
 
+use aether_storage::{Storage, StorageConfig};
 use tokio::net::TcpListener;
 use tonic::transport::Server;
 use tonic::Code;
@@ -16,7 +17,7 @@ use vfs_control::pb::{
 };
 use vfs_director::RootId;
 use vfs_directord::{connect, DirectorService, SessionRegistry};
-use vfs_embed::{Storage, StorageConfig, OPEN_CREATE, OPEN_WRITE};
+use vfs_embed::{OPEN_CREATE, OPEN_WRITE};
 
 fn layer_source(session_id: &str, name: &str, write_layer: bool) -> AddSourceReq {
     AddSourceReq {

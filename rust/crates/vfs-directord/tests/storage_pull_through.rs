@@ -10,16 +10,14 @@
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
+use aether_storage::{Storage, StorageConfig};
 use tokio::net::TcpListener;
 use tonic::transport::Server;
 use vfs_control::pb::director_server::DirectorServer;
 use vfs_control::pb::{Empty, StatsResp, TeardownReq};
 use vfs_control::{SessionConfig, SessionMeta, SourceEntry, SourceSpec};
 use vfs_directord::{apply_session_config, connect, DirectorService, SessionRegistry};
-use vfs_embed::{
-    Access, Capabilities, DirEntry, Handle, MemoryProvider, Provider, Stat, Storage, StorageConfig,
-    VPath,
-};
+use vfs_embed::{Access, Capabilities, DirEntry, Handle, MemoryProvider, Provider, Stat, VPath};
 use vfs_source::pb::source_server::SourceServer;
 use vfs_source::ProviderSourceService;
 

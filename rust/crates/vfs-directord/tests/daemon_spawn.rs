@@ -14,8 +14,9 @@ fn an_auto_spawned_daemon_that_cannot_open_its_storage_reports_why() {
     let storage_dir = t.path().join("storage");
     // Held by this process for the whole test: the spawned daemon's open
     // fails with the store's lock error.
-    let held = vfs_embed::Storage::open(&storage_dir, vfs_embed::StorageConfig::default())
-        .expect("hold the storage");
+    let held =
+        aether_storage::Storage::open(&storage_dir, aether_storage::StorageConfig::default())
+            .expect("hold the storage");
     let discovery = t.path().join("discovery.json");
 
     let start = Instant::now();
@@ -52,8 +53,9 @@ fn storage_log_events_reach_the_daemon_log() {
     let t = vfs_testkit::tempdir().unwrap();
     let storage_dir = t.path().join("storage");
     {
-        let s = vfs_embed::Storage::open(&storage_dir, vfs_embed::StorageConfig::default())
-            .expect("storage");
+        let s =
+            aether_storage::Storage::open(&storage_dir, aether_storage::StorageConfig::default())
+                .expect("storage");
         let p = s.layer("saves").unwrap();
         let (h, _, _) = p
             .open(VPath::at_default("a.ess"), OPEN_WRITE | OPEN_CREATE)

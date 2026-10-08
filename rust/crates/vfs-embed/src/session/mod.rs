@@ -31,7 +31,7 @@ pub use compose::compose_root;
 pub use opts::{Activation, LaunchOpts, StageOpts};
 #[cfg(unix)]
 pub use proton::{LaunchHandle, LaunchStopper};
-pub use registry::{registry_sync_for, RegistrySync};
+pub use registry::RegistrySync;
 
 use compose::RootComposition;
 #[cfg(unix)]
