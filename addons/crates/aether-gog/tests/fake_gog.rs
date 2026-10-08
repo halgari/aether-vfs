@@ -6,11 +6,11 @@
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use aether_gog::GogConfig;
+use aether_gog::{Chunk, DepotItem, DepotManifest, GogConfig};
 use aether_net::{Events, Http, HttpConfig, RetryPolicy};
 use axum::Router;
 use axum::body::Body;
@@ -104,6 +104,11 @@ pub struct ServerState {
     refresh_calls: AtomicU32,
     fail_refresh: AtomicBool,
     last_token_query: Mutex<Vec<(String, String)>>,
+    /// Milliseconds every CDN response waits before it is sent.
+    cdn_delay_ms: AtomicU64,
+    /// CDN requests being answered now, and the most seen at once.
+    cdn_in_flight: AtomicU32,
+    cdn_max_in_flight: AtomicU32,
 }
 
 #[derive(Clone)]
@@ -147,6 +152,9 @@ pub async fn start() -> FakeGog {
         refresh_calls: AtomicU32::new(0),
         fail_refresh: AtomicBool::new(false),
         last_token_query: Mutex::default(),
+        cdn_delay_ms: AtomicU64::new(0),
+        cdn_in_flight: AtomicU32::new(0),
+        cdn_max_in_flight: AtomicU32::new(0),
     });
     install_fixtures(&state);
     let app = Router::new().fallback(handle).with_state(state.clone());
@@ -275,6 +283,53 @@ impl FakeGog {
         self.state.code_calls.load(Ordering::SeqCst)
     }
 
+    /// Hold every CDN response for `ms` milliseconds, so concurrent
+    /// requests overlap.
+    pub fn delay_cdn(&self, ms: u64) {
+        self.state.cdn_delay_ms.store(ms, Ordering::SeqCst);
+    }
+
+    /// The most CDN requests seen in flight at once.
+    pub fn max_cdn_in_flight(&self) -> u32 {
+        self.state.cdn_max_in_flight.load(Ordering::SeqCst)
+    }
+
+    /// Serve `raw` as a chunk; its manifest record.
+    pub fn add_chunk(&self, raw: &[u8]) -> Chunk {
+        let packed = zlib(raw);
+        let c = Chunk {
+            compressed_md5: Md5::digest(&packed).into(),
+            md5: Md5::digest(raw).into(),
+            size: raw.len() as u64,
+            compressed_size: packed.len() as u64,
+        };
+        self.state
+            .chunks
+            .lock()
+            .unwrap()
+            .insert(md5_hex(&packed), packed);
+        c
+    }
+
+    /// A depot manifest (built in memory, its chunks served by this CDN)
+    /// whose files are `path` -> the file's chunks, in order.
+    pub fn manifest(&self, files: &[(&str, &[&[u8]])]) -> DepotManifest {
+        DepotManifest {
+            items: files
+                .iter()
+                .map(|(path, chunks)| DepotItem {
+                    path: path.to_string(),
+                    chunks: chunks.iter().map(|c| self.add_chunk(c)).collect(),
+                    size: chunks.iter().map(|c| c.len() as u64).sum(),
+                    md5: None,
+                    sfc_ref: None,
+                    flags: Vec::new(),
+                })
+                .collect(),
+            small_files_container: None,
+        }
+    }
+
     /// The query of the last token request, sorted by key.
     pub fn last_token_query(&self) -> Vec<(String, String)> {
         self.state.last_token_query.lock().unwrap().clone()
@@ -283,6 +338,11 @@ impl FakeGog {
 
 /// An `Http` with fast retries (three attempts), so tests run quickly.
 pub fn http() -> Http {
+    http_with_parts(HttpConfig::default().parallel_parts)
+}
+
+/// [`http`] fetching at most `parallel_parts` parts of one file at once.
+pub fn http_with_parts(parallel_parts: usize) -> Http {
     Http::new(
         HttpConfig {
             retry: RetryPolicy {
@@ -291,6 +351,7 @@ pub fn http() -> Http {
                 max_delay: Duration::from_millis(5),
                 max_retry_after: Duration::from_secs(2),
             },
+            parallel_parts,
             ..HttpConfig::default()
         },
         Events::default(),
@@ -341,7 +402,15 @@ async fn handle(State(s): State<Arc<ServerState>>, req: Request) -> Response {
         return content_system(&s, rest, &q);
     }
     if let Some(rest) = path.strip_prefix("/cdn/") {
-        return cdn(&s, rest);
+        let now = s.cdn_in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+        s.cdn_max_in_flight.fetch_max(now, Ordering::SeqCst);
+        let delay = s.cdn_delay_ms.load(Ordering::SeqCst);
+        if delay > 0 {
+            tokio::time::sleep(Duration::from_millis(delay)).await;
+        }
+        let r = cdn(&s, rest);
+        s.cdn_in_flight.fetch_sub(1, Ordering::SeqCst);
+        return r;
     }
     match s.meta.lock().unwrap().get(&path) {
         Some(b) => respond(200, b.clone()),

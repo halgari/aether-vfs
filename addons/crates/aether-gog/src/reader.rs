@@ -4,6 +4,13 @@
 //! check is fetched again per the [`RetryPolicy`](aether_net::RetryPolicy)
 //! and is never served or cached.
 //!
+//! Game I/O is many small concurrent reads, so a chunk is downloaded once
+//! however many reads want it at the same time (they share one spawned
+//! download), and a large read fetches its chunks at most
+//! [`HttpConfig::parallel_parts`](aether_net::HttpConfig) at a time, in
+//! order, copying each out as it arrives: it holds no more than that many
+//! inflated chunks beyond the cache.
+//!
 //! Ported from NexusMods.App `src/NexusMods.Networking.GOG/ChunkedStreamSource.cs`
 //! (GPL-3.0).
 use std::collections::HashMap;
@@ -14,6 +21,8 @@ use aether_archive::RangeRead;
 use aether_net::SourceError;
 use aether_net::http::{check, read_body_max};
 use bytes::Bytes;
+use futures_util::future::{BoxFuture, FutureExt, Shared};
+use futures_util::stream::{self, StreamExt};
 use md5::{Digest, Md5};
 use tokio::runtime::Handle;
 
@@ -43,7 +52,7 @@ impl GogDepotFile {
     pub(crate) fn new(
         content: GogContent,
         product: ProductId,
-        chunks: Vec<Chunk>,
+        chunks: Arc<[Chunk]>,
         base: u64,
         len: u64,
     ) -> Self {
@@ -57,7 +66,7 @@ impl GogDepotFile {
         GogDepotFile {
             content,
             product,
-            chunks: chunks.into(),
+            chunks,
             ends: ends.into(),
             base,
             len,
@@ -90,14 +99,16 @@ impl GogDepotFile {
         let first = self.ends.partition_point(|&e| e <= start);
         let last = self.ends.partition_point(|&e| e < end);
         let wanted = first..=last.min(self.chunks.len() - 1);
-        let parts = futures_util::future::try_join_all(
+        let ahead = self.content.inner.http.config().parallel_parts.max(1);
+        let mut parts = stream::iter(
             wanted
                 .clone()
                 .map(|i| self.content.chunk(self.product, &self.chunks[i])),
         )
-        .await?;
+        .buffered(ahead);
         let mut at = 0usize;
-        for (i, data) in wanted.zip(&parts) {
+        for i in wanted {
+            let data = parts.next().await.expect("one result per wanted chunk")?;
             let chunk_start = self.ends[i] - self.chunks[i].size;
             let from = start.max(chunk_start) - chunk_start;
             let to = end.min(self.ends[i]) - chunk_start;
@@ -147,16 +158,7 @@ impl RangeRead for BlockingGogFile {
                 ),
             ));
         }
-        let fut = self.file.read_at(off, buf);
-        // Handle::block_on panics, before polling, on a runtime worker.
-        let n =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.handle.block_on(fut)))
-                .map_err(|_| {
-                io::Error::other(
-                    "block_on panicked (probably called on a tokio worker thread); \
-                 use GogDepotFile::read_at().await there instead",
-                )
-            })??;
+        let n = block_on(&self.handle, self.file.read_at(off, buf))??;
         if n != buf.len() {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
@@ -171,12 +173,69 @@ impl RangeRead for BlockingGogFile {
     }
 }
 
+/// Run `fut` to completion on `handle` from a synchronous thread. On a
+/// tokio worker thread, where blocking would stall the runtime,
+/// `Handle::block_on` panics before polling; that is caught and returned
+/// as an error (this relies on `panic = "unwind"`).
+pub(crate) fn block_on<F: std::future::Future>(handle: &Handle, fut: F) -> io::Result<F::Output> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handle.block_on(fut))).map_err(|_| {
+        io::Error::other(
+            "block_on panicked (probably called on a tokio worker thread); \
+             use GogDepotFile::read_at().await there instead",
+        )
+    })
+}
+
+/// A chunk download in flight, shared by every read waiting for it.
+pub(crate) type ChunkFetch = Shared<BoxFuture<'static, Result<Bytes, Arc<GogError>>>>;
+
 impl GogContent {
-    /// One chunk's inflated bytes, from the in-memory cache or the CDN.
+    /// One chunk's inflated bytes, from the in-memory cache, a download of
+    /// it already under way, or a new download. The download runs as its
+    /// own task, so it finishes (and fills the cache) even if every read
+    /// waiting for it is dropped.
     pub(crate) async fn chunk(&self, product: ProductId, c: &Chunk) -> Result<Bytes, GogError> {
-        if let Some(b) = self.inner.chunks.lock().unwrap().get(&c.compressed_md5) {
-            return Ok(b);
-        }
+        let id = c.compressed_md5;
+        let fetch = {
+            // The in-flight map is locked across the cache check, and a
+            // download caches its chunk before leaving the map, so a chunk
+            // is never fetched twice at once.
+            let mut inflight = self.inner.inflight.lock().unwrap();
+            if let Some(b) = self.inner.chunks.lock().unwrap().get(&id) {
+                return Ok(b);
+            }
+            match inflight.get(&id) {
+                Some(f) => f.clone(),
+                None => {
+                    let this = self.clone();
+                    let c = *c;
+                    let task = tokio::spawn(async move {
+                        let r = this.download_chunk(product, &c).await;
+                        if let Ok(b) = &r {
+                            this.inner.chunks.lock().unwrap().put(id, b.clone());
+                        }
+                        this.inner.inflight.lock().unwrap().remove(&id);
+                        r.map_err(Arc::new)
+                    });
+                    let f = async move {
+                        task.await
+                            .unwrap_or_else(|e| Err(Arc::new(GogError::Io(io::Error::other(e)))))
+                    }
+                    .boxed()
+                    .shared();
+                    inflight.insert(id, f.clone());
+                    f
+                }
+            }
+        };
+        // The last waiter gets the error itself; any others a copy.
+        fetch
+            .await
+            .map_err(|e| Arc::try_unwrap(e).unwrap_or_else(|e| e.duplicate()))
+    }
+
+    /// Download, check and inflate one chunk.
+    async fn download_chunk(&self, product: ProductId, c: &Chunk) -> Result<Bytes, GogError> {
         let link = self.secure_link(product).await?;
         let data = match self.fetch_chunk(&link, c).await {
             // The link was refused (expired early or revoked): once more
@@ -190,11 +249,6 @@ impl GogContent {
             }
             r => r?,
         };
-        self.inner
-            .chunks
-            .lock()
-            .unwrap()
-            .put(c.compressed_md5, data.clone());
         Ok(data)
     }
 

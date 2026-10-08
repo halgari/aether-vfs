@@ -40,6 +40,42 @@ impl GogError {
     }
 }
 
+impl GogError {
+    /// A copy for a second caller of a shared chunk download: the same
+    /// variant where it holds plain data, else the message as an I/O error.
+    pub(crate) fn duplicate(&self) -> GogError {
+        use SourceError as S;
+        let source = |e: S| GogError::Source(e);
+        match self {
+            GogError::NotLoggedIn => GogError::NotLoggedIn,
+            GogError::LoginExpired(m) => GogError::LoginExpired(m.clone()),
+            GogError::Login(m) => GogError::Login(m.clone()),
+            GogError::NotOwned(p) => GogError::NotOwned(*p),
+            GogError::Json { what, msg } => GogError::Json {
+                what: what.clone(),
+                msg: msg.clone(),
+            },
+            GogError::NotInDepot(p) => GogError::NotInDepot(p.clone()),
+            GogError::Source(S::CorruptPart { what, msg }) => source(S::CorruptPart {
+                what: what.clone(),
+                msg: msg.clone(),
+            }),
+            GogError::Source(S::NotFound { what }) => source(S::NotFound { what: what.clone() }),
+            GogError::Source(S::Status { url, status, body }) => source(S::Status {
+                url: url.clone(),
+                status: *status,
+                body: body.clone(),
+            }),
+            GogError::Source(S::Protocol { url, msg }) => source(S::Protocol {
+                url: url.clone(),
+                msg: msg.clone(),
+            }),
+            GogError::Io(e) => GogError::Io(io::Error::new(e.kind(), e.to_string())),
+            other => GogError::Io(io::Error::other(other.to_string())),
+        }
+    }
+}
+
 impl From<GogError> for io::Error {
     fn from(e: GogError) -> io::Error {
         match e {
