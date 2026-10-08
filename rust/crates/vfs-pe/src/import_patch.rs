@@ -99,6 +99,17 @@ pub fn add_first_import(raw: &[u8], dll: &str, func: &str) -> Result<Vec<u8>, &'
     }
 
     let sect_base = opt + size_opt;
+    // Steam's DRM wrapper (SteamStub) can verify the file it was applied to;
+    // a patched one then fails with a "Steam Error" dialog and never starts.
+    if (0..n_sections)
+        .any(|i| raw.get(sect_base + i * 40..sect_base + i * 40 + 8) == Some(b".bind\0\0\0"))
+    {
+        match steamstub_flags(raw) {
+            Some(f) if f & STEAMSTUB_NO_MODULE_VERIFICATION != 0 => {}
+            Some(_) => return Err("Steam's DRM wrapper verifies this file"),
+            None => return Err("Steam's DRM wrapper is of a version this cannot read"),
+        }
+    }
     let mut sections = Vec::with_capacity(n_sections);
     for i in 0..n_sections {
         let s = sect_base + i * 40;
@@ -258,6 +269,47 @@ pub fn add_first_import(raw: &[u8], dll: &str, func: &str) -> Result<Vec<u8>, &'
     Ok(out)
 }
 
+/// SteamStub's `NoModuleVerification` flag: the wrapper does not check the file.
+const STEAMSTUB_NO_MODULE_VERIFICATION: u32 = 0x02;
+/// SteamStub 3.1's header signature, once decoded.
+const STEAMSTUB_SIGNATURE: u32 = 0xC0DE_C0DF;
+
+/// The flags of a 64-bit SteamStub 3.1 DRM wrapper, or `None` when `raw` has no
+/// header of that version where one would be.
+///
+/// The header is the 0xF0 bytes before the entry point (which is in the
+/// wrapper's `.bind` section), each dword XOR-ed with the previous encoded
+/// dword, the first being the key. Flags are at offset 60. Layout per the
+/// open-source Steamless (atom0s).
+pub fn steamstub_flags(raw: &[u8]) -> Option<u32> {
+    const HEADER: usize = 0xF0;
+    let e_lfanew = rd_u32(raw, 0x3C).ok()? as usize;
+    let n_sections = rd_u16(raw, e_lfanew + 6).ok()? as usize;
+    let size_opt = rd_u16(raw, e_lfanew + 20).ok()? as usize;
+    let opt = e_lfanew + 24;
+    if rd_u16(raw, opt).ok()? != 0x20B {
+        return None;
+    }
+    let entry = rd_u32(raw, opt + 16).ok()? as usize;
+    let sect_base = opt + size_opt;
+    let entry_off = (0..n_sections).find_map(|i| {
+        let s = sect_base + i * 40;
+        let vsize = rd_u32(raw, s + 8).ok()? as usize;
+        let va = rd_u32(raw, s + 12).ok()? as usize;
+        let raw_size = rd_u32(raw, s + 16).ok()? as usize;
+        let raw_ptr = rd_u32(raw, s + 20).ok()? as usize;
+        (entry >= va && entry < va + vsize.max(raw_size)).then(|| entry - va + raw_ptr)
+    })?;
+    let mut h = raw.get(entry_off.checked_sub(HEADER)?..entry_off)?.to_vec();
+    let mut key = rd_u32(&h, 0).ok()?;
+    for i in (4..HEADER).step_by(4) {
+        let v = rd_u32(&h, i).ok()?;
+        wr_u32(&mut h, i, v ^ key);
+        key = v;
+    }
+    (rd_u32(&h, 4).ok()? == STEAMSTUB_SIGNATURE).then(|| rd_u32(&h, 60).ok())?
+}
+
 /// Whether the PE that `read_at(offset, len)` reads names `dll` as its **first**
 /// import (ASCII case-insensitive). Reads the headers and one descriptor, not
 /// the image: callers ask this of a 37 MiB exe at every process creation.
@@ -383,6 +435,72 @@ mod tests {
         assert!(first_import_is(&mut reader(&patched), "vfs_SHIM_dll.DLL"));
         assert!(!first_import_is(&mut reader(&raw), SHIM_IMPORT_DLL));
         assert!(!first_import_is(&mut reader(b"MZ"), SHIM_IMPORT_DLL));
+    }
+
+    /// Steam's DRM wrapper: Skyrim SE 1.7.104's (flags 0x6) does not verify its
+    /// file and patches; a copy with `NoModuleVerification` cleared is refused,
+    /// as JoJ's 1.6.1170 (flags 0x0) was after it put up a "Steam Error" dialog.
+    #[test]
+    fn an_exe_whose_steam_drm_verifies_the_file_is_refused() {
+        let Some(dir) = std::env::var_os("VFS_TEST_SKYRIM_DIR") else {
+            eprintln!("SKIP: VFS_TEST_SKYRIM_DIR is unset");
+            return;
+        };
+        let Ok(raw) = std::fs::read(std::path::Path::new(&dir).join("SkyrimSE.exe")) else {
+            eprintln!("SKIP: no SkyrimSE.exe in VFS_TEST_SKYRIM_DIR");
+            return;
+        };
+        let flags = steamstub_flags(&raw).expect("a SteamStub 3.1 header");
+        assert_eq!(
+            flags & STEAMSTUB_NO_MODULE_VERIFICATION,
+            STEAMSTUB_NO_MODULE_VERIFICATION
+        );
+        assert!(add_first_import(&raw, SHIM_IMPORT_DLL, SHIM_IMPORT_SYMBOL).is_ok());
+
+        // Re-encode the header with the flag cleared.
+        let e_lfanew = rd_u32(&raw, 0x3C).unwrap() as usize;
+        let n = rd_u16(&raw, e_lfanew + 6).unwrap() as usize;
+        let opt = e_lfanew + 24;
+        let sect_base = opt + rd_u16(&raw, e_lfanew + 20).unwrap() as usize;
+        let entry = rd_u32(&raw, opt + 16).unwrap() as usize;
+        let at = (0..n)
+            .find_map(|i| {
+                let s = sect_base + i * 40;
+                let (vs, va, rs, rp) = (
+                    rd_u32(&raw, s + 8).unwrap() as usize,
+                    rd_u32(&raw, s + 12).unwrap() as usize,
+                    rd_u32(&raw, s + 16).unwrap() as usize,
+                    rd_u32(&raw, s + 20).unwrap() as usize,
+                );
+                (entry >= va && entry < va + vs.max(rs)).then(|| entry - va + rp)
+            })
+            .unwrap()
+            - 0xF0;
+        let mut plain = raw[at..at + 0xF0].to_vec();
+        let mut key = rd_u32(&plain, 0).unwrap();
+        for i in (4..0xF0).step_by(4) {
+            let v = rd_u32(&plain, i).unwrap();
+            wr_u32(&mut plain, i, v ^ key);
+            key = v;
+        }
+        wr_u32(&mut plain, 60, flags & !STEAMSTUB_NO_MODULE_VERIFICATION);
+        let mut enc = plain.clone();
+        let mut prev = rd_u32(&plain, 0).unwrap();
+        for i in (4..0xF0).step_by(4) {
+            let v = rd_u32(&plain, i).unwrap() ^ prev;
+            wr_u32(&mut enc, i, v);
+            prev = v;
+        }
+        let mut verifying = raw.clone();
+        verifying[at..at + 0xF0].copy_from_slice(&enc);
+        assert_eq!(
+            steamstub_flags(&verifying),
+            Some(flags & !STEAMSTUB_NO_MODULE_VERIFICATION)
+        );
+        assert_eq!(
+            add_first_import(&verifying, SHIM_IMPORT_DLL, SHIM_IMPORT_SYMBOL).unwrap_err(),
+            "Steam's DRM wrapper verifies this file"
+        );
     }
 
     #[test]

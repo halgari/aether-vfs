@@ -2,6 +2,10 @@
 fn main() {
     let a: Vec<String> = std::env::args().collect();
     let raw = std::fs::read(&a[1]).unwrap();
+    println!(
+        "steamstub flags: {:?}",
+        vfs_pe::steamstub_flags(&raw).map(|f| format!("{f:#x}"))
+    );
     let mut out = vfs_pe::add_first_import(&raw, &a[3], &a[4]).unwrap_or_else(|e| panic!("{e}"));
     let grew = vfs_pe::raise_stack_reserve(&mut out, 16 * 1024 * 1024).unwrap();
     std::fs::write(&a[2], &out).unwrap();

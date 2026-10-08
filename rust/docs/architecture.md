@@ -491,7 +491,10 @@ Two mechanisms:
      it if the shim is missing or fails.
    - **Injection**, for an EXE that is not staged (a real file, or outside every
      root), that the patch refused (`StagedDir::unpatched`, reported in the
-     launch notes), or under `Activation::Inject`. It works the way SKSE injects
+     launch notes), or under `Activation::Inject`. The patch refuses an EXE whose
+     Steam DRM wrapper (SteamStub) verifies its own file: Journals of
+     Jyggalag's downgraded 1.6.1170 `SkyrimSE.exe` does, and patched it put up a
+     "Steam Error" dialog instead of starting; Steam's own 1.7.104 does not. It works the way SKSE injects
      its DLL: create the target suspended,
      grow its primary stack to 16 MiB, `LoadLibrary` the shim on a remote
      thread (which first runs process initialisation, then the shim's
