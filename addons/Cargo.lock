@@ -127,6 +127,8 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
+ "vfs-core",
+ "vfs-provider",
  "xxhash-rust",
  "zstd 0.14.0",
 ]
