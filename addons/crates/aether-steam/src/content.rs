@@ -670,7 +670,7 @@ pub(crate) mod tests {
         let content = SteamContent::new(SteamCache::new(dir.path()), Some(creds), s, c);
         let err = content.depot_key(AppId(10), DepotId(1)).await.unwrap_err();
         assert!(matches!(&err, SteamError::LoginExpired { account } if account == "alice"));
-        assert!(err.to_string().contains("haskill login steam"));
+        assert!(err.to_string().contains("log in to Steam again"));
     }
 
     fn expired_creds(account: &str) -> SteamCredentials {
@@ -784,6 +784,6 @@ pub(crate) mod tests {
         let content = SteamContent::new(SteamCache::new(dir.path()), None, s, c);
         let err = content.depot_key(AppId(10), DepotId(1)).await.unwrap_err();
         assert!(matches!(err, SteamError::NotLoggedIn));
-        assert!(err.to_string().contains("haskill login steam"));
+        assert!(err.to_string().contains("log in to Steam first"));
     }
 }

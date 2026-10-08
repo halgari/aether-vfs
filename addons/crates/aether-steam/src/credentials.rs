@@ -1,7 +1,8 @@
-//! Haskill's own saved Steam login. Haskill never reads or reuses the native
-//! Steam client's files or cached login (enforced by
-//! `tests/no_native_credentials.rs`); the only way to get credentials is
-//! `haskill login steam`, which writes this file.
+//! The host's own saved Steam login. This crate never reads or reuses the
+//! native Steam client's files or cached login (enforced by
+//! `tests/no_native_credentials.rs`); the only way to get credentials is a
+//! sign-in through [`login_interactive`](crate::login_interactive) (or the
+//! [`auth`](crate::QrLogin) steps), saved to a file the host names.
 use crate::error::SteamError;
 use crate::fsutil::{read_optional, write_atomic};
 use base64::Engine;
@@ -10,7 +11,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 /// A Steam account name plus the long-lived refresh token Steam issued to
-/// Haskill. `Debug` never prints the token.
+/// this sign-in. `Debug` never prints the token.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SteamCredentials {
     pub account_name: String,
@@ -67,8 +68,8 @@ impl fmt::Debug for SteamCredentials {
     }
 }
 
-/// The file holding Haskill's saved Steam login (JSON, mode 0600, parent
-/// directory 0700).
+/// The file holding a saved Steam login (JSON, mode 0600, parent directory
+/// 0700). Where it lives is the host's choice; there is no default.
 #[derive(Clone, Debug)]
 pub struct CredentialFile {
     path: PathBuf,
@@ -77,23 +78,6 @@ pub struct CredentialFile {
 impl CredentialFile {
     pub fn new(path: impl Into<PathBuf>) -> Self {
         CredentialFile { path: path.into() }
-    }
-
-    /// `$XDG_DATA_HOME/haskill/steam-login.json`, falling back to
-    /// `$HOME/.local/share/haskill/steam-login.json` (Windows:
-    /// `%LOCALAPPDATA%\haskill\steam-login.json`), next to Haskill's
-    /// `config.toml`.
-    pub fn default_path() -> Result<PathBuf, SteamError> {
-        let base = if cfg!(windows) {
-            std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
-        } else {
-            std::env::var_os("XDG_DATA_HOME")
-                .filter(|v| !v.is_empty())
-                .map(PathBuf::from)
-                .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
-        };
-        base.map(|b| b.join("haskill").join("steam-login.json"))
-            .ok_or_else(|| SteamError::Protocol("cannot locate the Haskill data directory".into()))
     }
 
     pub fn path(&self) -> &Path {
@@ -117,7 +101,7 @@ impl CredentialFile {
         }
         let creds = serde_json::from_slice(&bytes).map_err(|e| {
             SteamError::Protocol(format!(
-                "{} is not a Haskill Steam login file ({e}); run `haskill login steam`",
+                "{} is not a Steam login file ({e}); log in to Steam again",
                 self.path.display()
             ))
         })?;
@@ -151,7 +135,7 @@ mod tests {
     #[test]
     fn save_then_load_round_trips() {
         let dir = tempfile::tempdir().unwrap();
-        let file = CredentialFile::new(dir.path().join("haskill/steam-login.json"));
+        let file = CredentialFile::new(dir.path().join("app/steam-login.json"));
         assert!(file.load().unwrap().is_none());
         let c = SteamCredentials::new("alice".into(), jwt(r#"{"exp":100}"#), Some("g".into()));
         file.save(&c).unwrap();
@@ -166,7 +150,7 @@ mod tests {
     fn token_file_is_owner_only() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("haskill/steam-login.json");
+        let path = dir.path().join("app/steam-login.json");
         let file = CredentialFile::new(&path);
         file.save(&SteamCredentials::new("a".into(), "t".into(), None))
             .unwrap();
@@ -217,6 +201,6 @@ mod tests {
         let path = dir.path().join("steam-login.json");
         std::fs::write(&path, b"not json").unwrap();
         let err = CredentialFile::new(&path).load().unwrap_err().to_string();
-        assert!(err.contains("haskill login steam"), "{err}");
+        assert!(err.contains("log in to Steam again"), "{err}");
     }
 }

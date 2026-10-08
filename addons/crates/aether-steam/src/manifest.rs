@@ -1,4 +1,4 @@
-//! Haskill's validated view of a Steam depot manifest.
+//! A validated view of a Steam depot manifest.
 use crate::chunk::MAX_CHUNK_LEN;
 use crate::error::SteamError;
 use crate::ids::{ChunkId, DepotId, DepotKey, ManifestId};
