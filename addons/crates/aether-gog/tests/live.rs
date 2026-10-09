@@ -1,6 +1,7 @@
 //! Live tests against real GOG. Ignored by default; they need a saved login
-//! (`GOG_CREDENTIALS`: a file written by `complete_login`) and an owned
-//! product (`GOG_PRODUCT`, default 1207658691). Run with
+//! (`GOG_CREDENTIALS`: a file written by
+//! `cargo run -p aether-gog --example gog_login -- <file>`) and an owned
+//! product (`GOG_PRODUCT`, default 1711230643, Skyrim Special Edition). Run with
 //! `GOG_CREDENTIALS=… cargo test -p aether-gog --test live -- --ignored --nocapture`.
 use std::path::PathBuf;
 
@@ -12,7 +13,7 @@ fn product() -> ProductId {
         std::env::var("GOG_PRODUCT")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(1207658691),
+            .unwrap_or(1711230643),
     )
 }
 

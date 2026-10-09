@@ -34,8 +34,28 @@ and does not fit a terminal flow.
 Out of scope: installers (makeself / mojosetup, Windows setups), the v1
 content system, patches.
 
-Live tests (`tests/live.rs`) are ignored by default and need
-`GOG_CREDENTIALS` (a saved login) and optionally `GOG_PRODUCT`.
+## Testing against real GOG
+
+The live tests (`tests/live.rs`) are ignored by default. From `addons/`, log
+in once; the `gog_login` example prints the login address, reads back the
+address of the page GOG lands on (`https://embed.gog.com/on_login_success?…code=…`;
+the code works once and only for a few minutes) and saves the tokens:
+
+```sh
+cargo run -p aether-gog --example gog_login -- ~/.config/aether-gog/creds.json
+```
+
+Then run the tests against a product the account owns (`GOG_PRODUCT`, default
+1711230643, The Elder Scrolls V: Skyrim Special Edition):
+
+```sh
+GOG_CREDENTIALS=~/.config/aether-gog/creds.json GOG_PRODUCT=1711230643 \
+  cargo test -p aether-gog --test live -- --ignored --nocapture
+```
+
+They refresh the token, list the product's builds and read the first 64 KiB of
+one depot file. A product the account does not own fails the read with
+`GogError::NotOwned`.
 
 ## Attribution
 
