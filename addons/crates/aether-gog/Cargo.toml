@@ -41,3 +41,7 @@ vfs-provider = { workspace = true, features = ["conformance"] }
 [[test]]
 name = "provider"
 required-features = ["provider"]
+
+[[example]]
+name = "gog_mount"
+required-features = ["provider"]
