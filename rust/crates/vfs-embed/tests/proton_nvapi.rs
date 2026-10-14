@@ -39,6 +39,9 @@ fn probe(log: &str) -> BTreeMap<String, String> {
             bin/build-windows, a Steam install, and an NVIDIA GPU with its driver"]
 fn a_launched_program_initialises_nvapi_and_not_when_turned_off() {
     const TEST: &str = "proton_nvapi::a_launched_program_initialises_nvapi_and_not_when_turned_off";
+    if support::not_on_this_wine_host(TEST) {
+        return;
+    }
     let Some(rig) = support::rig(TEST, "nvapi", &[vfs_proton::artifacts::FIXTURE_NVAPI]) else {
         return;
     };

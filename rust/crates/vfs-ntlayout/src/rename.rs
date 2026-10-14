@@ -21,8 +21,10 @@ pub fn parse_rename_info(b: &[u8]) -> Option<RenameTarget> {
     let end = 20usize.checked_add(namelen)?;
     let raw = b.get(20..end)?;
     let units: Vec<u16> = raw
-        .chunks_exact(2)
-        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|&c| u16::from_le_bytes(c))
         .collect();
     Some(RenameTarget {
         root_dir,

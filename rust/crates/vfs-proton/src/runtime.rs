@@ -295,6 +295,10 @@ mod tests {
         assert!(verify_ge(&fake_rt("nodmo", false, false)).is_ok());
     }
 
+    // `LD_LIBRARY_PATH` and `WINEDLLPATH` for a Linux Wine process: the
+    // expected strings are Linux paths, which `Path::join` on Windows does
+    // not produce.
+    #[cfg(unix)]
     #[test]
     fn runtime_lib_env_prepends_and_keeps_inherited() {
         let rt = Path::new("/rt");
@@ -317,6 +321,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn runtime_lib_env_without_host_values_and_with_orig_present() {
         let m: std::collections::HashMap<_, _> =

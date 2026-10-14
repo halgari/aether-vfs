@@ -42,18 +42,20 @@ jobs:
       TEMP: C:\vfstmp
     steps:
       - uses: actions/checkout@v4
+      # `TMP`/`TEMP` above only name the directory; nothing creates it, and code
+      # that writes straight into `temp_dir()` without a `create_dir_all` first
+      # would fail on a path that does not exist. First of all: Git Bash maps
+      # `/tmp` to `TMP`, and the toolchain action's `mktemp` fails ("could not
+      # find /tmp") while it does not exist.
+      - name: Create an 8.3-free TMP
+        run: New-Item -ItemType Directory -Force -Path C:\vfstmp | Out-Null
+        shell: pwsh
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust
-      # `TMP`/`TEMP` above only name the directory; nothing creates it, and code
-      # that writes straight into `temp_dir()` without a `create_dir_all` first
-      # would fail on a path that does not exist.
-      - name: Create an 8.3-free TMP
-        run: New-Item -ItemType Directory -Force -Path C:\vfstmp | Out-Null
-        shell: pwsh
       # The gate this project actually enforces by hand, made automatic. It was
       # absent while `cargo clippy --all-targets -- -D warnings` was a standing
       # requirement in every task brief — i.e. the standard was upheld only by
@@ -173,6 +175,35 @@ jobs:
         working-directory: rust
         continue-on-error: true
 
+  # The portable crates on macOS, where the Wine host is CrossOver. The same
+  # crate list as rust-linux-portable: macOS is the other unix, and the
+  # differences that bit (no /proc, APFS folding case, a ~42 ns Instant, the
+  # kernel naming a process after the file it ran) only show up here.
+  # CrossOver itself is not on the runner, so its end-to-end tests skip; the
+  # fake-runtime tests cover the CrossOver launch path (a fake install).
+  rust-macos:
+    runs-on: macos-latest
+    env:
+      MACOS_CRATES: >-
+        -p vfs-ipc -p vfs-protocol -p vfs-provider -p vfs-compose -p vfs-pe
+        -p vfs-zip -p vfs-core -p vfs-env -p vfs-unix -p vfs-proton
+        -p vfs-embed -p vfs-director -p vfs-registry -p vfs-testkit -p vfs-bench
+        -p vfs-ntlayout -p vfs-redirect
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - name: Clippy (portable crates, all targets, warnings are errors)
+        run: cargo clippy $MACOS_CRATES --all-targets --examples -- -D warnings
+        working-directory: rust
+      - name: Portable Rust crates (compile+test on macOS)
+        run: cargo test --no-fail-fast $MACOS_CRATES
+        working-directory: rust
+
   # The Proton path end to end, on Linux: the shim is always a Windows PE,
   # injected into a Windows program inside GE-Proton's Wine, while the Director
   # serving it is native Linux. So this job cross-builds the Windows half
@@ -289,3 +320,23 @@ jobs:
           cargo bench -p aether-block-store --no-run
         env:
           PROPTEST_CASES: "512"
+
+  # The add-ons on macOS: clippy and the default test run (the Linux job keeps
+  # the feature-gated and deep runs).
+  addons-macos:
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: addons
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: addons
+      - name: clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: test
+        run: cargo test --workspace --all-features

@@ -65,6 +65,8 @@ vfs-shim.workspace = true
 vfs-proton = { path = "../vfs-proton", default-features = false }
 # `DEFAULT_PAYLOAD_CAP`, the one ring payload capacity both transports use.
 vfs-ipc.workspace = true
+# The effective uid, for checking the ring's directory is this user's alone.
+vfs-unix.workspace = true
 
 [dev-dependencies]
 vfs-testkit.workspace = true

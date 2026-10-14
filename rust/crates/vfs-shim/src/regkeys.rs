@@ -1305,7 +1305,9 @@ fn is_self(process: HANDLE) -> bool {
 /// go to another process (`STATUS_NOT_SUPPORTED`), because no other process can resolve it. A
 /// pass-through source is duplicated for real and the duplicate in this process is tracked.
 /// `DUPLICATE_CLOSE_SOURCE` closes the source either way, as NT does even when the duplication
-/// fails.
+/// fails. A NULL target process duplicates nothing: Windows answers it as a close-only call
+/// (success with `DUPLICATE_CLOSE_SOURCE`, `STATUS_INVALID_PARAMETER` without), and so does a
+/// synthetic source.
 ///
 /// # Safety
 /// The arguments are the caller's NT arguments.
@@ -1334,7 +1336,19 @@ pub(crate) unsafe fn duplicate(
             return None;
         }
         let rec = synthetic(sh)?;
-        let status = if dst.is_null() {
+        let status = if dst_process.is_null() {
+            // No target process: nothing is duplicated, and Windows zeroes the target handle.
+            // With `DUPLICATE_CLOSE_SOURCE` that is the documented close-only call and succeeds;
+            // without, it is `STATUS_INVALID_PARAMETER` (both seen on 26H2 build 26300).
+            if !dst.is_null() {
+                *dst = core::ptr::null_mut();
+            }
+            if close_source {
+                STATUS_SUCCESS
+            } else {
+                STATUS_INVALID_PARAMETER
+            }
+        } else if dst.is_null() {
             STATUS_SUCCESS
         } else if !is_self(dst_process) {
             STATUS_NOT_SUPPORTED

@@ -175,6 +175,7 @@ fn staged_launch_artifacts_resolve_through_the_provider_graph() {
 #[cfg(windows)]
 #[test]
 fn production_launch_stages_a_relative_image_before_create_process() {
+    support::artifacts::ensure_inject_artifacts();
     let content_dir = vfs_testkit::tempdir().unwrap();
     let content_exe = content_dir.path().join("game.exe");
     std::fs::write(&content_exe, bare_pe(b"CONTENT")).unwrap();

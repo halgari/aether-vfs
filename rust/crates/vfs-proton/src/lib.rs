@@ -16,6 +16,8 @@
 // carries `ureq` -> `rustls` -> `ring`, a C cross-compile in a build script,
 // and `vfs-embed` consumes this crate on unix to *launch*, not to install.
 pub mod artifacts;
+pub mod crossover;
+pub mod host;
 #[cfg(feature = "acquire")]
 pub mod install;
 pub mod launch;
@@ -33,6 +35,7 @@ mod test_tmp;
 // The module paths (`launch::`, `prefix::`, `nvapi::`, ...) are canonical. The
 // flat re-exports below are the ones the `vfs-proton` binary and this
 // repository's tests use.
+pub use host::WineHost;
 #[cfg(feature = "acquire")]
 pub use install::{extract_tar_gz, install_release, parse_sha512sum, partial_path, verify_digest};
 pub use launch::{finish, launch_env, merge_dll_overrides, spawn, WineLaunch, DEFAULT_WINEDEBUG};

@@ -1,5 +1,5 @@
 //! Locating, freshness-checking and building the Windows artefacts the launch
-//! tests inject (shim DLL, payload DLL, fixture executables).
+//! tests inject (shim DLL, fixture executables).
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -9,10 +9,7 @@ pub use vfs_testkit::artifacts::profile_dir;
 
 /// [`vfs_testkit::artifacts::locate`], panicking with this harness's build hint.
 pub fn locate_artifact(name: &str) -> PathBuf {
-    vfs_testkit::artifacts::locate_or_panic(
-        name,
-        "build -p vfs-fixture-read -p vfs-shim-dll and vfs-payload (--manifest-path crates/vfs-payload/Cargo.toml) first",
-    )
+    vfs_testkit::artifacts::locate_or_panic(name, "build -p vfs-shim-dll -p vfs-fixture-read first")
 }
 
 /// Every crate directory reachable from `crate_dir` by following `path =
@@ -227,72 +224,119 @@ fn move_locked_artifacts_aside(names: &[&str]) {
     }
 }
 
+/// The artefacts every launch-capable test here needs beside the test binary,
+/// and the crate each is built from.
+const ARTIFACTS: [(&str, &str); 6] = [
+    ("vfs_shim_dll.dll", "vfs-shim-dll"),
+    ("vfs-fixture-read.exe", "vfs-fixture-read"),
+    ("vfs-fixture-writepath.exe", "vfs-fixture-writepath"),
+    ("vfs-fixture-escape.exe", "vfs-fixture-escape"),
+    ("vfs-fixture-prefs.exe", "vfs-fixture-prefs"),
+    // A bin of `vfs-inject`, built on its own below (`--bin`).
+    ("vfs-probe.exe", "vfs-inject"),
+];
+
+/// Build (when stale) and co-locate every launch artefact beside the test
+/// binary, where `Session::launch`'s own search (near `current_exe()`) finds
+/// them. Every launch-capable test calls this first.
+///
+/// **Safe across test processes, not only threads.** A cold run starts
+/// several test binaries that each find the artefacts missing, and a
+/// `std::sync::Once` is per process: they used to build and copy at the same
+/// time, so one binary's launch could look for `vfs_shim_dll.dll` while
+/// another's `cargo build` or copy was replacing it. The whole check, build
+/// and copy now runs under an exclusive lock on a file in the profile
+/// directory ([`with_fixture_lock`]), so a second process waits for the
+/// first and then finds everything fresh; and the `Once` keeps the threads of
+/// one process from repeating the walk.
 pub fn ensure_inject_artifacts() {
-    // Session::launch locates the shim near the current exe (the test
-    // binary). Co-locate them into the profile dir if cargo left them only in
-    // deps/ or they were never built for this package.
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| with_fixture_lock(build_and_colocate));
+}
+
+/// Run `f` holding an exclusive lock on `<profile>/.vfs-embed-fixtures.lock`,
+/// shared by every test process of this profile. The OS drops the lock if the
+/// holder dies, so a killed test cannot wedge the next run.
+pub fn with_fixture_lock<R>(f: impl FnOnce() -> R) -> R {
+    let path = profile_dir().join(".vfs-embed-fixtures.lock");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .unwrap_or_else(|e| panic!("open fixture lock {}: {e}", path.display()));
+    file.lock()
+        .unwrap_or_else(|e| panic!("lock {}: {e}", path.display()));
+    let out = f();
+    drop(file);
+    out
+}
+
+fn build_and_colocate() {
     let profile = profile_dir();
     let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..");
-    let needed = [
-        "vfs_shim_dll.dll",
-        "vfs-fixture-read.exe",
-        "vfs-fixture-writepath.exe",
-        "vfs-fixture-escape.exe",
-        "vfs-fixture-prefs.exe",
-    ];
+    let needed: Vec<&str> = ARTIFACTS.iter().map(|(name, _)| *name).collect();
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+    // Build for the profile this test runs in: a debug build under `cargo test
+    // --release` would land in another directory.
+    let release: &[&str] = if cfg!(debug_assertions) {
+        &[]
+    } else {
+        &["--release"]
+    };
 
-    // They build together as part of this workspace. Each is checked for staleness
-    // against its own crate's transitive source, not merely for presence.
-    let main_artifact_crates: [(&str, &str); 5] = [
-        ("vfs_shim_dll.dll", "vfs-shim-dll"),
-        ("vfs-fixture-read.exe", "vfs-fixture-read"),
-        ("vfs-fixture-writepath.exe", "vfs-fixture-writepath"),
-        ("vfs-fixture-escape.exe", "vfs-fixture-escape"),
-        ("vfs-fixture-prefs.exe", "vfs-fixture-prefs"),
-    ];
     // Free any artifact path a dead-but-unkillable process still holds, or the
     // build below fails with a bare `Access is denied`.
     move_locked_artifacts_aside(&needed);
 
-    let main_stale = main_artifact_crates.iter().any(|(artifact, crate_name)| {
+    // Each is checked for staleness against its own crate's transitive
+    // source, not merely for presence.
+    let stale = ARTIFACTS.iter().any(|(artifact, crate_name)| {
         artifact_is_stale(
             &profile.join(artifact),
             &workspace.join("crates").join(crate_name),
         )
     });
-    if main_stale {
-        let status = std::process::Command::new(&cargo)
-            .current_dir(&workspace)
-            .args([
-                "build",
-                "-p",
-                "vfs-shim-dll",
-                "-p",
-                "vfs-fixture-read",
-                "-p",
-                "vfs-fixture-writepath",
-                "-p",
-                "vfs-fixture-escape",
-                "-p",
-                "vfs-fixture-prefs",
-                "--quiet",
-            ])
-            .status()
-            .expect("spawn cargo");
-        assert!(
-            status.success(),
-            "fixture/artifact build failed: {status}{}",
-            lock_holders_hint()
-        );
+    if stale {
+        // Two invocations: a `--bin` filter applies to every selected package,
+        // so with the others it would leave out the shim's cdylib.
+        let packages: &[&str] = &[
+            "build",
+            "-p",
+            "vfs-shim-dll",
+            "-p",
+            "vfs-fixture-read",
+            "-p",
+            "vfs-fixture-writepath",
+            "-p",
+            "vfs-fixture-escape",
+            "-p",
+            "vfs-fixture-prefs",
+            "--quiet",
+        ];
+        let probe: &[&str] = &["build", "-p", "vfs-inject", "--bin", "vfs-probe", "--quiet"];
+        for args in [packages, probe] {
+            let status = std::process::Command::new(&cargo)
+                .current_dir(&workspace)
+                .args(args)
+                .args(release)
+                .status()
+                .expect("spawn cargo");
+            assert!(
+                status.success(),
+                "fixture/artifact build failed: {status}{}",
+                lock_holders_hint()
+            );
+        }
     }
 
-    // Copy into profile root so Session::launch's find_near works from the
-    // test exe. Always overwrite: a rebuilt artifact must replace whatever
-    // was co-located here before, not sit next to a stale copy that a
-    // skip-if-exists check would otherwise leave in place untouched.
+    // Copy into the profile root so Session::launch's find_near works from the
+    // test exe, when cargo left one only in `deps/`. A copy whose bytes already
+    // match is left alone (rewriting it would race a process that has it
+    // mapped); otherwise the new bytes go to a temp file renamed into place,
+    // so no reader ever sees a half-written DLL.
     for name in needed {
         let dest = profile.join(name);
         let src = locate_artifact(name);
@@ -303,6 +347,13 @@ pub fn ensure_inject_artifacts() {
         if same_file {
             continue;
         }
-        let _ = std::fs::copy(&src, &dest);
+        let bytes = std::fs::read(&src).unwrap_or_else(|e| panic!("read {}: {e}", src.display()));
+        if std::fs::read(&dest).is_ok_and(|d| d == bytes) {
+            continue;
+        }
+        let tmp = profile.join(format!("{name}.{}.tmp", std::process::id()));
+        if std::fs::write(&tmp, &bytes).is_ok() && std::fs::rename(&tmp, &dest).is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
     }
 }

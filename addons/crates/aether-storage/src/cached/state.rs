@@ -402,7 +402,7 @@ impl Storage {
 
 /// Subtracts from the cache total without wrapping.
 pub(crate) fn sub_logical(total: &AtomicU64, n: u64) {
-    let _ = total.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+    let _ = total.try_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
         Some(v.saturating_sub(n))
     });
 }

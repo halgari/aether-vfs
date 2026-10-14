@@ -4,6 +4,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use super::{Prefix, PrefixError};
+use crate::host::WineHost;
 use crate::layout::Root;
 use crate::process::{own_process_group, run_bounded_status};
 use crate::runtime::verify_ge;
@@ -13,22 +14,65 @@ use crate::runtime::verify_ge;
 ///
 /// Idempotent: if `drive_c/windows/system32` already exists, the prefix is
 /// treated as initialised and `wineboot` is not run again.
-pub fn ensure(root: &Root, runtime: &Path, session: &str) -> Result<Prefix, PrefixError> {
+///
+/// Under CrossOver ([`WineHost::CrossOver`]) the prefix is a bottle made by
+/// `cxbottle --create` instead, at the same place.
+pub fn ensure(
+    root: &Root,
+    host: impl Into<WineHost>,
+    session: &str,
+) -> Result<Prefix, PrefixError> {
+    let host = host.into();
     let session_dir = root
         .try_session_dir(session)
         .map_err(|e| PrefixError::Io(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?;
     let dir = session_dir.join("prefix");
 
     if !is_initialised(&dir) {
-        // Verify GE *before* touching anything else on disk: `PROTONPATH`
-        // defaults to stock Proton, and refusing here is what stops a
-        // silent downgrade rather than a partially-created prefix.
-        verify_ge(runtime).map_err(|e| PrefixError::NotGe(e.to_string()))?;
-        std::fs::create_dir_all(&dir)?;
-        run_wineboot(runtime, &dir)?;
+        match &host {
+            WineHost::Proton(runtime) => {
+                // Verify GE *before* touching anything else on disk:
+                // `PROTONPATH` defaults to stock Proton, and refusing here is
+                // what stops a silent downgrade rather than a
+                // partially-created prefix.
+                verify_ge(runtime).map_err(|e| PrefixError::NotGe(e.to_string()))?;
+                std::fs::create_dir_all(&dir)?;
+                run_wineboot(runtime, &dir)?;
+            }
+            WineHost::CrossOver(cx) => {
+                host.verify().map_err(PrefixError::Bottle)?;
+                create_bottle(cx, &dir, &session_dir.join(BOTTLE_CREATE_LOG))?;
+            }
+        }
     }
 
     Ok(Prefix { dir })
+}
+
+/// The log `cxbottle --create` writes to, beside the prefix in
+/// `sessions/<name>`.
+pub const BOTTLE_CREATE_LOG: &str = "aether-crossover-create.log";
+
+/// Creates a CrossOver bottle at `dir`, judged by the result rather than
+/// `cxbottle`'s exit status.
+fn create_bottle(cx: &Path, dir: &Path, log: &Path) -> Result<(), PrefixError> {
+    let status = crate::crossover::create_bottle(cx, dir, log)
+        .map_err(|e| PrefixError::Bottle(format!("could not run cxbottle: {e}")))?;
+    if is_initialised(dir) {
+        return Ok(());
+    }
+    Err(PrefixError::Bottle(match status {
+        None => format!(
+            "cxbottle --create did not finish within {:?} and was killed{}",
+            crate::crossover::CREATE_TIMEOUT,
+            log_tail(log)
+        ),
+        Some(s) => format!(
+            "cxbottle --create exited {s} without a prefix at {}{}",
+            dir.display(),
+            log_tail(log)
+        ),
+    }))
 }
 
 /// How a session's prefix is created, and so where it lives.
@@ -96,17 +140,25 @@ pub fn prefix_dir(root: &Root, session: &str, init: &PrefixInit) -> Result<PathB
 /// does.
 pub fn ensure_with(
     root: &Root,
-    runtime: &Path,
+    host: impl Into<WineHost>,
     session: &str,
     init: &PrefixInit,
 ) -> Result<Prefix, PrefixError> {
+    let host = host.into();
     let PrefixInit::Proton {
         steam_client,
         app_id,
     } = init
     else {
-        return ensure(root, runtime, session);
+        return ensure(root, host, session);
     };
+    let WineHost::Proton(runtime) = &host else {
+        return Err(PrefixError::ProtonInit(format!(
+            "Proton's own prefix setup needs a GE-Proton runtime, and this launch runs under {}",
+            host.describe()
+        )));
+    };
+    let runtime = runtime.as_path();
     let dir = prefix_dir(root, session, init)?;
     let compat = dir.parent().expect("compat/pfx has a parent").to_path_buf();
     let tag = verify_ge(runtime).map_err(|e| PrefixError::NotGe(e.to_string()))?;

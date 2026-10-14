@@ -203,20 +203,38 @@ pub fn state_dir() -> Option<PathBuf> {
 ///
 /// The pid file is the client's own statement of where it is running; no
 /// configuration or credential file is read.
+///
+/// The process's name is asked of the kernel (`vfs_unix::process_name`), so
+/// this works where there is no `/proc` (macOS).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn running_client(state_dir: &Path) -> Option<u32> {
-    running_client_in(state_dir, Path::new("/proc"))
+    let pid = client_pid(state_dir)?;
+    // A pid file outlives its process, and the number is reused.
+    (vfs_unix::process_name(pid)?.trim() == "steam").then_some(pid)
 }
 
-/// [`running_client`] against a process table at `proc` instead of `/proc`.
+/// The pid of the Steam client running out of `state_dir`: never, here.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub fn running_client(_state_dir: &Path) -> Option<u32> {
+    None
+}
+
+/// [`running_client`] against a process table at `proc` instead of the
+/// kernel's, laid out as Linux's `/proc` is.
 pub fn running_client_in(state_dir: &Path, proc: &Path) -> Option<u32> {
-    let pid: u32 = std::fs::read_to_string(state_dir.join("steam.pid"))
-        .ok()?
-        .trim()
-        .parse()
-        .ok()?;
+    let pid = client_pid(state_dir)?;
     // A pid file outlives its process, and the number is reused.
     let comm = std::fs::read_to_string(proc.join(pid.to_string()).join("comm")).ok()?;
     (comm.trim() == "steam").then_some(pid)
+}
+
+/// The pid `steam.pid` in `state_dir` names, live or not.
+fn client_pid(state_dir: &Path) -> Option<u32> {
+    std::fs::read_to_string(state_dir.join("steam.pid"))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
 }
 
 /// The one line a launch says when it leaves the Steam helper out because no

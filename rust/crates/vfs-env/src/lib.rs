@@ -120,6 +120,10 @@ pub const DISCOVERY_PATH: &str = "VFS_DISCOVERY_PATH";
 /// the directory beside the running executable. An explicit
 /// `LaunchOpts::shim_dll` still wins. The Proton tests read it too.
 pub const WINDOWS_ARTIFACTS: &str = "VFS_WINDOWS_ARTIFACTS";
+/// macOS: the CrossOver install a launch runs under — the bundle
+/// (`…/CrossOver.app`) or its `Contents/SharedSupport/CrossOver`. Defaults to
+/// `/Applications/CrossOver.app`, then `~/Applications/CrossOver.app`.
+pub const CROSSOVER_APP: &str = "VFS_CROSSOVER_APP";
 /// Seconds to wait for the shim's hooks to report ready before giving up.
 ///
 /// One value bounds both waits: the launcher's wait for the top-level target
@@ -578,6 +582,11 @@ pub const ALL: &[Var] = &[
         name: WINDOWS_ARTIFACTS,
         kind: Kind::Behaviour,
         default: "beside the running executable",
+    },
+    Var {
+        name: CROSSOVER_APP,
+        kind: Kind::Behaviour,
+        default: "/Applications/CrossOver.app",
     },
     Var {
         name: READY_TIMEOUT_SECS,

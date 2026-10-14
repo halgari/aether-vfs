@@ -273,8 +273,10 @@ fn check(kind: &str, opened: &str, want: &str, real: &Opened) {
         Ok(b) => {
             let n = u32::from_le_bytes(b[0..4].try_into().unwrap()) as usize;
             let units: Vec<u16> = b[4..4 + n]
-                .chunks_exact(2)
-                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|&c| u16::from_le_bytes(c))
                 .collect();
             let name = String::from_utf16_lossy(&units);
             if name != drive_relative(want) {

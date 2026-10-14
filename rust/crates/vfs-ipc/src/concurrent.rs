@@ -444,11 +444,7 @@ impl DataGate {
             }
             // One permit out of `avail`, whatever the reserve: it is this
             // caller's first.
-            if self
-                .avail
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |a| a.checked_sub(1))
-                .is_err()
-            {
+            if !take_one(&self.avail) {
                 break;
             }
             if front
@@ -706,6 +702,20 @@ pub fn read_fragmented<N: Notifier>(
         }
     }
     Ok(filled)
+}
+
+/// Takes one from `n` unless it is zero; whether it did. What
+/// `fetch_update(.., |a| a.checked_sub(1))` did, which Rust 1.99 deprecates
+/// for `try_update` (stable only since 1.95, past this crate's 1.89).
+fn take_one(n: &AtomicU32) -> bool {
+    let mut cur = n.load(Ordering::SeqCst);
+    while let Some(next) = cur.checked_sub(1) {
+        match n.compare_exchange_weak(cur, next, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(_) => return true,
+            Err(now) => cur = now,
+        }
+    }
+    false
 }
 
 #[cfg(test)]

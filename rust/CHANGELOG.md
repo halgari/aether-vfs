@@ -4,6 +4,20 @@ Changes to the host-facing API of `vfs-embed`, `vfs-proton`, `vfs-provider`
 and `vfs-env` that a host (Haskill) has to adapt to or can start using. Newest
 first. Internal refactors are in the git history, not here.
 
+## Unreleased (registry fidelity on Windows 11 26H2)
+
+Registry hooks now follow the host where Windows and Wine differ, as found by
+probing the real ntdll on Windows 11 26H2 (build 26300). Behaviour changes a
+host can observe through the shim:
+
+- `NtDuplicateObject` on a synthetic registry handle with a NULL target
+  process is a close-only call: success with `DUPLICATE_CLOSE_SOURCE`,
+  `STATUS_INVALID_PARAMETER` without, and `*TargetHandle` is zeroed.
+- A registry value name with an odd `UNICODE_STRING.Length` is
+  `STATUS_INVALID_PARAMETER` on Windows (a NULL buffer is
+  `STATUS_ACCESS_VIOLATION` first); under Wine it is still truncated.
+  `vfs_shim::host_is_wine()` is exported for tests.
+
 ## Unreleased (add-ons)
 
 ### Removed

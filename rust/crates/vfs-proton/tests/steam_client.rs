@@ -50,9 +50,13 @@ fn a_stale_pid_file_is_not_a_running_client() {
 
 #[test]
 fn the_note_is_one_line_naming_the_pid_file() {
-    let n = not_running_note(Path::new("/home/u/.steam"));
+    let state = Path::new("/home/u/.steam");
+    let n = not_running_note(state);
+    // The pid file as this host's `Path` spells it: `/home/u/.steam/steam.pid`
+    // on Linux, with a `\` before `steam.pid` when the test runs on Windows.
+    let pid_file = state.join("steam.pid");
     assert!(
-        n.contains("/home/u/.steam/steam.pid") && n.contains("without Steam"),
+        n.contains(&pid_file.display().to_string()) && n.contains("without Steam"),
         "{n}"
     );
     assert!(!n.contains('\n'));

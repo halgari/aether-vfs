@@ -129,6 +129,9 @@ pub use session::{LaunchHandle, LaunchStopper};
 /// How a Proton launch sets up its Wine prefix — see [`Session::set_prefix_init`].
 #[cfg(unix)]
 pub use vfs_proton::prefix::{PrefixInit, PROTON_GRAPHICS_OVERRIDES};
+/// Which Wine a launch runs under — see [`Session::set_wine_host`].
+#[cfg(unix)]
+pub use vfs_proton::WineHost;
 /// The pieces of the Proton (Wine) delivery a host names besides a
 /// [`Session`]: where aether-vfs keeps runtimes and prefixes, which runtime a
 /// launch would use, a prefix's directory and lock, the NVAPI status, and the

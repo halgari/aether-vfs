@@ -64,6 +64,12 @@ pub use hookstats::{
 };
 pub use vfs_protocol::shimcfg::{encode_config, encode_config_full, StaticImport};
 
+/// Whether this process runs on Wine's ntdll, whose answers some hooks follow where Wine and
+/// Windows differ. For tests and diagnostics.
+pub fn host_is_wine() -> bool {
+    ntbuf::host_is_wine()
+}
+
 /// The canonical path the registry hooks recorded for a key handle (synthetic or
 /// pass-through), if they track it. For tests and diagnostics.
 pub fn registry_handle_path(handle: isize) -> Option<String> {

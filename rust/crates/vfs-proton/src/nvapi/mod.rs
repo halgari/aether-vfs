@@ -62,8 +62,20 @@ mod test_support {
         std::fs::write(p, body).unwrap();
     }
 
+    /// A PCI bus address as a directory name. Linux spells it `0000:01:00.0`;
+    /// NTFS refuses `:` in a name (it introduces a stream), so on Windows the
+    /// fake tree uses `-`. Nothing here reads the name except to sort it, and
+    /// the substitution keeps the order.
+    fn bus_dir(bus: &str) -> String {
+        if cfg!(windows) {
+            bus.replace(':', "-")
+        } else {
+            bus.to_string()
+        }
+    }
+
     pub(super) fn pci(host: &Path, slot: &str, vendor: &str, class: &str) {
-        let d = host.join("sys/bus/pci/devices").join(slot);
+        let d = host.join("sys/bus/pci/devices").join(bus_dir(slot));
         write(&d.join("vendor"), &format!("{vendor}\n"));
         write(&d.join("class"), &format!("{class}\n"));
     }
@@ -96,7 +108,7 @@ mod test_support {
         write(
             &host
                 .join("proc/driver/nvidia/gpus")
-                .join(bus)
+                .join(bus_dir(bus))
                 .join("information"),
             &format!("Model: \t\t {model}\nIRQ:   \t\t 76\nBus Location: \t {bus}\n"),
         );

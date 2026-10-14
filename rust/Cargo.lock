@@ -1068,6 +1068,7 @@ dependencies = [
  "vfs-provider",
  "vfs-shim",
  "vfs-testkit",
+ "vfs-unix",
  "vfs-zip",
 ]
 
@@ -1170,6 +1171,7 @@ dependencies = [
  "tar",
  "ureq",
  "vfs-env",
+ "vfs-unix",
 ]
 
 [[package]]

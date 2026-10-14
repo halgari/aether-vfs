@@ -482,7 +482,10 @@ impl CdnPool {
         let mut st = self.state.lock().unwrap();
         let h = &mut st.hosts[i];
         let warm = *h.warm.get_or_insert(now);
-        if sent < warm {
+        // `<=`: a coarse clock (macOS ticks every ~42 ns) can give a request
+        // and the answer that warms its host the same instant, and that
+        // request waited for the connection like any sent before it.
+        if sent <= warm {
             return;
         }
         h.latency = Latency::Measured(match h.latency {

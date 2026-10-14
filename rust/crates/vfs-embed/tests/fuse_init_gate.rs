@@ -11,106 +11,18 @@
 //! hand-built `RunConfig`.
 //!
 //! **Whole target is Windows-only.** It needs a real `CreateProcess` and DLL
-//! injection by `vfs-inject`, and the three Windows fixture artifacts
-//! `ensure_fixtures` locates. (The Proton path's launch failure modes are in
-//! `proton_launch.rs` and `proton_fake_runtime.rs`.) Gated at the crate root of
-//! the target rather than per item, since there is only the one test and every
-//! helper here exists to serve it.
+//! injection by `vfs-inject`, and the shim and `vfs-probe` artifacts that
+//! `ensure_inject_artifacts` builds. (The Proton path's launch failure modes
+//! are in `proton_launch.rs` and `proton_fake_runtime.rs`.) Gated at the crate
+//! root of the target rather than per item, since there is only the one test.
 #![cfg(windows)]
 
 use std::sync::Arc;
 
 use vfs_embed::{DiskProvider, LaunchOpts, Session};
 
-fn profile_dir() -> std::path::PathBuf {
-    let exe = std::env::current_exe().expect("current_exe");
-    let dir = exe.parent().unwrap();
-    if dir.file_name().and_then(|s| s.to_str()) == Some("deps") {
-        dir.parent().unwrap().to_path_buf()
-    } else {
-        dir.to_path_buf()
-    }
-}
-
-fn locate_artifact(name: &str) -> std::path::PathBuf {
-    let profile = profile_dir();
-    for cand in [profile.join(name), profile.join("deps").join(name)] {
-        if cand.is_file() {
-            return cand;
-        }
-    }
-    panic!("{name} not found near {profile:?} after ensure_fixtures()");
-}
-
-/// Build the shim DLL, the (separate-workspace) payload DLL, and `vfs-probe`
-/// (a `vfs-inject` test target that unconditionally writes its output file —
-/// the decisive "did this process actually run" signal below) once per test
-/// process, then co-locate them beside the test binary so `Session::launch`'s
-/// own DLL search (near `current_exe()`) finds them — the same convention
-/// `vfs-inject`'s test harness and this crate's `tests/support/artifacts.rs`
-/// use.
-fn ensure_fixtures() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
-        let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
-        let workspace = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("..")
-            .canonicalize()
-            .expect("workspace root");
-
-        // Build for the profile this test runs in: `profile_dir()` is that profile's
-        // directory, so a debug build under `cargo test --release` would land elsewhere.
-        let release: &[&str] = if cfg!(debug_assertions) {
-            &[]
-        } else {
-            &["--release"]
-        };
-        let status = std::process::Command::new(&cargo)
-            .current_dir(&workspace)
-            .args([
-                "build",
-                "-p",
-                "vfs-shim-dll",
-                "-p",
-                "vfs-inject",
-                "--bin",
-                "vfs-probe",
-                "--quiet",
-            ])
-            .args(release)
-            .status()
-            .expect("spawn cargo to build shim + vfs-probe");
-        assert!(status.success(), "shim/vfs-probe build failed: {status}");
-
-        let target_dir = workspace.join("target");
-        let status = std::process::Command::new(&cargo)
-            .current_dir(&workspace)
-            .env("CARGO_TARGET_DIR", &target_dir)
-            .args([
-                "build",
-                "--manifest-path",
-                "crates/vfs-payload/Cargo.toml",
-                "--quiet",
-            ])
-            .args(release)
-            .status()
-            .expect("spawn cargo to build vfs-payload");
-        assert!(status.success(), "vfs-payload build failed: {status}");
-
-        let profile = profile_dir();
-        for name in ["vfs_shim_dll.dll", "vfs-probe.exe"] {
-            let dest = profile.join(name);
-            if dest.is_file() {
-                continue;
-            }
-            let src = profile.join("deps").join(name);
-            if src.is_file() {
-                let _ = std::fs::copy(&src, &dest);
-            }
-        }
-    });
-}
+mod support;
+use support::artifacts::{ensure_inject_artifacts, locate_artifact};
 
 fn tmp(name: &str) -> std::path::PathBuf {
     let d = vfs_testkit::scratch_path(&format!("vfs-fuse-gate-{name}"));
@@ -131,7 +43,7 @@ fn tmp(name: &str) -> std::path::PathBuf {
 /// reporting it.
 #[test]
 fn launch_returns_err_when_fuse_client_fails_to_attach() {
-    ensure_fixtures();
+    ensure_inject_artifacts();
 
     let content_dir = tmp("content");
     let state_dir = tmp("state");

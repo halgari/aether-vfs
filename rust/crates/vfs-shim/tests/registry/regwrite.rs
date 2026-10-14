@@ -697,42 +697,62 @@ fn a_dead_director_fails_writes_and_leaves_the_real_key() {
     assert!(!f.really_exists("DeadNew"));
 }
 
-/// Value names are not object names: an odd `Length` is read with its last byte dropped (what
-/// Wine's server does), and only a NULL buffer with a length is refused
+/// Value names are not object names, and an odd `Length` follows the host: Windows refuses it
+/// (`STATUS_INVALID_PARAMETER`, seen on 26H2 build 26300), Wine's server reads it with its last
+/// byte dropped. The overlay answers as the real call does on the same host, so a key it passes
+/// through and a key it serves agree. A NULL buffer with a length is refused on both
 /// (`STATUS_ACCESS_VIOLATION`).
 #[test]
-fn an_odd_value_name_is_truncated_and_a_null_buffer_with_a_length_is_refused() {
+fn an_odd_value_name_follows_the_host_and_a_null_buffer_with_a_length_is_refused() {
     isolate!();
     let (_g, f) = fixture();
     let (st, h) = f.open("Names", NT_KEY_READ | NT_KEY_SET_VALUE);
     assert_eq!(st, STATUS_SUCCESS);
+    let wine = vfs_shim::host_is_wine();
+    let odd_status = if wine {
+        STATUS_SUCCESS
+    } else {
+        STATUS_INVALID_PARAMETER
+    };
     let raw = |length: u16, buffer: *const u16| UnicodeString {
         length,
         maximum_length: length,
         buffer,
     };
-    // "origx" read as 9 bytes is "orig": the existing value.
+    // "origx" read as 9 bytes is "orig", the existing value, where the host reads it at all.
     let chars: Vec<u16> = "origx".encode_utf16().collect();
-    let odd = raw(9, chars.as_ptr());
-    let mut buf = vec![0u64; 64];
-    let mut ret = 0u32;
-    let st = unsafe {
-        NtQueryValueKey(
-            h,
-            &odd,
-            KEY_VALUE_PARTIAL_INFORMATION,
-            buf.as_mut_ptr().cast(),
-            512,
-            &mut ret,
-        )
+    let query_odd = |h| {
+        let odd = raw(9, chars.as_ptr());
+        let mut buf = vec![0u64; 64];
+        let mut ret = 0u32;
+        unsafe {
+            NtQueryValueKey(
+                h,
+                &odd,
+                KEY_VALUE_PARTIAL_INFORMATION,
+                buf.as_mut_ptr().cast(),
+                512,
+                &mut ret,
+            )
+        }
     };
-    assert_eq!(st, STATUS_SUCCESS, "an odd Length reads as the even prefix");
-    // A set through an odd name writes the even prefix's name.
+    assert_eq!(query_odd(h), odd_status, "a key the overlay passes through");
+    // A set is the overlay's own answer: through an odd name, the even prefix's name on Wine.
     let newv: Vec<u16> = "newoddx".encode_utf16().collect();
     let odd_new = raw(13, newv.as_ptr());
     let st = unsafe { NtSetValueKey(h, &odd_new, 0, REG_DWORD, 5u32.to_le_bytes().as_ptr(), 4) };
-    assert_eq!(st, STATUS_SUCCESS);
-    assert_eq!(query_dword(h, "newodd"), Ok(5));
+    assert_eq!(st, odd_status, "a set through an odd name");
+    if wine {
+        assert_eq!(query_dword(h, "newodd"), Ok(5));
+    } else {
+        assert!(
+            query_dword(h, "newodd").is_err(),
+            "a refused set writes nothing"
+        );
+    }
+    // With a value in the overlay the key is served by it, and answers as the host does.
+    regclient::set_value(&f.canon("Names"), "seed", REG_DWORD, &1u32.to_le_bytes()).unwrap();
+    assert_eq!(query_odd(h), odd_status, "a key the overlay serves");
     // A NULL buffer with a length is a bad pointer.
     let null_with_length = raw(2, std::ptr::null());
     let st = unsafe {

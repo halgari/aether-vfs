@@ -188,7 +188,7 @@ impl Catalog {
         if durable {
             let _ = self
                 .unflushed
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                .try_update(Ordering::AcqRel, Ordering::Acquire, |n| {
                     Some(n.saturating_sub(covered))
                 });
         } else {

@@ -9,6 +9,7 @@ use vfs_proton::{
     layout::Root as ProtonRoot,
     prefix::{Prefix, PrefixLock},
     steam::SteamSide,
+    WineHost,
 };
 
 #[cfg(doc)]
@@ -18,12 +19,12 @@ use crate::session::LaunchExit;
 use crate::session::{LaunchOpts, Session};
 
 /// An anonymous Wine prefix a session booted: its id under `home`'s
-/// `sessions/`, and the runtime whose `wineserver` serves it.
+/// `sessions/`, and the Wine host whose `wineserver` serves it.
 #[cfg(unix)]
 pub(super) struct AnonPrefix {
     pub(super) id: String,
     pub(super) home: ProtonRoot,
-    pub(super) runtime: PathBuf,
+    pub(super) host: WineHost,
     /// Where the prefix is under `home` for the session's `PrefixInit`.
     pub(super) prefix_dir: PathBuf,
 }
@@ -71,7 +72,12 @@ pub struct LaunchStopper(pub(super) Arc<StopInner>);
 #[derive(Debug)]
 pub(super) struct StopInner {
     pub(super) prefix: Prefix,
-    pub(super) runtime: PathBuf,
+    pub(super) host: WineHost,
+    /// For a shared prefix ([`Session::set_prefix_shared`]), the launch's
+    /// own processes: the launch is these and `wine_pid`, not the prefix.
+    pub(super) shared: Option<vfs_proton::launch::LaunchProcesses>,
+    /// The `wine` process running the injector.
+    pub(super) wine_pid: u32,
     pub(super) requested: std::sync::atomic::AtomicBool,
     /// Set once this launch has been reaped — by [`LaunchHandle::conclude`]
     /// or its `Drop` — **before** `_prefix_lock` releases. A stopper kept
@@ -89,6 +95,11 @@ pub(super) struct StopInner {
 /// prefix's `wineserver` before killing it.
 #[cfg(unix)]
 const STOP_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// How often a shared-prefix launch's own processes are looked for while it
+/// is waited on.
+#[cfg(unix)]
+const OWN_POLL: std::time::Duration = std::time::Duration::from_millis(250);
 
 #[cfg(unix)]
 impl LaunchStopper {
@@ -119,13 +130,30 @@ impl LaunchStopper {
         self.0
             .requested
             .store(true, std::sync::atomic::Ordering::SeqCst);
-        let result = self
-            .0
-            .prefix
-            .stop_wineserver(&self.0.runtime)
-            .map_err(|e| format!("stop: {e}"));
+        let result = match &self.0.shared {
+            // The prefix is not the launch's to stop: its own processes are.
+            Some(procs) => {
+                self.signal_own(procs, vfs_unix::Signal::Term);
+                Ok(())
+            }
+            None => self
+                .0
+                .prefix
+                .stop_wineserver(&self.0.host)
+                .map_err(|e| format!("stop: {e}")),
+        };
         drop(ended);
         result
+    }
+
+    /// Sends `signal` to `wine` and every process of a shared-prefix launch.
+    /// A Wine process ends on its own signal without taking its prefix's
+    /// `wineserver`, or anything else in the prefix, with it.
+    fn signal_own(&self, procs: &vfs_proton::launch::LaunchProcesses, signal: vfs_unix::Signal) {
+        vfs_unix::signal(self.0.wine_pid, signal);
+        for pid in procs.running() {
+            vfs_unix::signal(pid, signal);
+        }
     }
 
     /// Whether [`LaunchStopper::stop`] has been called.
@@ -295,13 +323,23 @@ impl LaunchHandle {
     /// (`block`: waited for). A watch that cannot be started counts as quiet
     /// — there is then nothing to observe the prefix with, and holding the
     /// launch open forever would be worse than ending it with `wine`.
+    ///
+    /// In a shared prefix ([`Session::set_prefix_shared`]) the prefix is never
+    /// quiet while a Steam client runs there, so it is the launch's own
+    /// processes that must all have exited instead.
     fn prefix_quiet(&mut self, block: bool) -> Result<bool, String> {
+        if let Some(procs) = &self.stopper.0.shared {
+            while block && !procs.running().is_empty() {
+                std::thread::sleep(OWN_POLL);
+            }
+            return Ok(procs.running().is_empty());
+        }
         if self.quiet.is_none() {
             match self
                 .stopper
                 .0
                 .prefix
-                .spawn_wineserver_wait(&self.stopper.0.runtime)
+                .spawn_wineserver_wait(&self.stopper.0.host)
             {
                 Ok(watch) => self.quiet = Some(watch),
                 Err(_) => return Ok(true),
@@ -328,6 +366,9 @@ impl LaunchHandle {
         if let Some(watch) = &mut self.quiet {
             let _ = watch.kill();
             let _ = watch.wait();
+        }
+        if let Some(procs) = &self.stopper.0.shared {
+            self.stopper.signal_own(procs, vfs_unix::Signal::Kill);
         }
     }
 

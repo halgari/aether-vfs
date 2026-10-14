@@ -238,10 +238,9 @@ pub fn image_cache_name(vpath: &str, pe: &[u8]) -> String {
         path_hash = path_hash.wrapping_mul(0x1000_0000_01b3);
     }
     let mut content: u64 = 0x9e37_79b9_7f4a_7c15 ^ pe.len() as u64;
-    let words = pe.chunks_exact(8);
-    let rest = words.remainder();
+    let (words, rest) = pe.as_chunks::<8>();
     for w in words {
-        let v = u64::from_le_bytes(w.try_into().expect("8-byte chunk"));
+        let v = u64::from_le_bytes(*w);
         content = (content ^ v)
             .wrapping_mul(0xff51_afd7_ed55_8ccd)
             .rotate_left(29);

@@ -137,6 +137,9 @@ fn skyrim_pid(location: &str) -> Option<u32> {
             runtime and bin/build-windows artifacts"]
 fn vanilla_skyrim_runs_from_a_fully_virtual_root_under_proton() {
     const TEST: &str = "proton_skyrim::vanilla_skyrim_runs_from_a_fully_virtual_root_under_proton";
+    if support::not_on_this_wine_host(TEST) {
+        return;
+    }
     let Some(game) = std::env::var_os("VFS_TEST_SKYRIM_DIR").map(PathBuf::from) else {
         support::skip(
             TEST,

@@ -160,8 +160,10 @@ fn rd_units(b: &[u8], off: usize, len: usize) -> Option<Vec<u16>> {
     let bytes = b.get(off..off.checked_add(len)?)?;
     Some(
         bytes
-            .chunks_exact(2)
-            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&c| u16::from_le_bytes(c))
             .collect(),
     )
 }
@@ -402,7 +404,8 @@ fn node_of(p: &str) -> Result<Option<Node>, NTSTATUS> {
 }
 
 /// The caller's `UNICODE_STRING` as a value name: a NULL pointer is `STATUS_ACCESS_VIOLATION`,
-/// as is a NULL buffer with a length. An odd length drops its last byte (`ntbuf::value_name_units`).
+/// as is a NULL buffer with a length. An odd length follows the host (`ntbuf::value_name_units`):
+/// refused on Windows, its last byte dropped on Wine.
 unsafe fn read_us(us: *const UnicodeString) -> Result<String, NTSTATUS> {
     crate::ntbuf::value_name_units(us)?
         .map(String::from_utf16_lossy)

@@ -13,6 +13,32 @@ pub struct DepotId(pub u32);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ManifestId(pub u64);
 
+/// A depot's manifest on one branch, with what PICS says about who installs
+/// it: a client installs a depot whose `os_list` is empty or names its OS,
+/// and whose `language` is unset or the user's.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BranchDepot {
+    pub depot: DepotId,
+    pub manifest: ManifestId,
+    /// The depot's name in PICS, when it has one.
+    pub name: Option<String>,
+    /// `oslist`: `["windows"]`, `["macos", "linux"]`; empty is every OS.
+    pub os_list: Vec<String>,
+    /// `language` (`"english"`, `"german"`); `None` is every language.
+    pub language: Option<String>,
+}
+
+impl BranchDepot {
+    /// Whether a client on `os` (`"windows"`) in `language` installs it.
+    pub fn installed_for(&self, os: &str, language: &str) -> bool {
+        (self.os_list.is_empty() || self.os_list.iter().any(|o| o.eq_ignore_ascii_case(os)))
+            && self
+                .language
+                .as_deref()
+                .is_none_or(|l| l.is_empty() || l.eq_ignore_ascii_case(language))
+    }
+}
+
 /// A chunk's id: the SHA-1 of its decompressed content.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ChunkId(pub [u8; 20]);

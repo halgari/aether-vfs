@@ -242,21 +242,20 @@ mod tests {
         let rt = fake_runtime(&b);
         let h = nvidia_host(&b);
         let s = setup(&h, &rt).unwrap();
-        let to: Vec<_> = s
-            .copies
-            .iter()
-            .map(|c| c.to.to_string_lossy().into_owned())
-            .collect();
-        assert_eq!(
-            to,
-            [
-                "drive_c/windows/system32/nvapi64.dll",
-                "drive_c/windows/system32/nvofapi64.dll",
-                "drive_c/windows/syswow64/nvapi.dll",
-                "drive_c/windows/system32/_nvngx.dll",
-                "drive_c/windows/system32/nvngx.dll",
-            ]
-        );
+        // Compared as paths, not strings: on Windows `join` adds `\`, and
+        // `Path` equality is by component, so either separator matches.
+        let to: Vec<&Path> = s.copies.iter().map(|c| c.to.as_path()).collect();
+        let want: Vec<&Path> = [
+            "drive_c/windows/system32/nvapi64.dll",
+            "drive_c/windows/system32/nvofapi64.dll",
+            "drive_c/windows/syswow64/nvapi.dll",
+            "drive_c/windows/system32/_nvngx.dll",
+            "drive_c/windows/system32/nvngx.dll",
+        ]
+        .into_iter()
+        .map(Path::new)
+        .collect();
+        assert_eq!(to, want);
         let ngx = h.root.join("usr/lib/nvidia/wine");
         assert_eq!(s.ngx_dir.as_deref(), Some(ngx.as_path()));
         assert_eq!(

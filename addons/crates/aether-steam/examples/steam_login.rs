@@ -7,6 +7,10 @@
 //! ```
 //!
 //! Saves to (or, with `--check`, reads) the file `$AETHER_STEAM_LOGIN` names.
+//!
+//! With `$AETHER_STEAM_QR_SVG` set, each QR code is also written there as an
+//! SVG image (mode 0600: it is a live sign-in for the account), for a login
+//! run where the terminal is not in front of the person scanning.
 use aether_steam::{
     CodeKind, CredentialFile, GuardOffer, LoginConfig, LoginMethod, LoginPrompter, SessionConfig,
     SteamError, SteamSession, login_interactive,
@@ -66,6 +70,13 @@ impl LoginPrompter for Terminal {
         // let them. Only the rendered code (meant to be read by a camera,
         // not retyped) is shown.
         eprintln!("\nScan this with the Steam mobile app (Steam Guard > scan a QR code):\n\n{qr}");
+        if let Some(path) = std::env::var_os("AETHER_STEAM_QR_SVG") {
+            write_qr_svg(std::path::Path::new(&path), _url)?;
+            eprintln!(
+                "(also written to {})",
+                std::path::Path::new(&path).display()
+            );
+        }
         Ok(())
     }
 
@@ -141,6 +152,40 @@ impl LoginPrompter for Terminal {
             }
         }
     }
+}
+
+/// `url` as a QR code in an SVG image, black on white with a quiet zone,
+/// written to `path` with mode 0600 (replaced atomically).
+fn write_qr_svg(path: &std::path::Path, url: &str) -> io::Result<()> {
+    let code = qrcode::QrCode::new(url.as_bytes()).map_err(io::Error::other)?;
+    let width = code.width();
+    let quiet = 4;
+    let size = width + 2 * quiet;
+    let mut svg = format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {size} {size}\" \
+         width=\"{px}\" height=\"{px}\" shape-rendering=\"crispEdges\">\
+         <rect width=\"100%\" height=\"100%\" fill=\"#fff\"/><path fill=\"#000\" d=\"",
+        px = size * 10
+    );
+    for (i, c) in code.to_colors().iter().enumerate() {
+        if *c == qrcode::Color::Dark {
+            let (x, y) = (i % width + quiet, i / width + quiet);
+            svg.push_str(&format!("M{x} {y}h1v1h-1z"));
+        }
+    }
+    svg.push_str("\"/></svg>\n");
+    let tmp = path.with_extension("svg.tmp");
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&tmp)?;
+        f.write_all(svg.as_bytes())?;
+    }
+    std::fs::rename(tmp, path)
 }
 
 #[tokio::main]

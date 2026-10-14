@@ -5,7 +5,7 @@ use crate::cdn::{CdnServer, CdnTokenSource};
 use crate::cm::{Cm, Logon, Reply, Rpc, SessionConfig, SteamConnector};
 use crate::credentials::SteamCredentials;
 use crate::error::SteamError;
-use crate::ids::{AppId, DepotId, DepotKey, ManifestId};
+use crate::ids::{AppId, BranchDepot, DepotId, DepotKey, ManifestId};
 use crate::ticket::AppTicket;
 use std::future::Future;
 use std::pin::Pin;
@@ -155,6 +155,22 @@ impl SteamSession {
         app: AppId,
         branch: &str,
     ) -> Result<Vec<(DepotId, ManifestId)>, SteamError> {
+        Ok(self
+            .branch_depots(app, branch)
+            .await?
+            .into_iter()
+            .map(|d| (d.depot, d.manifest))
+            .collect())
+    }
+
+    /// [`Self::branch_manifests`] with each depot's OS list, language and
+    /// name, so a caller can pick what a client would install
+    /// ([`BranchDepot::installed_for`]). Works anonymously.
+    pub async fn branch_depots(
+        &self,
+        app: AppId,
+        branch: &str,
+    ) -> Result<Vec<BranchDepot>, SteamError> {
         let rpc = Rpc::BranchManifests {
             app,
             branch: branch.to_string(),

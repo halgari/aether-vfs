@@ -120,14 +120,7 @@ pub fn put_stat(
 /// Only the classes that are pure metadata are filled. Anything else under the root falls
 /// through, which is no worse than before the hook existed.
 pub fn by_name_info(class_raw: u32, buf: &mut [u8], is_dir: bool, size: u64) -> Option<usize> {
-    let need = match class_raw {
-        CLASS_BASIC => BASIC_LEN,
-        CLASS_STANDARD => STANDARD_LEN,
-        CLASS_NETWORK_OPEN => NETWORK_OPEN_LEN,
-        CLASS_STAT => STAT_LEN,
-        CLASS_STAT_BASIC => STAT_BASIC_LEN,
-        _ => return None,
-    };
+    let need = by_name_info_len(class_raw)?;
     let buf = buf.get_mut(..need)?;
     buf.fill(0);
     let attrs = attributes(is_dir);
@@ -138,6 +131,19 @@ pub fn by_name_info(class_raw: u32, buf: &mut [u8], is_dir: bool, size: u64) -> 
         _ => put_stat(buf, 0, 0, size, attrs, 0),
     }
     Some(need)
+}
+
+/// The length of the structure [`by_name_info`] writes for `class_raw`, or
+/// `None` for a class it does not answer.
+pub fn by_name_info_len(class_raw: u32) -> Option<usize> {
+    Some(match class_raw {
+        CLASS_BASIC => BASIC_LEN,
+        CLASS_STANDARD => STANDARD_LEN,
+        CLASS_NETWORK_OPEN => NETWORK_OPEN_LEN,
+        CLASS_STAT => STAT_LEN,
+        CLASS_STAT_BASIC => STAT_BASIC_LEN,
+        _ => return None,
+    })
 }
 
 /// The fixed prefix of `FILE_ALL_INFORMATION` (100 bytes), the trailing name left empty:

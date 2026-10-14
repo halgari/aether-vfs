@@ -129,10 +129,21 @@ unsafe fn serve_dir_query(
     file_name: *const UnicodeString,
     passthrough: &dyn Fn() -> NTSTATUS,
 ) -> NTSTATUS {
-    // Unknown info class -> let the OS handle it verbatim.
+    // Unknown info class -> let the OS handle it verbatim. Recorded, because
+    // on a synthetic handle the OS answer is `STATUS_INVALID_HANDLE` and the
+    // directory looks empty: that is how Wine's class 63 went unnoticed.
     let class = match DirInfoClass::from_u32(class_raw) {
         Some(c) => c,
-        None => return passthrough(),
+        None => {
+            crate::hookstats::note_readdir(
+                &format!("<unmarshalled-dir-info-class-{class_raw}>"),
+                // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+                unsafe { wildcard_of(file_name) }.ok().flatten().as_deref(),
+                0,
+                crate::hookstats::ReadDirSource::Os,
+            );
+            return passthrough();
+        }
     };
     let key = handle as isize;
 

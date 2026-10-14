@@ -1,7 +1,8 @@
-// Builds its vpaths with the same `RootMap` the shim uses, which is Windows-only
-// — the point of the test is that both sides of the *ring* fold identically, and
-// the ring is the Windows transport.
-#![cfg(windows)]
+// The ring tests build their vpaths with the same `RootMap` the shim uses,
+// which is Windows-only — the point is that both sides of the *ring* fold
+// identically, and the ring is the Windows transport. The layered-merge test
+// needs no `RootMap` and runs everywhere: it was Windows-only once, and a merge
+// rule change (T21) left its assertion stale where no Linux run could see it.
 
 //! One fold, both sides of the ring.
 //!
@@ -26,20 +27,29 @@
 //! tests of `fold`; swapping `fold` for `to_ascii_lowercase` anywhere below the
 //! ring makes them fail.
 
-use std::path::{Path, PathBuf};
+#[cfg(windows)]
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 
-use vfs_compose::{DiskProvider, LayeredProvider, MountGraph};
+#[cfg(windows)]
+use vfs_compose::MountGraph;
+use vfs_compose::{DiskProvider, LayeredProvider};
 use vfs_provider::{Provider, VPath, OPEN_READ};
+#[cfg(windows)]
 use vfs_redirect::{RootMap, VolumeMap};
+#[cfg(windows)]
 use vfs_testkit::zip::write_stored_zip;
+#[cfg(windows)]
 use vfs_zip::ZipProvider;
 
 /// A directory component whose case only Unicode folds: `Ü`/`ü` and `Б`/`б`
 /// are both invisible to `to_ascii_lowercase`.
 const UPPER_DIR: &str = "ÜBERМОД";
 const LOWER_DIR: &str = "überмод";
+#[cfg(windows)]
 const FILE: &str = "a.esp";
+#[cfg(windows)]
 const BYTES: &[u8] = b"the non-ascii-cased mod's real bytes";
 
 fn scratch(tag: &str) -> PathBuf {
@@ -53,6 +63,7 @@ fn scratch(tag: &str) -> PathBuf {
 /// `RootMap` the shim's `FuseClient::vpath_under_root` uses — not by
 /// lowercasing a string here, which would beg the question this file exists to
 /// ask.
+#[cfg(windows)]
 fn vpath_from_the_shim(root: &Path, abs: &Path) -> String {
     let map = RootMap::new(&root.to_string_lossy(), VolumeMap::empty()).unwrap();
     let nt = format!(r"\??\{}", abs.to_string_lossy());
@@ -77,6 +88,7 @@ fn read_all(p: &dyn Provider, vpath: &str) -> Vec<u8> {
 
 /// A zip entry under a non-ASCII-cased directory, addressed by the folded
 /// vpath the shim actually emits.
+#[cfg(windows)]
 #[test]
 fn a_zip_entry_under_a_non_ascii_cased_directory_resolves_from_a_shim_folded_vpath() {
     let dir = scratch("zip");
@@ -114,6 +126,7 @@ fn a_zip_entry_under_a_non_ascii_cased_directory_resolves_from_a_shim_folded_vpa
 /// A mount configured at a non-ASCII-cased prefix, queried with the folded
 /// vpath. `MountGraph::strip_prefix` compares the as-authored prefix against
 /// the folded query.
+#[cfg(windows)]
 #[test]
 fn a_mount_prefixed_with_a_non_ascii_cased_component_matches_a_shim_folded_vpath() {
     let dir = scratch("mount");
@@ -159,8 +172,14 @@ fn a_mount_prefixed_with_a_non_ascii_cased_component_matches_a_shim_folded_vpath
 
 /// Two layers each contributing the same file under a non-ASCII-cased name,
 /// spelled with different case. The merge map must collapse them to one entry
-/// with the top layer winning — the same job `to_ascii_lowercase` silently
-/// stopped doing for these names.
+/// — the job `to_ascii_lowercase` silently stopped doing for these names — and
+/// that entry must follow the layered merge rule (`merge_upper_entry`): the top
+/// layer's entry is the live one (its size, its bytes), while a name both
+/// layers have keeps the bottom layer's spelling.
+///
+/// The two spellings live in two separate directories, so a case-insensitive
+/// host filesystem (NTFS) never sees them collide: each `DiskProvider` lists
+/// exactly the spelling written into it, on Windows and on Linux alike.
 #[test]
 fn layered_readdir_collapses_two_case_spellings_of_a_non_ascii_name() {
     let dir = scratch("layered");
@@ -170,8 +189,10 @@ fn layered_readdir_collapses_two_case_spellings_of_a_non_ascii_name() {
     std::fs::create_dir_all(&top_dir).unwrap();
     let upper_file = format!("{UPPER_DIR}.esp");
     let lower_file = format!("{LOWER_DIR}.esp");
-    std::fs::write(bottom_dir.join(&upper_file), b"FROM-BOTTOM").unwrap();
-    std::fs::write(top_dir.join(&lower_file), b"FROM-TOP").unwrap();
+    const BOTTOM: &[u8] = b"FROM-BOTTOM";
+    const TOP: &[u8] = b"FROM-TOP";
+    std::fs::write(bottom_dir.join(&upper_file), BOTTOM).unwrap();
+    std::fs::write(top_dir.join(&lower_file), TOP).unwrap();
 
     let layered = LayeredProvider::new(
         Arc::new(DiskProvider::new(&top_dir)) as Arc<dyn Provider>,
@@ -179,10 +200,9 @@ fn layered_readdir_collapses_two_case_spellings_of_a_non_ascii_name() {
     );
 
     let entries = layered.readdir(VPath::at_default("")).unwrap();
-    let matching: Vec<&str> = entries
+    let matching: Vec<_> = entries
         .iter()
-        .map(|e| e.name.as_str())
-        .filter(|n| n.to_lowercase() == lower_file)
+        .filter(|e| e.name.to_lowercase() == lower_file)
         .collect();
     assert_eq!(
         matching.len(),
@@ -190,9 +210,31 @@ fn layered_readdir_collapses_two_case_spellings_of_a_non_ascii_name() {
         "two case spellings of one Unicode name must merge to a single entry, got {entries:?}"
     );
     assert_eq!(
-        matching[0], lower_file,
-        "the top layer's spelling must win the merge"
+        matching[0].name, upper_file,
+        "a name both layers have keeps the bottom layer's spelling"
     );
+    assert_eq!(
+        matching[0].stat.size,
+        TOP.len() as u64,
+        "the merged entry must be the top layer's, got {entries:?}"
+    );
+
+    // The single-name form of the rule agrees with the listing, whichever
+    // spelling asks.
+    for q in [&upper_file, &lower_file] {
+        assert_eq!(
+            layered
+                .stored_name(VPath::at_default(q))
+                .unwrap()
+                .as_deref(),
+            Some(upper_file.as_str()),
+            "stored_name({q}) must match the merged listing"
+        );
+    }
+
+    // And the bytes behind either spelling are the top layer's.
+    assert_eq!(read_all(&layered, &upper_file), TOP);
+    assert_eq!(read_all(&layered, &lower_file), TOP);
 
     let _ = std::fs::remove_dir_all(&dir);
 }

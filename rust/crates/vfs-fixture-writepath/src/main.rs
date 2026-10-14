@@ -268,21 +268,45 @@ fn main() {
 
     // The shim's hook-stats report is a periodic sample, not an exit dump —
     // nothing flushes it when a process exits, so any open recorded after the
-    // reporter's last tick is invisible to a reader of the report file. A real
-    // game session runs for minutes and this never matters, but this fixture's
-    // last routed opens (the CREATE_NEW pair above) land microseconds before
-    // exit, well inside one tick's window. Outlive at least one full tick so
-    // the reporter has a chance to observe the fixture's final state before
-    // the process disappears. Derived from the same interval the harness
-    // configures (`VFS_SHIM_STATS_INTERVAL_MS`) rather than a fixed number, so
-    // this stays correct if that interval ever changes.
-    let interval_ms: u64 = std::env::var(vfs_env::SHIM_STATS_INTERVAL_MS)
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(250);
-    std::thread::sleep(Duration::from_millis(interval_ms.saturating_mul(2)));
+    // reporter's last tick is invisible to a reader of the report file. This
+    // fixture's last routed opens (the CREATE_NEW pair above) land just before
+    // exit, so it stays alive until the report provably covers them.
+    wait_for_a_report_covering_now();
 
     exit(0);
+}
+
+/// Return once the shim has written a hook-stats report whose snapshot was
+/// taken after this call began, or at once when no report is configured.
+///
+/// It used to sleep two report intervals (10 ms in the harness) and hope a
+/// tick fell inside. Windows rounds a 5 ms sleep up to its ~15.6 ms timer
+/// tick, and on a loaded machine the reporter thread can be starved for
+/// longer, so the last opens were sometimes missing from the report and the
+/// harness's shim/director open-count reconciliation read a drift of -1.
+///
+/// The reporter renders, writes a temp file and renames it over the report,
+/// then sleeps. A report modified after `start` was *written* after it, but
+/// may have been *rendered* before it; the next rewrite after that one was
+/// rendered after it. So: wait for one modification after `start`, then for
+/// another. Bounded, so a reporter that never runs cannot hang the fixture —
+/// the harness then reports the drift with the report it has.
+fn wait_for_a_report_covering_now() {
+    let Ok(report) = std::env::var(vfs_env::SHIM_STATS_LOG) else {
+        return;
+    };
+    let start = std::time::SystemTime::now();
+    let modified = || std::fs::metadata(&report).and_then(|m| m.modified()).ok();
+    let give_up = std::time::Instant::now() + Duration::from_secs(10);
+    let mut first = None;
+    while std::time::Instant::now() < give_up {
+        match (first, modified()) {
+            (None, Some(m)) if m > start => first = Some(m),
+            (Some(f), Some(m)) if m != f => return,
+            _ => {}
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
 }
 
 /// Copy-on-write over read-only content, driven the way an application drives

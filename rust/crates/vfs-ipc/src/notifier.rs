@@ -144,14 +144,22 @@ mod tests {
     fn adaptive_spins_while_hot_rather_than_sleeping() {
         let n = AdaptiveNotifier;
         // A completion was just recorded, so the wait must return faster than
-        // even the 100us sleep floor — proving it took the spin path.
-        n.notify_client(0);
-        let t = std::time::Instant::now();
-        n.wait_server();
+        // even the 100us sleep floor — proving it took the spin path. The best
+        // of a few tries: a thread preempted between the two calls, as a
+        // loaded box does, overruns the window and sleeps, but a sleep never
+        // comes in under the floor, so one fast try is proof enough.
+        let best = (0..5)
+            .map(|_| {
+                n.notify_client(0);
+                let t = std::time::Instant::now();
+                n.wait_server();
+                t.elapsed()
+            })
+            .min()
+            .unwrap();
         assert!(
-            t.elapsed() < core::time::Duration::from_micros(100),
-            "a hot wait must spin, not sleep: took {:?}",
-            t.elapsed()
+            best < core::time::Duration::from_micros(100),
+            "a hot wait must spin, not sleep: took {best:?}"
         );
     }
 

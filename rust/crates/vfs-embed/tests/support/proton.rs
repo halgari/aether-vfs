@@ -90,6 +90,19 @@ pub fn skip(test: &str, why: impl Display) {
     eprintln!("SKIP {test}: {why}");
 }
 
+/// Whether `test` exercises something only GE-Proton has (Proton's own prefix
+/// setup, its Steam bridge, NVAPI) on a host whose Wine is not Proton — macOS,
+/// which runs CrossOver. Prints `SKIP` and returns true there; the caller then
+/// returns. Not a missing prerequisite, so `VFS_TEST_REQUIRE_ALL` does not
+/// make it a failure.
+pub fn not_on_this_wine_host(test: &str) -> bool {
+    if cfg!(target_os = "macos") {
+        eprintln!("SKIP {test}: needs GE-Proton, and this macOS host runs CrossOver");
+        return true;
+    }
+    false
+}
+
 // ---------------------------------------------------------------------------
 // Windows artefacts
 // ---------------------------------------------------------------------------
@@ -254,7 +267,21 @@ pub fn throwaway_home(group: &str) -> Result<PathBuf, String> {
 
 /// Make `home` an aether home whose `runtimes` holds one symlink to [`runtime_dir`], for a
 /// test that owns (and later removes) its home.
+///
+/// macOS: the Wine host is CrossOver, which the session finds by itself
+/// (`VFS_CROSSOVER_APP`, else `/Applications`), so the home holds no runtime
+/// and only CrossOver's presence is checked.
 pub fn home_in(home: &Path) -> Result<PathBuf, String> {
+    if cfg!(target_os = "macos") {
+        vfs_proton::crossover::installed().map_err(|e| {
+            format!(
+                "{e}: install CrossOver, or set {} to its bundle",
+                vfs_proton::crossover::APP_ENV
+            )
+        })?;
+        std::fs::create_dir_all(home).unwrap();
+        return Ok(home.to_path_buf());
+    }
     let runtime = runtime_dir()?;
     let runtimes = home.join("runtimes");
     std::fs::create_dir_all(&runtimes).unwrap();

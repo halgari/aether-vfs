@@ -1,4 +1,5 @@
-//! File-backed shared memory via `mmap`. All libc FFI is confined here.
+//! File-backed shared memory via `mmap`. All libc FFI is confined to this
+//! crate: here and in `process`.
 
 use std::fs::OpenOptions;
 use std::io;

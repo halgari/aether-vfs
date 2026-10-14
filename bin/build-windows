@@ -98,7 +98,8 @@ export XWIN_ACCEPT_LICENSE=1
 # `CFLAGS_x86_64_pc_windows_msvc` itself, and cc-rs reads both.
 # Bash cannot export a hyphenated name, so it goes in through `env`.
 cross=(env "CFLAGS_x86_64-pc-windows-msvc=-Wno-error=implicit-function-declaration")
-"${cross[@]}" cargo xwin build "${flags[@]}" --target "$target" \
+# `${flags[@]+…}`: macOS's bash 3.2 calls an empty array unbound under `set -u`.
+"${cross[@]}" cargo xwin build ${flags[@]+"${flags[@]}"} --target "$target" \
   -p vfs-inject -p vfs-shim-dll -p vfs-fixture-read -p vfs-fixture-steam \
   -p vfs-fixture-nvapi -p vfs-fixture-registry
 

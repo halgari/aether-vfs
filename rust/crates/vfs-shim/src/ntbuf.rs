@@ -20,7 +20,7 @@ use windows_sys::Win32::Foundation::NTSTATUS;
 
 use crate::ntdef::{
     ObjectAttributes, UnicodeString, OBJ_CASE_INSENSITIVE, STATUS_ACCESS_VIOLATION,
-    STATUS_OBJECT_NAME_INVALID,
+    STATUS_INVALID_PARAMETER, STATUS_OBJECT_NAME_INVALID,
 };
 use vfs_redirect::{counted_units, utf16_to_string, CountedErr};
 
@@ -57,17 +57,59 @@ pub(crate) unsafe fn us_string(us: *const UnicodeString) -> Result<Option<String
     Ok(us_units(us)?.map(utf16_to_string))
 }
 
-/// A registry *value* name as UTF-16 units. Unlike an object name, an odd `Length` is read with
-/// its last byte dropped (Wine's server rounds it down, `namelen / 2 * 2`); NT is not shown to
-/// reject it. The other rules of [`us_units`] apply.
+/// Whether this process's ntdll is Wine's: it exports `wine_get_version`. Read once.
+pub(crate) fn host_is_wine() -> bool {
+    static WINE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *WINE.get_or_init(|| {
+        // SAFETY: both names are NUL-terminated; a missing module or export is a
+        // null return, not a fault.
+        unsafe {
+            let ntdll = windows_sys::Win32::System::LibraryLoader::GetModuleHandleA(
+                c"ntdll.dll".as_ptr().cast(),
+            );
+            !ntdll.is_null()
+                && windows_sys::Win32::System::LibraryLoader::GetProcAddress(
+                    ntdll,
+                    c"wine_get_version".as_ptr().cast(),
+                )
+                .is_some()
+        }
+    })
+}
+
+/// A registry *value* name as UTF-16 units, by the host's rule for an odd `Length`: Windows
+/// refuses it with `STATUS_INVALID_PARAMETER` (`NtQueryValueKey`, `NtSetValueKey` and
+/// `NtDeleteValueKey` alike, checked on 26H2 build 26300), while Wine's server reads it with its
+/// last byte dropped (`namelen / 2 * 2`). The overlay answers as the real call would on the same
+/// host. The other rules of [`us_units`] apply.
 ///
 /// # Safety
 /// As [`us_units`].
 pub(crate) unsafe fn value_name_units<'a>(
     us: *const UnicodeString,
 ) -> Result<Option<&'a [u16]>, NTSTATUS> {
+    value_name_units_as(us, host_is_wine())
+}
+
+/// [`value_name_units`] with the host's rule given: `wine` rounds an odd `Length` down, otherwise
+/// it is `STATUS_INVALID_PARAMETER`.
+///
+/// # Safety
+/// As [`us_units`].
+pub(crate) unsafe fn value_name_units_as<'a>(
+    us: *const UnicodeString,
+    wine: bool,
+) -> Result<Option<&'a [u16]>, NTSTATUS> {
     if us.is_null() {
         return Ok(None);
+    }
+    // Windows checks the buffer first: a NULL one with any length is an access violation.
+    if !wine && (*us).length & 1 != 0 {
+        return Err(if (*us).buffer.is_null() {
+            STATUS_ACCESS_VIOLATION
+        } else {
+            STATUS_INVALID_PARAMETER
+        });
     }
     let even = UnicodeString {
         length: (*us).length & !1,
@@ -237,17 +279,20 @@ mod tests {
     }
 
     #[test]
-    fn a_value_name_drops_an_odd_last_byte_but_keeps_the_other_rules() {
+    fn under_wine_a_value_name_drops_an_odd_last_byte_but_keeps_the_other_rules() {
         let mut w: Vec<u16> = "abc".encode_utf16().collect();
         let odd = us_of(&mut w, 5);
-        assert_eq!(unsafe { value_name_units(&odd) }, Ok(Some(&w[..2])));
+        assert_eq!(
+            unsafe { value_name_units_as(&odd, true) },
+            Ok(Some(&w[..2]))
+        );
         let null_len = UnicodeString {
             length: 2,
             maximum_length: 2,
             buffer: core::ptr::null_mut(),
         };
         assert_eq!(
-            unsafe { value_name_units(&null_len) },
+            unsafe { value_name_units_as(&null_len, true) },
             Err(STATUS_ACCESS_VIOLATION)
         );
         // One stray byte and nothing else is the empty name, even without a buffer.
@@ -256,8 +301,47 @@ mod tests {
             maximum_length: 1,
             buffer: core::ptr::null_mut(),
         };
-        assert_eq!(unsafe { value_name_units(&one) }, Ok(Some(&[][..])));
-        assert_eq!(unsafe { value_name_units(core::ptr::null()) }, Ok(None));
+        assert_eq!(
+            unsafe { value_name_units_as(&one, true) },
+            Ok(Some(&[][..]))
+        );
+        assert_eq!(
+            unsafe { value_name_units_as(core::ptr::null(), true) },
+            Ok(None)
+        );
+    }
+
+    /// What `NtQueryValueKey` answers on Windows 11 26H2 (build 26300) for the same names.
+    #[test]
+    fn on_windows_an_odd_value_name_is_an_invalid_parameter() {
+        let mut w: Vec<u16> = "abc".encode_utf16().collect();
+        let odd = us_of(&mut w, 5);
+        assert_eq!(
+            unsafe { value_name_units_as(&odd, false) },
+            Err(STATUS_INVALID_PARAMETER)
+        );
+        let even = us_of(&mut w, 4);
+        assert_eq!(
+            unsafe { value_name_units_as(&even, false) },
+            Ok(Some(&w[..2]))
+        );
+        // A NULL buffer is an access violation whatever the length's parity.
+        for length in [1, 2, 3] {
+            let null_len = UnicodeString {
+                length,
+                maximum_length: length,
+                buffer: core::ptr::null_mut(),
+            };
+            assert_eq!(
+                unsafe { value_name_units_as(&null_len, false) },
+                Err(STATUS_ACCESS_VIOLATION),
+                "length {length}"
+            );
+        }
+        assert_eq!(
+            unsafe { value_name_units_as(core::ptr::null(), false) },
+            Ok(None)
+        );
     }
 
     #[test]

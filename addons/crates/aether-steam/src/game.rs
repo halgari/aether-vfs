@@ -47,6 +47,22 @@ impl SteamGame {
         &self.depots
     }
 
+    /// Every file of the game once, as [`Self::open_file`] resolves it: a
+    /// path in more than one depot comes from the earliest. With the depot
+    /// it comes from.
+    pub fn files(&self) -> Vec<(DepotId, &FileEntry)> {
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        for (m, _) in &self.depots {
+            for f in m.files() {
+                if seen.insert(crate::manifest::fold_path(&f.path)) {
+                    out.push((m.depot(), f));
+                }
+            }
+        }
+        out
+    }
+
     /// Where a Wabbajack `GameFile` path (backslashes, any case) lives.
     pub fn locate(&self, game_file: &str) -> Option<(DepotId, &FileEntry)> {
         self.depots
@@ -157,5 +173,28 @@ mod tests {
             game.open_file("Data\\Missing.esp"),
             Err(SteamError::FileNotFound(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn every_file_is_listed_once_from_the_depot_that_wins() {
+        let (_dir, content, _cdns) = setup().await;
+        let depots = [(DepotId(3), ManifestId(30)), (DepotId(1), ManifestId(10))];
+        let game = SteamGame::from_depots(&content, SKYRIM_SE, &depots)
+            .await
+            .unwrap();
+        let mut files: Vec<(u32, &str)> = game
+            .files()
+            .into_iter()
+            .map(|(d, f)| (d.0, f.path.as_str()))
+            .collect();
+        files.sort();
+        assert_eq!(
+            files,
+            [
+                (1, "SkyrimSE.exe"),
+                (3, "Data\\Skyrim.esm"),
+                (3, "shared.txt")
+            ]
+        );
     }
 }

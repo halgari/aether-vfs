@@ -112,8 +112,8 @@ fn done(r: Result<(), NTSTATUS>) -> Write {
     })
 }
 
-/// The caller's `UNICODE_STRING` as UTF-16 units: `Ok(None)` for a NULL pointer. An odd length drops
-/// its last byte, as the server reads it (`ntbuf::value_name_units`).
+/// The caller's `UNICODE_STRING` as UTF-16 units: `Ok(None)` for a NULL pointer. An odd length
+/// follows the host (`ntbuf::value_name_units`): refused on Windows, its last byte dropped on Wine.
 unsafe fn units<'a>(us: *const UnicodeString) -> Result<Option<&'a [u16]>, NTSTATUS> {
     crate::ntbuf::value_name_units(us)
 }

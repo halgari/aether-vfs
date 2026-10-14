@@ -4014,6 +4014,7 @@ dependencies = [
  "vfs-proton",
  "vfs-provider",
  "vfs-shim",
+ "vfs-unix",
 ]
 
 [[package]]
@@ -4063,6 +4064,7 @@ name = "vfs-proton"
 version = "0.1.0"
 dependencies = [
  "vfs-env",
+ "vfs-unix",
 ]
 
 [[package]]

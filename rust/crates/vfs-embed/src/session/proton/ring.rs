@@ -51,18 +51,15 @@ fn memory_fs_in(mountinfo: &str, dir: &Path) -> bool {
 /// Whether `dir` is this user's alone: owned by the user this process runs
 /// as, with no access for group or others.
 ///
-/// The effective uid is read as the owner of `/proc/self`, which the kernel
-/// reports as exactly that; this crate has no `libc` to ask with.
+/// The effective uid is asked of the kernel (`vfs_unix::effective_uid`), not
+/// read as the owner of `/proc/self`, which macOS does not have.
 #[cfg(unix)]
 fn is_private_dir(dir: &Path) -> bool {
     use std::os::unix::fs::MetadataExt;
-    let (Ok(d), Ok(me)) = (
-        std::fs::symlink_metadata(dir),
-        std::fs::metadata("/proc/self"),
-    ) else {
+    let Ok(d) = std::fs::symlink_metadata(dir) else {
         return false;
     };
-    d.is_dir() && d.uid() == me.uid() && d.mode() & 0o077 == 0
+    d.is_dir() && d.uid() == vfs_unix::effective_uid() && d.mode() & 0o077 == 0
 }
 
 /// Give the ring a home in memory, and make `named` a symlink to it.
@@ -203,8 +200,7 @@ mod ring_location_tests {
         }
         set(0o700);
         // Not ours: the root directory belongs to root (unless we are root).
-        use std::os::unix::fs::MetadataExt;
-        if std::fs::metadata("/proc/self").unwrap().uid() != 0 {
+        if vfs_unix::effective_uid() != 0 {
             assert!(!is_private_dir(Path::new("/")));
         }
         // A link to a private directory is not a directory of ours.

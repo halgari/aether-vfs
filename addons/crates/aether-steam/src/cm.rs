@@ -7,7 +7,7 @@
 use crate::cdn::CdnServer;
 use crate::credentials::SteamCredentials;
 use crate::error::SteamError;
-use crate::ids::{AppId, DepotId, DepotKey, ManifestId};
+use crate::ids::{AppId, BranchDepot, DepotId, DepotKey, ManifestId};
 use crate::ticket::{self, AppTicket};
 use prost::Message;
 use std::future::Future;
@@ -109,7 +109,7 @@ pub(crate) enum Reply {
     ManifestCode(u64),
     CdnServers(Vec<CdnServer>),
     CdnToken(Option<String>),
-    Manifests(Vec<(DepotId, ManifestId)>),
+    Manifests(Vec<BranchDepot>),
     Ticket(AppTicket),
     Owns(bool),
 }
@@ -511,7 +511,13 @@ impl CmConn for LoggedInConn {
                     .iter()
                     .filter_map(|dep| {
                         let m = dep.manifests.iter().find(|m| &m.branch == branch)?;
-                        Some((DepotId(dep.id.0), ManifestId(m.manifest_id.0)))
+                        Some(BranchDepot {
+                            depot: DepotId(dep.id.0),
+                            manifest: ManifestId(m.manifest_id.0),
+                            name: dep.name.clone(),
+                            os_list: dep.config.os_list.clone(),
+                            language: dep.config.language.clone(),
+                        })
                     })
                     .collect();
                 Ok(Reply::Manifests(list))

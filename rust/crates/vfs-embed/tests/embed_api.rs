@@ -19,6 +19,8 @@ use vfs_embed::{
 #[cfg(windows)]
 use vfs_embed::{DiskProvider, RootSources};
 
+mod support;
+
 /// A scratch directory holding one file, unique per test line.
 // Every caller is a test gated off unix (the live-ring tests, and root 0 as a
 // host directory), so the helper is gated with them.
@@ -355,6 +357,11 @@ fn declaring_root_zero_on_unix_sets_its_location_not_the_managed_root() {
 #[cfg(windows)]
 #[test]
 fn launching_a_relative_image_reports_which_of_the_three_ways_it_failed() {
+    // `launch` looks for the shim before it stages anything. On a cold tree
+    // nothing had built it yet when this binary ran (it sorts before every
+    // binary that did), and the first refusal read "vfs_shim_dll.dll not
+    // found" instead of the stager's.
+    support::artifacts::ensure_inject_artifacts();
     let content = dir("launch-content", &[("game.exe", b"MZ-not-really")]);
     let base = dir("launch-session", &[]);
 

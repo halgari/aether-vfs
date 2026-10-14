@@ -59,6 +59,13 @@ pub enum DirInfoClass {
     Names,           // 12 FILE_NAMES_INFORMATION
     IdBothDirectory, // 37 FILE_ID_BOTH_DIR_INFORMATION
     IdFullDirectory, // 38 FILE_ID_FULL_DIR_INFORMATION
+    /// 60 FILE_ID_EXTD_DIR_INFORMATION.
+    IdExtdDirectory,
+    /// 63 FILE_ID_EXTD_BOTH_DIR_INFORMATION — what Wine's `FindFirstFileW`
+    /// asks for (CrossOver 26). Left unmarshalled, the query fell through to
+    /// the real ntdll with a synthetic handle and every virtual directory
+    /// listed empty.
+    IdExtdBothDirectory,
 }
 
 impl DirInfoClass {
@@ -71,6 +78,8 @@ impl DirInfoClass {
             12 => DirInfoClass::Names,
             37 => DirInfoClass::IdBothDirectory,
             38 => DirInfoClass::IdFullDirectory,
+            60 => DirInfoClass::IdExtdDirectory,
+            63 => DirInfoClass::IdExtdBothDirectory,
             _ => return None,
         })
     }
@@ -84,6 +93,10 @@ impl DirInfoClass {
             DirInfoClass::IdFullDirectory => 80,
             DirInfoClass::BothDirectory => 94,
             DirInfoClass::IdBothDirectory => 104,
+            // EaSize 64, ReparsePointTag 68, FILE_ID_128 FileId 72..88.
+            DirInfoClass::IdExtdDirectory => 88,
+            // Then CCHAR ShortNameLength 88, WCHAR ShortName[12] 90..114.
+            DirInfoClass::IdExtdBothDirectory => 114,
         }
     }
 
@@ -354,5 +367,38 @@ mod tests {
         assert_eq!(DirInfoClass::from_u32(3), Some(DirInfoClass::BothDirectory));
         assert_eq!(DirInfoClass::from_u32(12), Some(DirInfoClass::Names));
         assert_eq!(DirInfoClass::from_u32(99), None);
+    }
+
+    #[test]
+    fn the_extended_id_classes_wine_asks_for_are_marshalled() {
+        assert_eq!(
+            DirInfoClass::from_u32(60),
+            Some(DirInfoClass::IdExtdDirectory)
+        );
+        assert_eq!(
+            DirInfoClass::from_u32(63),
+            Some(DirInfoClass::IdExtdBothDirectory)
+        );
+        assert_eq!(DirInfoClass::IdExtdDirectory.name_offset(), 88);
+        assert_eq!(DirInfoClass::IdExtdBothDirectory.name_offset(), 114);
+        for class in [
+            DirInfoClass::IdExtdDirectory,
+            DirInfoClass::IdExtdBothDirectory,
+        ] {
+            let mut buf = [0xffu8; 512];
+            let r = write_dir_info(class, &[ditem("SKSE64.dll", false, 1234)], &mut buf, true);
+            let name_off = class.name_offset();
+            assert_eq!((r.count, r.status), (1, DirStatus::Success));
+            assert_eq!(r.bytes, name_off + 20);
+            assert_eq!(ru32(&buf, 0, 60), 20, "FileNameLength");
+            assert_eq!(ri64(&buf, 0, 40), 1234, "EndOfFile");
+            assert_eq!(ru32(&buf, 0, 56), 0x80, "FILE_ATTRIBUTE_NORMAL");
+            assert!(buf[72..88].iter().all(|&b| b == 0), "FileId zeroed");
+            let name: Vec<u16> = buf[name_off..name_off + 20]
+                .chunks(2)
+                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .collect();
+            assert_eq!(String::from_utf16(&name).unwrap(), "SKSE64.dll");
+        }
     }
 }

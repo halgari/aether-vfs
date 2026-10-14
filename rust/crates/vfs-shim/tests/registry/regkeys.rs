@@ -38,6 +38,7 @@ const STATUS_UNSUCCESSFUL: i32 = 0xC000_0001u32 as i32;
 const STATUS_INVALID_HANDLE: i32 = 0xC000_0008u32 as i32;
 const STATUS_OBJECT_NAME_NOT_FOUND: i32 = 0xC000_0034u32 as i32;
 const STATUS_NOT_SUPPORTED: i32 = 0xC000_00BBu32 as i32;
+const STATUS_INVALID_PARAMETER: i32 = 0xC000_000Du32 as i32;
 const STATUS_BUFFER_OVERFLOW: i32 = 0x8000_0005u32 as i32;
 const STATUS_INFO_LENGTH_MISMATCH: i32 = 0xC000_0004u32 as i32;
 
@@ -713,8 +714,10 @@ fn a_failed_duplicate_with_close_source_drops_the_record() {
     let (_g, f) = fixture();
     let (_, r) = f.open("Untouched", NT_KEY_READ);
     assert!(registry_handle_path(r).is_some());
-    let mut d = 0isize;
-    // No target process: the duplication fails, and NT closes the source anyway.
+    let mut d = -1isize;
+    // No target process: nothing is duplicated, and NT closes the source. Windows answers this
+    // documented close-only call with success and a zeroed target handle (26H2 build 26300);
+    // Wine reports a failure. Either way the source, and so its record, is gone.
     let st = unsafe {
         NtDuplicateObject(
             CURRENT_PROCESS,
@@ -726,8 +729,39 @@ fn a_failed_duplicate_with_close_source_drops_the_record() {
             DUPLICATE_SAME_ACCESS | DUPLICATE_CLOSE_SOURCE,
         )
     };
-    assert!(st < 0, "{st:#x}");
+    if vfs_shim::host_is_wine() {
+        assert!(st < 0, "{st:#x}");
+    } else {
+        assert_eq!((st, d), (STATUS_SUCCESS, 0));
+    }
     assert_eq!(registry_handle_path(r), None);
+}
+
+/// The same close-only call on a synthetic handle, which the overlay answers itself: as Windows
+/// does for a real one (success, target zeroed, source closed), and without
+/// `DUPLICATE_CLOSE_SOURCE`, `STATUS_INVALID_PARAMETER` with the source kept.
+#[test]
+fn a_close_only_duplicate_of_a_synthetic_handle_answers_as_windows_does() {
+    isolate!();
+    let (_g, f) = fixture();
+    regclient::set_value(&f.canon("Dup"), "v", 4, &1u32.to_le_bytes()).unwrap();
+    let before = vfs_shim::registry_handle_counts();
+    let (_, s) = f.open("Dup", NT_KEY_READ);
+    assert!(is_synthetic_key_handle(s));
+    let dup = |options| {
+        let mut d = -1isize;
+        let st = unsafe { NtDuplicateObject(CURRENT_PROCESS, s, 0, &mut d, 0, 0, options) };
+        (st, d)
+    };
+    assert_eq!(dup(DUPLICATE_SAME_ACCESS), (STATUS_INVALID_PARAMETER, 0));
+    assert!(registry_handle_path(s).is_some(), "the source is kept");
+    assert_eq!(
+        dup(DUPLICATE_SAME_ACCESS | DUPLICATE_CLOSE_SOURCE),
+        (STATUS_SUCCESS, 0)
+    );
+    assert_eq!(registry_handle_path(s), None);
+    assert_eq!(close(s), STATUS_INVALID_HANDLE);
+    assert_eq!(vfs_shim::registry_handle_counts(), before);
 }
 
 /// The pattern a game's per-frame registry write makes through advapi32: open (or create) the
@@ -740,9 +774,18 @@ fn reg_close_key_releases_synthetic_handles() {
     isolate!();
     let (_g, f) = fixture();
     regclient::set_value(&f.canon("PerFrame"), "Seed", 4, &0u32.to_le_bytes()).unwrap();
-    let before = vfs_shim::registry_handle_counts();
     let sub = wide(&format!(r"{BASE}\PerFrame"));
     let name = wide("Frame");
+    // Windows' advapi32 opens `HKEY_CURRENT_USER`'s real key (`\Registry\User\<sid>`) on first
+    // use and keeps it for the life of the process: one pass-through handle, once, not one per
+    // frame. Use HKCU once before counting so the count sees only what the frames leave behind.
+    let mut warm: HKEY = std::ptr::null_mut();
+    assert_eq!(
+        unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, sub.as_ptr(), 0, KEY_SET_VALUE, &mut warm) },
+        0
+    );
+    assert_eq!(unsafe { RegCloseKey(warm) }, 0);
+    let before = vfs_shim::registry_handle_counts();
     for i in 0..500u32 {
         let mut k: HKEY = std::ptr::null_mut();
         let st = if i % 2 == 0 {

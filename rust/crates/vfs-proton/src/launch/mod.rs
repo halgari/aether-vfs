@@ -37,11 +37,14 @@ use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use crate::host::WineHost;
 use crate::runtime::verify_ge;
 use crate::steam::SteamSide;
 
 mod env;
 mod injector;
+mod procs;
+pub use procs::LaunchProcesses;
 
 use env::stale_env;
 pub use env::{
@@ -101,9 +104,10 @@ pub struct RingGeometry {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct WineLaunch {
-    /// The GE-Proton runtime directory (`…/GE-ProtonN-M-x86_64`). Verified
-    /// before launch and exported as `PROTONPATH`.
-    pub runtime: PathBuf,
+    /// The Wine install the launch runs under: a GE-Proton runtime
+    /// (verified as GE, exported as `PROTONPATH`) or CrossOver. Verified
+    /// before launch.
+    pub host: WineHost,
     /// The Wine prefix directory, exported as `WINEPREFIX`.
     pub prefix: PathBuf,
     /// Host path to `vfs-injector.exe`.
@@ -193,7 +197,7 @@ impl WineLaunch {
     /// [`SteamSide::Untouched`], no notes, no NVAPI, no registry layer. Set
     /// the public fields for the rest.
     pub fn new(
-        runtime: PathBuf,
+        host: impl Into<WineHost>,
         prefix: PathBuf,
         target: String,
         virtual_dir: String,
@@ -201,7 +205,7 @@ impl WineLaunch {
         ring: RingGeometry,
     ) -> WineLaunch {
         WineLaunch {
-            runtime,
+            host: host.into(),
             prefix,
             injector: files.injector,
             shim_dll: files.shim_dll,
@@ -238,6 +242,8 @@ pub enum LaunchError {
     /// anyway means launching on stock Proton, which is the failure this crate
     /// exists to prevent.
     NotGe(String),
+    /// The CrossOver install is not usable (missing, or missing a part).
+    Host(String),
     /// `wine` could not be started at all, or exited without an exit code
     /// (killed by a signal). Carries a description including the wine path.
     Spawn(String),
@@ -266,6 +272,7 @@ impl std::fmt::Display for LaunchError {
         match self {
             LaunchError::Io(e) => write!(f, "io error: {e}"),
             LaunchError::NotGe(s) => write!(f, "runtime is not GE-Proton: {s}"),
+            LaunchError::Host(s) => write!(f, "Wine host unusable: {s}"),
             LaunchError::Spawn(s) => write!(f, "could not run wine: {s}"),
             LaunchError::Geometry(s) => write!(f, "ring geometry is inconsistent: {s}"),
             LaunchError::NonZeroWine(c) => write!(
@@ -310,14 +317,15 @@ pub fn wine_binary(runtime: &Path) -> PathBuf {
 /// must not be rearranged to suit a caller: every permutation starts
 /// successfully and fails silently.
 pub fn command_line(l: &WineLaunch) -> (String, Vec<String>) {
-    let prog = wine_binary(&l.runtime).to_string_lossy().into_owned();
-    let mut argv = vec![
+    let prog = l.host.wine().to_string_lossy().into_owned();
+    let mut argv = l.host.prefix_args(&l.prefix);
+    argv.extend([
         l.injector.to_string_lossy().into_owned(),
         l.target.clone(),
         l.shim_dll.to_string_lossy().into_owned(),
         l.config_file.to_string_lossy().into_owned(),
         l.ready_file.to_string_lossy().into_owned(),
-    ];
+    ]);
     if !l.args.is_empty() {
         // The separator is optional for the parser but not for the target: an
         // argument that looks like a path would otherwise be indistinguishable
@@ -343,7 +351,14 @@ pub fn run(l: &WineLaunch) -> Result<i32, LaunchError> {
 /// [`run`]'s result.
 pub fn spawn(l: &WineLaunch) -> Result<std::process::Child, LaunchError> {
     check_extra_env(&l.extra_env)?;
-    verify_ge(&l.runtime).map_err(|e| LaunchError::NotGe(e.to_string()))?;
+    match &l.host {
+        WineHost::Proton(rt) => {
+            verify_ge(rt).map_err(|e| LaunchError::NotGe(e.to_string()))?;
+        }
+        WineHost::CrossOver(_) => {
+            l.host.verify().map_err(LaunchError::Host)?;
+        }
+    }
     check_geometry(l)?;
     // A report left by an earlier launch would be read as this one's.
     for stale in [
@@ -417,7 +432,7 @@ pub fn finish(l: &WineLaunch, status: std::process::ExitStatus) -> Result<i32, L
         Some(code) => Ok(code),
         None => Err(LaunchError::Spawn(format!(
             "{} exited without a code (signalled): {status}",
-            wine_binary(&l.runtime).display()
+            l.host.wine().display()
         ))),
     }
 }
@@ -693,7 +708,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("version"), "1700000000 proton-9.0-4\n").unwrap();
         let mut l = sample();
-        l.runtime = dir.clone();
+        l.host = dir.clone().into();
         // No wine exists under this directory, so reaching a spawn at all
         // would surface as `Spawn`; `NotGe` proves the gate ran first.
         match run(&l) {

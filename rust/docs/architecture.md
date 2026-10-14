@@ -866,8 +866,13 @@ OS, and the zip provider never learns about the host.
 ## 9. Known limitations
 
 - **Windows x64 guests only.** The game and the shim are Windows x64 code. A
-  Linux host runs them under GE-Proton's Wine (§3.10); there is no native Linux
-  game support, and no macOS host.
+  Linux host runs them under GE-Proton's Wine (§3.10), and a macOS host under
+  CrossOver's (`vfs_proton::WineHost::CrossOver`; x86_64 Wine under Rosetta on
+  Apple Silicon, the Director native); there is no native Linux or macOS game
+  support. GE-Proton's extras (its prefix setup, its bridge to a native Steam
+  client, NVAPI) have no CrossOver counterpart: a Steam-DRM'd game on macOS
+  needs Windows Steam running, signed in, in its own prefix, which is why
+  `Session::set_prefix_shared` exists.
 - **Stored zip entries only.** Deflate would defeat random access. Archives are
   expected to be repacked Stored.
 - **Router `readdir` is single-dispatch**, not the cross-route union the

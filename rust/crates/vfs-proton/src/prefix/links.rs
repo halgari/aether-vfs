@@ -23,24 +23,28 @@ fn make_symlink(_target: &Path, _link: &Path) -> io::Result<()> {
 ///
 /// Wine resolves `C:\Users` to `drive_c/users`; ext4 would happily create a
 /// second, differently-spelled `Users` beside it that Wine never looks in.
+///
+/// The name returned is always the one in the listing. A lookup of
+/// `dir/name` would not do: on a case-insensitive filesystem (APFS, NTFS) it
+/// succeeds for any spelling, and the caller's spelling is not the one on
+/// disk — the manifest, which records on-disk paths, would not recognise it.
 fn find_entry_ci(dir: &Path, name: &str) -> io::Result<Option<std::ffi::OsString>> {
-    match std::fs::symlink_metadata(dir.join(name)) {
-        Ok(_) => return Ok(Some(name.into())),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-        Err(e) => return Err(e),
-    }
     let entries = match std::fs::read_dir(dir) {
         Ok(it) => it,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e),
     };
+    let mut folded = None;
     for entry in entries {
         let found = entry?.file_name();
-        if found.to_str().is_some_and(|f| f.eq_ignore_ascii_case(name)) {
+        if found == name {
             return Ok(Some(found));
         }
+        if folded.is_none() && found.to_str().is_some_and(|f| f.eq_ignore_ascii_case(name)) {
+            folded = Some(found);
+        }
     }
-    Ok(None)
+    Ok(folded)
 }
 
 /// The file in a prefix directory listing every root link aether-vfs
@@ -286,8 +290,15 @@ mod tests {
             p.drive_c().join("users").join("steamuser").join("Saves")
         );
         assert_eq!(std::fs::read_link(&link).unwrap(), target);
-        assert!(
-            !p.drive_c().join("Users").exists(),
+        // The listing, not `exists()`: on a case-insensitive filesystem
+        // (APFS) `drive_c/Users` "exists" because `drive_c/users` does.
+        let names: Vec<_> = std::fs::read_dir(p.drive_c())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(
+            names,
+            ["users"],
             "an existing parent must be reused, not shadowed by a sibling spelled differently"
         );
         // Relinking under another spelling finds and replaces our own link.

@@ -52,5 +52,11 @@ vfs-env.workspace = true
 serde_json = { workspace = true, optional = true }
 clap = { workspace = true, features = ["derive"], optional = true }
 
+# Whether a process is alive and what it is called (the Steam client's pid
+# file), asked of the kernel rather than read from `/proc`, which macOS lacks.
+# Pure `libc`, no build script: it keeps the cross-check above working.
+[target.'cfg(unix)'.dependencies]
+vfs-unix.workspace = true
+
 [lints]
 workspace = true

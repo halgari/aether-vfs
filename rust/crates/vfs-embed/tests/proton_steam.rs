@@ -76,6 +76,9 @@ struct Probe {
 /// `SKIP` line, when this machine lacks the runtime, the artifacts, a Steam
 /// client or a `steam_api64.dll`.
 fn probe_session(test: &str, tag: &str, prefix: &str) -> Option<Probe> {
+    if support::not_on_this_wine_host(test) {
+        return None;
+    }
     let rig = support::rig(test, "steam", &[vfs_proton::artifacts::FIXTURE_STEAM])?;
     let client = match support::steam_client() {
         Ok(c) => c,

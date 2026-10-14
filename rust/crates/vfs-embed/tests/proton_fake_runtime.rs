@@ -36,7 +36,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use vfs_embed::{
-    DiskProvider, HelperStatus, LaunchExit, LaunchOpts, PrefixInit, Session, STOPPED_EXIT_CODE,
+    DiskProvider, HelperStatus, LaunchExit, LaunchOpts, PrefixInit, Session, WineHost,
+    STOPPED_EXIT_CODE,
 };
 
 const ROOT0: &str = r"C:\Games\Fake";
@@ -69,6 +70,17 @@ fn script(path: &Path, body: &str) {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
 
+/// Runs `s` under `home`'s fake GE-Proton. On Linux that is what the session
+/// finds by itself, and finding it is part of what these tests cover; on
+/// macOS the default Wine host is CrossOver, so the fake is named.
+fn use_fake_proton(s: &mut Session, home: &Path) {
+    if cfg!(target_os = "macos") {
+        s.set_wine_host(WineHost::Proton(
+            home.join("runtimes").join("GE-Proton99-1"),
+        ));
+    }
+}
+
 /// An aether home holding one fake runtime, `runtimes/GE-Proton99-1`.
 fn fake_home(tag: &str) -> PathBuf {
     let home = tmp(tag);
@@ -97,6 +109,13 @@ echo "$@" > "$WINEPREFIX/fake-wine.args"
 echo $$ > "$WINEPREFIX/fake-wine.pid"
 case "$FAKE_WINE_MODE" in
   sleep) exec sleep 30 ;;
+  shared)
+    # What a game looks like from the host under Wine: its Windows image
+    # path as argv[0], working in its root (C:\Games\Fake links there).
+    ( cd "$WINEPREFIX/drive_c/Games/Fake" && exec bash -c 'exec -a "C:\Games\Fake\game.exe" sleep 30' ) </dev/null >/dev/null 2>&1 &
+    echo $! > "$WINEPREFIX/fake-game.pid"
+    touch "$WINEPREFIX/fake-wine.exited"
+    exit 0 ;;
   fail) echo "target-exited:0xc0000135" > "$5.injector-error"; exit 3 ;;
   game)
     touch "$WINEPREFIX/fake-game.run"
@@ -143,6 +162,7 @@ fn wineserver_was_killed(pfx: &Path) -> bool {
 fn session(tag: &str, home: &Path) -> (Session, PathBuf, String) {
     let mut s = Session::new();
     s.set_home(home);
+    use_fake_proton(&mut s, home);
     s.set_root(tmp(&format!("{tag}-root")));
     s.set_state_dir(tmp(&format!("{tag}-state")));
     s.set_overlay(tmp(&format!("{tag}-overlay")));
@@ -329,12 +349,25 @@ struct FakeSteam {
 impl FakeSteam {
     fn start(tag: &str) -> Self {
         let dir = tmp(&format!("{tag}-fake-steam"));
-        // A script's process is named after the script, and `read` holds it
-        // on the pipe this keeps open.
+        // A process is named after the file it executes, so this is a copy
+        // of this test binary named `steam`, running only
+        // [`fake_steam_client`], which holds it on the pipe this keeps open.
+        // Not a script — macOS names that after its interpreter — nor a
+        // symlink, which macOS names after its target, nor a copy of a
+        // system binary such as `cat`, which macOS kills on launch from
+        // outside the system volume.
         let exe = dir.join("steam");
-        script(&exe, "read _");
+        std::fs::copy(std::env::current_exe().unwrap(), &exe).unwrap();
         let mut cmd = std::process::Command::new(&exe);
-        cmd.stdin(std::process::Stdio::piped());
+        cmd.args([
+            "--exact",
+            "fake_steam_client",
+            "--test-threads=1",
+            "--nocapture",
+        ])
+        .env(FAKE_STEAM, "1")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null());
         let child = spawn_retrying_busy(&mut cmd);
         let state = dir.join("state");
         std::fs::create_dir_all(&state).unwrap();
@@ -347,6 +380,18 @@ impl Drop for FakeSteam {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+}
+
+/// Set in [`FakeSteam`]'s process, and only there.
+const FAKE_STEAM: &str = "VFS_TEST_FAKE_STEAM_CLIENT";
+
+/// The body of [`FakeSteam`]'s process: wait for stdin to close. Does nothing
+/// in an ordinary test run.
+#[test]
+fn fake_steam_client() {
+    if std::env::var_os(FAKE_STEAM).is_some() {
+        let _ = std::io::copy(&mut std::io::stdin(), &mut std::io::sink());
     }
 }
 
@@ -615,6 +660,7 @@ fn a_second_launch_while_one_is_running_is_refused_before_staging_can_clobber_it
     let home = fake_home("second");
     let mut s = Session::new();
     s.set_home(&home);
+    use_fake_proton(&mut s, &home);
     s.set_root(tmp("second-root"));
     s.set_state_dir(tmp("second-state"));
     s.set_overlay(tmp("second-overlay"));
@@ -658,10 +704,7 @@ fn a_second_launch_while_one_is_running_is_refused_before_staging_can_clobber_it
 
     let e = s.launch(&opts(&shim, "ok", true)).unwrap_err();
     assert!(e.contains("already running"), "{e}");
-    assert!(
-        Path::new(&format!("/proc/{pid}")).exists(),
-        "the first launch is still running"
-    );
+    assert!(alive(pid), "the first launch is still running");
     assert!(
         staged.is_file(),
         "the refused second launch must not delete the running one's staging"
@@ -701,10 +744,7 @@ fn a_launch_handle_reports_its_end_and_stops_when_dropped() {
     assert_eq!(h.try_wait().unwrap(), None);
     let pid = h.pid();
     drop(h);
-    assert!(
-        !Path::new(&format!("/proc/{pid}")).exists(),
-        "dropping a running handle stops it"
-    );
+    assert!(!alive(pid), "dropping a running handle stops it");
 
     // Remove the stale pid file and wait for the *new* launch's own pid
     // before stopping it — otherwise `stop` could observe the old (already
@@ -765,7 +805,7 @@ fn launcher_exited(pfx: &Path) -> u32 {
 }
 
 fn alive(pid: u32) -> bool {
-    Path::new(&format!("/proc/{pid}")).exists()
+    vfs_unix::process_alive(pid)
 }
 
 fn wait_gone(pid: u32) {
@@ -896,6 +936,7 @@ fn a_kept_detached_handle_blocks_a_second_launch_and_is_stopped_by_stop_launch()
     let home = fake_home("kept");
     let mut s = Session::new();
     s.set_home(&home);
+    use_fake_proton(&mut s, &home);
     s.set_root(tmp("kept-root"));
     s.set_state_dir(tmp("kept-state"));
     s.set_overlay(tmp("kept-overlay"));
@@ -973,6 +1014,7 @@ fn prepare_prefix_sets_the_prefix_up_as_a_launch_would_without_serving() {
     let home = fake_home("prepare");
     let mut s = Session::new();
     s.set_home(&home);
+    use_fake_proton(&mut s, &home);
     s.set_state_dir(tmp("prepare-state"));
     s.set_prefix_name("fake").unwrap();
     s.set_prefix_init(PrefixInit::Proton {
@@ -995,6 +1037,9 @@ fn prepare_prefix_sets_the_prefix_up_as_a_launch_would_without_serving() {
     assert_eq!(s.prepare_prefix().unwrap(), pfx);
 }
 
+// Proton discovery is the default Wine host on Linux only; on macOS it is
+// CrossOver (`an_unusable_crossover_install_is_named`).
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn prepare_prefix_without_a_runtime_says_so_and_is_not_a_launch_error() {
     let home = tmp("prepare-none");
@@ -1006,6 +1051,7 @@ fn prepare_prefix_without_a_runtime_says_so_and_is_not_a_launch_error() {
     assert!(e.starts_with("no verified GE-Proton runtime under "), "{e}");
 }
 
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn only_a_launch_adds_the_install_hint_to_the_no_runtime_error() {
     let home = tmp("hint-none");
@@ -1018,4 +1064,243 @@ fn only_a_launch_adds_the_install_hint_to_the_no_runtime_error() {
     );
     let e = s.prepare_prefix().unwrap_err();
     assert!(!e.contains("vfs-proton install"), "{e}");
+}
+
+#[test]
+fn an_unusable_crossover_install_is_named() {
+    let home = tmp("cx-none");
+    let mut s = Session::new();
+    s.set_home(&home);
+    let cx = home.join("CrossOver.app");
+    s.set_wine_host(WineHost::CrossOver(cx.clone()));
+    s.set_state_dir(tmp("cx-none-state"));
+    s.set_prefix_name("fake").unwrap();
+    let e = s.prepare_prefix().unwrap_err();
+    assert!(
+        e.contains("CrossOver") && e.contains(&*cx.to_string_lossy()),
+        "{e}"
+    );
+    assert!(
+        !home.join("sessions").join("fake").exists(),
+        "nothing set up"
+    );
+}
+
+/// A fake CrossOver install under `home` (the `Contents/SharedSupport/CrossOver`
+/// directory): a `wine` front end that takes `--bottle <prefix> --no-convert`
+/// before the program and records itself into the bottle as the Proton fake
+/// does into `WINEPREFIX`; a `cxbottle` that refuses an existing directory, as
+/// the real one does; and the Proton fake's `wineserver`, which CrossOver's is.
+fn fake_crossover(home: &Path) -> PathBuf {
+    let cx = home.join("CrossOver.app/Contents/SharedSupport/CrossOver");
+    std::fs::create_dir_all(cx.join("lib/wine/x86_64-windows")).unwrap();
+    script(
+        &cx.join("bin/cxbottle"),
+        r#"echo "$@" >> "$CX_ROOT/cxbottle.calls"
+[ "$1" = --bottle ] || exit 2
+if [ -e "$2" ]; then echo "cxbottle:error: the '$2' bottle already exists"; exit 1; fi
+mkdir -p "$2/drive_c/windows/system32" "$2/dosdevices"
+ln -s ../drive_c "$2/dosdevices/c:"
+echo '[Bottle]' > "$2/cxbottle.conf""#,
+    );
+    script(
+        &cx.join("bin/wine"),
+        r#"[ "$1" = --bottle ] && [ "$3" = --no-convert ] || { echo "bad front-end argv: $*" >&2; exit 9; }
+b="$2"; shift 3
+env > "$b/fake-wine.env"
+echo "$@" > "$b/fake-wine.args"
+echo $$ > "$b/fake-wine.pid"
+case "$FAKE_WINE_MODE" in
+  sleep) exec sleep 30 ;;
+esac
+exit 0"#,
+    );
+    let proton_server = fake_home(&format!(
+        "{}-server",
+        home.file_name().unwrap().to_string_lossy()
+    ))
+    .join("runtimes/GE-Proton99-1/files/bin/wineserver");
+    std::fs::copy(proton_server, cx.join("bin/wineserver")).unwrap();
+    cx
+}
+
+/// A served session in `home` running under the fake CrossOver at `cx`, with a
+/// named prefix, root 0 at [`ROOT0`] holding `game.exe`, and placeholder
+/// artifacts. Returns the session, the prefix directory and the `shim_dll`.
+fn cx_session(tag: &str, home: &Path, cx: &Path) -> (Session, PathBuf, String) {
+    let mut s = Session::new();
+    s.set_home(home);
+    s.set_wine_host(WineHost::CrossOver(cx.to_path_buf()));
+    s.set_root(tmp(&format!("{tag}-root")));
+    s.set_state_dir(tmp(&format!("{tag}-state")));
+    s.set_overlay(tmp(&format!("{tag}-overlay")));
+    s.declare_root(0, ROOT0);
+    s.set_prefix_name("fake").unwrap();
+    s.set_steam_helper(false);
+    std::fs::write(s.virtual_root().join("game.exe"), b"MZ").unwrap();
+    let art = tmp(&format!("{tag}-art"));
+    for f in vfs_proton::artifacts::LAUNCH {
+        std::fs::write(art.join(f), b"MZ").unwrap();
+    }
+    s.serve().unwrap();
+    let shim = art
+        .join(vfs_proton::artifacts::SHIM_DLL)
+        .to_string_lossy()
+        .into_owned();
+    (s, home.join("sessions").join("fake").join("prefix"), shim)
+}
+
+#[test]
+fn a_crossover_launch_runs_its_front_end_in_a_bottle_made_once() {
+    let home = tmp("cx-launch");
+    let cx = fake_crossover(&home);
+    let (s, pfx, shim) = cx_session("cx-launch", &home, &cx);
+    assert_eq!(s.launch(&opts(&shim, "ok", true)).unwrap(), 0);
+
+    // The bottle was made by cxbottle, beside the prefix's lock and then
+    // moved in, so the lock taken before setup did not stop it.
+    assert!(pfx.join("drive_c/windows/system32").is_dir());
+    assert!(pfx.join("cxbottle.conf").is_file());
+    assert!(pfx.join("drive_c/Games/Fake").is_symlink(), "root 0 linked");
+
+    // The injector's argv follows the front end's own arguments unchanged.
+    let args = std::fs::read_to_string(pfx.join("fake-wine.args")).unwrap();
+    let args: Vec<&str> = args.split_whitespace().collect();
+    assert!(
+        args[0].ends_with(vfs_proton::artifacts::INJECTOR),
+        "{args:?}"
+    );
+    assert_eq!(args[1], format!(r"{ROOT0}\game.exe"));
+    assert_eq!(args[2], shim);
+
+    // CrossOver's environment, not Proton's.
+    let env = child_env(&pfx);
+    assert_eq!(Path::new(&env["CX_ROOT"]), cx);
+    assert!(!env.contains_key("PROTONPATH"), "{env:?}");
+    assert_eq!(env["WINEDLLOVERRIDES"], "mscoree=d;mshtml=d");
+    assert!(env.contains_key("VFS_RING_PATH"));
+
+    // A second launch reuses the bottle.
+    assert_eq!(s.launch(&opts(&shim, "ok", true)).unwrap(), 0);
+    let calls = std::fs::read_to_string(cx.join("cxbottle.calls")).unwrap();
+    assert_eq!(calls.lines().count(), 1, "cxbottle ran once: {calls}");
+    assert!(calls.contains("--create") && calls.contains("--template win10_64"));
+}
+
+#[test]
+fn a_crossover_launch_is_stopped_through_its_wineserver() {
+    let home = tmp("cx-stop");
+    let cx = fake_crossover(&home);
+    let (s, pfx, shim) = cx_session("cx-stop", &home, &cx);
+    assert_eq!(s.launch(&opts(&shim, "sleep", false)).unwrap(), 0);
+    wait_for(&pfx.join("fake-wine.pid"));
+    assert!(s.stop_launch().unwrap());
+    assert!(
+        wineserver_was_killed(&pfx),
+        "CrossOver's wineserver -k ran with this prefix as WINEPREFIX"
+    );
+}
+
+#[test]
+fn protons_own_prefix_setup_is_refused_under_crossover() {
+    let home = tmp("cx-proton-init");
+    let cx = fake_crossover(&home);
+    let mut s = Session::new();
+    s.set_home(&home);
+    s.set_wine_host(WineHost::CrossOver(cx));
+    s.set_state_dir(tmp("cx-proton-init-state"));
+    s.set_prefix_name("fake").unwrap();
+    s.set_prefix_init(PrefixInit::Proton {
+        steam_client: tmp("cx-proton-init-steam"),
+        app_id: None,
+    });
+    let e = s.prepare_prefix().unwrap_err();
+    assert!(e.contains("needs a GE-Proton runtime"), "{e}");
+}
+
+/// A fake Windows Steam client running in `pfx`, as Wine shows one: its
+/// image path as argv[0], working in the prefix. Killed on drop.
+struct FakeWindowsSteam(std::process::Child);
+
+impl FakeWindowsSteam {
+    fn start(pfx: &Path) -> Self {
+        let child = std::process::Command::new("bash")
+            .args([
+                "-c",
+                r#"exec -a "C:\Program Files (x86)\Steam\steam.exe" sleep 60"#,
+            ])
+            .current_dir(pfx)
+            .spawn()
+            .unwrap();
+        FakeWindowsSteam(child)
+    }
+
+    fn alive(&self) -> bool {
+        alive(self.0.id())
+    }
+}
+
+impl Drop for FakeWindowsSteam {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// A served session whose launches share their prefix, the prefix booted,
+/// and a fake Windows Steam running in it.
+fn shared_session(tag: &str) -> (Session, PathBuf, String, FakeWindowsSteam) {
+    let home = fake_home(tag);
+    let (mut s, pfx, shim) = session(tag, &home);
+    s.set_prefix_shared(true);
+    s.prepare_prefix().unwrap();
+    let steam = FakeWindowsSteam::start(&pfx);
+    (s, pfx, shim, steam)
+}
+
+fn game_pid(pfx: &Path) -> u32 {
+    wait_for(&pfx.join("fake-game.pid"));
+    let pid: u32 = std::fs::read_to_string(pfx.join("fake-game.pid"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    // Until it has exec'd it is still the subshell, not yet the "game".
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while vfs_unix::process_argv0(pid).as_deref() != Some(r"C:\Games\Fake\game.exe") {
+        assert!(Instant::now() < deadline, "the fake game never started");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    pid
+}
+
+#[test]
+fn a_shared_prefix_launch_runs_as_long_as_its_game_not_its_steam() {
+    let (s, pfx, shim, steam) = shared_session("shared-run");
+    let mut h = s.launch_detached(&opts(&shim, "shared", false)).unwrap();
+    let game = game_pid(&pfx);
+    wait_for(&pfx.join("fake-wine.exited"));
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(h.is_running(), "the game runs, so the launch does");
+
+    vfs_unix::signal(game, vfs_unix::Signal::Kill);
+    wait_gone(game);
+    ended(&mut h);
+    assert_eq!(h.try_wait().unwrap(), Some(LaunchExit::Exited(0)));
+    assert!(steam.alive(), "Steam is not the launch's");
+    assert!(!wineserver_was_killed(&pfx));
+}
+
+#[test]
+fn stopping_a_shared_prefix_launch_stops_its_game_and_leaves_steam() {
+    let (s, pfx, shim, steam) = shared_session("shared-stop");
+    let h = s.launch_detached(&opts(&shim, "shared", false)).unwrap();
+    let game = game_pid(&pfx);
+    assert_eq!(h.stop().unwrap(), LaunchExit::Stopped);
+    wait_gone(game);
+    assert!(steam.alive(), "stopping the game left Steam running");
+    assert!(
+        !wineserver_was_killed(&pfx),
+        "a shared prefix's wineserver is not the launch's to stop"
+    );
 }
