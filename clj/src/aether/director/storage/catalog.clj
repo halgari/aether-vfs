@@ -7,6 +7,8 @@
     entries      [layer id u64][folded path] -> v1 | kind u8 | guid 16 | len u64 | mtime i64 | name
     live         live key 16 -> len u64 | mtime i64
     cache_files  cache key 16 -> last access (minutes) u64 | logical bytes u64
+    cache_origins cache key 16 -> root u64 | size u64 | mtime i64 | u32 source len | source | vpath
+                 (what the key was hashed from: which source to fetch it again from)
     smeta        name -> u64 (next_layer_id)
 
   (keys big-endian, values little-endian). Paths are vpaths: `/`-separated,
@@ -23,7 +25,7 @@
 
 (set! *warn-on-reflection* true)
 
-(def dbs ["layers" "entries" "live" "cache_files" "smeta"])
+(def dbs ["layers" "entries" "live" "cache_files" "cache_origins" "smeta"])
 
 (def ^:const kind-file 1)
 (def ^:const kind-dir 2)
@@ -193,6 +195,30 @@
   (l/put! txn (dbi store "cache_files") k (le-pair access n)))
 
 (defn del-cache-file! [store txn ^bytes k] (l/del! txn (dbi store "cache_files") k))
+
+(defn- encode-origin ^bytes [{:keys [^String source root ^String vpath size mtime]}]
+  (let [s (utf8 source) p (utf8 vpath) bb (le (+ 28 (alength s) (alength p)))]
+    (.putLong bb (long root)) (.putLong bb (long size)) (.putLong bb (long mtime))
+    (.putInt bb (alength s)) (.put bb s) (.put bb p)
+    (.array bb)))
+
+(defn- decode-origin [^MemorySegment v]
+  (let [n (l/le-u32 v 24)]
+    {:root (l/le-u64 v 0) :size (l/le-u64 v 8) :mtime (l/le-u64 v 16)
+     :source (String. ^bytes (.toArray (.asSlice v 28 n) ValueLayout/JAVA_BYTE) StandardCharsets/UTF_8)
+     :vpath (utf8-str v (+ 28 n))}))
+
+(defn get-cache-origin
+  "Where cache file `k`'s content comes from, {:source :root :vpath :size
+  :mtime} (cache-key's arguments), or nil when it wasn't recorded (a cache
+  file made before origins were)."
+  [store txn ^bytes k]
+  (some-> (l/get-seg txn (dbi store "cache_origins") k) decode-origin))
+
+(defn put-cache-origin! [store txn ^bytes k origin]
+  (l/put! txn (dbi store "cache_origins") k (encode-origin origin)))
+
+(defn del-cache-origin! [store txn ^bytes k] (l/del! txn (dbi store "cache_origins") k))
 
 (defn cache-files
   "[[key {:access :bytes}] …], every cache file."

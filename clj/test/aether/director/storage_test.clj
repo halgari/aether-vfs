@@ -242,6 +242,91 @@
       (is (= 0 (:files (storage/cache-usage s))))
       (is (empty? (:problems (store/verify (:store s))))))))
 
+;; --- collecting the cache ------------------------------------------------------------------------
+
+(defn- reasons [r] (into {} (for [[why {:keys [files]}] (:kept r)] [why files])))
+
+(deftest cache-files-know-where-they-came-from
+  (with-storage [s (tmp)]
+    (let [c (storage/cached s (source {"Data/a.bsa" (noise 1 (* 2 bs))}) "steam 1 [[2 3]]" {:root 4})]
+      (read-all c "Data/a.bsa")
+      (is (= [{:source "steam 1 [[2 3]]" :root 4 :vpath "data/a.bsa" :size (* 2 bs)
+               :mtime (.-mtime ^Stat (prov/stat c "data/a.bsa"))}]
+             (map :origin (storage/cache-entries s)))
+          "the arguments its key was hashed from, the vpath folded"))))
+
+(deftest a-cache-file-from-before-origins-is-adopted-when-opened
+  (with-storage [s (tmp)]
+    (let [files {"f" (noise 2 bs)}
+          c (storage/cached s (source files) "src")]
+      (read-all c "f")
+      ;; as a cache file made before origins were recorded
+      (let [st (:store s)]
+        (store/write! st (fn [txn] (doseq [[k] (cat/cache-files st txn)] (cat/del-cache-origin! st txn k)))))
+      (is (nil? (:origin (first (storage/cache-entries s)))))
+      (is (= {:unknown 1} (reasons (storage/gc-cache! s {:keep? (constantly false) :retrievable? (constantly true)})))
+          "an unknown origin isn't collected")
+      (is (= 1 (:files (:collected (storage/gc-cache! s {:keep? (constantly true) :retrievable? (constantly false)
+                                                          :unrecorded? true :dry-run? true}))))
+          "unless the host asks for it")
+      (is (= 0 (storage/adopt-origins! s [{:source "other" :vpath "f" :size bs :mtime 0}])) "no such cache file")
+      (let [mtime (.-mtime ^Stat (prov/stat (source files) "f"))]
+        (is (= 1 (storage/adopt-origins! s [{:source "src" :vpath "F" :size bs :mtime mtime}]))
+            "a host that knows what the launch reads adopts it (the vpath folded)")
+        (is (= 0 (storage/adopt-origins! s [{:source "src" :vpath "f" :size bs :mtime mtime}])) "once"))
+      (is (= "src" (:source (:origin (first (storage/cache-entries s))))))
+      (let [st (:store s)]
+        (store/write! st (fn [txn] (doseq [[k] (cat/cache-files st txn)] (cat/del-cache-origin! st txn k)))))
+      (read-all (storage/cached s (source files) "src") "f")
+      (is (= "src" (:source (:origin (first (storage/cache-entries s))))) "and so does a new provider's open"))))
+
+(deftest gc-collects-only-what-isnt-needed-and-can-be-fetched-again
+  (with-storage [s (tmp)]
+    (let [files (into {} (for [i (range 4)] [(str "f" i) (noise (+ 10 i) (* 4 bs))]))
+          old   (storage/cached s (source files) "game v1")
+          new   (storage/cached s (source files) "game v2")
+          gone  (storage/cached s (source files) "archive deleted upstream")
+          saves (storage/layer s "loadout/saves")]
+      (doseq [c [old new gone] f ["f0" "f1"]] (read-all c f))
+      (let [h (prov/open saves "a.sav" wcreate)] (write-at! h 0 (noise 7 bs)) (prov/close! h))
+      (let [open-h (prov/open old "f1" p/open-read)
+            opts   {:keep?        #(= "game v2" (:source %))
+                    :retrievable? #(not= "archive deleted upstream" (:source %))}]
+        (testing "a dry run decides and deletes nothing"
+          (let [r (storage/gc-cache! s (assoc opts :dry-run? true))]
+            (is (= {:files 1 :bytes (* 4 bs)} (:collected r)))
+            (is (= {:in-use 2 :unretrievable 2 :open 1} (reasons r)))
+            (is (= 6 (:files (storage/cache-usage s))))))
+        (testing "collected: not kept, fetchable again, not open"
+          (let [r (storage/gc-cache! s opts)]
+            (is (= 1 (:files (:collected r))))
+            (is (= 5 (:files (storage/cache-usage s))))
+            (is (= #{["game v1" "f1"] ["game v2" "f0"] ["game v2" "f1"]
+                     ["archive deleted upstream" "f0"] ["archive deleted upstream" "f1"]}
+                   (set (map (comp (juxt :source :vpath) :origin) (storage/cache-entries s)))))))
+        (prov/close! open-h))
+      (testing "a layer is never touched, and the collected file is fetched again"
+        (is (Arrays/equals (noise 7 bs) (read-all saves "a.sav")))
+        (is (Arrays/equals ^bytes (files "f0") (read-all old "f0"))))
+      (is (empty? (:problems (store/verify (:store s))))))))
+
+(defn- pack-bytes [s] (reduce + 0 (map :bytes (:packs (store/stats (:store s))))))
+
+(deftest gc-gives-the-space-back
+  ;; small packs, so the collected files' blocks sit in sealed ones
+  (with-storage [s (tmp) {:max-pack-size (* 16 bs) :zstd-level 1}]
+    (let [old   (storage/cached s (source (into {} (for [i (range 8)] [(str "f" i) (noise (+ 100 i) (* 8 bs))]))) "v1")
+          new   (storage/cached s (source {"g" (noise 200 (* 8 bs))}) "v2")]
+      (doseq [i (range 8)] (read-all old (str "f" i)))
+      (read-all new "g")
+      (let [before (pack-bytes s)
+            r      (storage/gc-cache! s {:keep? #(= "v2" (:source %)) :retrievable? (constantly true)})]
+        (is (= 8 (:files (:collected r))))
+        (is (pos? (long (:freed (:compacted r)))))
+        (is (< (pack-bytes s) (* 0.5 before)) "the packs the collected files filled are gone from disk")
+        (is (Arrays/equals (noise 200 (* 8 bs)) (read-all new "g")) "what's kept reads back")
+        (is (empty? (:problems (store/verify (:store s)))))))))
+
 ;; --- stored bytes ------------------------------------------------------------------------------
 
 (defn- item [c sk vp] (let [^Stat st (prov/stat c (path/fold vp))] [sk vp (.-size st) (.-mtime st)]))

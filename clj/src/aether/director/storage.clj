@@ -201,6 +201,7 @@
           (recur more freed)
           (do (store/write! store (fn [txn]
                                     (cat/del-cache-file! store txn k)
+                                    (cat/del-cache-origin! store txn k)
                                     (store/delete-file! store txn (cat/cache-file-id k))))
               (ram/invalidate! ram (cat/cache-file-id k))
               (recur more (+ freed (long n)))))))))
@@ -223,3 +224,82 @@
   "Deletes every cache file that isn't open. Returns the bytes freed."
   [s]
   (evict! s (constantly false)))
+
+;; --- collecting the cache -----------------------------------------------------------------------
+
+(defn cache-entries
+  "Every cache file: [{:key (hex) :bytes :access (minutes) :open? :origin
+  {:source :root :vpath :size :mtime}, nil when not recorded}]."
+  [{:keys [store ^ConcurrentHashMap opens]}]
+  (store/read* store
+               (fn [txn]
+                 (mapv (fn [[^bytes k {:keys [access] n :bytes}]]
+                         (let [hk (.formatHex (HexFormat/of) k)]
+                           {:key hk :bytes n :access access
+                            :open? (.containsKey opens hk)
+                            :origin (cat/get-cache-origin store txn k)}))
+                       (cat/cache-files store txn)))))
+
+(defn adopt-origins!
+  "Records the origin of each cache file among `origins` ({:source :root
+  :vpath :size :mtime}, what a cached provider would key it by; :root
+  defaults to 0) that exists without one: a cache file made before origins
+  were recorded, which gc-cache! otherwise never collects. Returns how many
+  were adopted."
+  [{:keys [store]} origins]
+  (reduce + 0
+          (for [batch (partition-all 1024 origins)]
+            (store/write! store
+                          (fn [txn]
+                            (reduce (fn [n {:keys [source root vpath size mtime] :or {root 0}}]
+                                      (let [o {:source source :root root :vpath (path/fold vpath) :size size :mtime mtime}
+                                            k (cat/cache-key source root (:vpath o) size mtime)]
+                                        (if (and (cat/get-cache-file store txn k) (not (cat/get-cache-origin store txn k)))
+                                          (do (cat/put-cache-origin! store txn k o) (inc n))
+                                          n)))
+                                    0 batch))))))
+
+(defn- verdict
+  "Why `entry` is kept, or :collect."
+  [{:keys [open? origin]} keep? retrievable? unrecorded?]
+  (cond open?                       :open
+        (nil? origin)               (if unrecorded? :collect :unknown)
+        (keep? origin)              :in-use
+        (not (retrievable? origin)) :unretrievable
+        :else                       :collect))
+
+(defn gc-cache!
+  "Collects the cache: deletes each cache file that the host no longer
+  needs and can fetch again, then compacts the packs that frees space in.
+  Nothing else is touched: layers (what a program wrote), live files, and
+  any cache file that is open, whose origin wasn't recorded (made before
+  origins were, and not opened since), that `keep?` (fn [origin]) wants, or
+  that `retrievable?` (fn [origin]) can't vouch for, are all kept. Origins
+  are {:source :root :vpath :size :mtime}: the source key, root and vpath a
+  cached provider was made with. Options: :dry-run? (decide, delete
+  nothing); :unrecorded? (collect the files whose origin isn't recorded too:
+  for a host that has adopted the origins of everything it uses first
+  (adopt-origins!), so they are files nothing uses, though whether they can
+  be fetched again can't be checked). Returns {:collected {:files :bytes} :kept {reason {:files
+  :bytes}} :compacted {:packs :freed}}, reasons :open :unknown :in-use
+  :unretrievable; bytes are logical (before dedup and compression)."
+  [{:keys [store ram] :as s} {:keys [keep? retrievable? dry-run? unrecorded?]}]
+  (let [entries (cache-entries s)
+        decided (group-by #(verdict % keep? retrievable? unrecorded?) entries)
+        tally   (fn [es] {:files (count es) :bytes (reduce + 0 (map :bytes es))})
+        doomed  (get decided :collect)]
+    (when-not dry-run?
+      (doseq [batch (partition-all 256 doomed)]
+        (store/write! store
+                      (fn [txn]
+                        (doseq [{:keys [key]} batch
+                                :let [k (.parseHex (HexFormat/of) ^String key)]]
+                          (cat/del-cache-file! store txn k)
+                          (cat/del-cache-origin! store txn k)
+                          (store/delete-file! store txn (cat/cache-file-id k)))))
+        (doseq [{:keys [key]} batch]
+          (ram/invalidate! ram (cat/cache-file-id (.parseHex (HexFormat/of) ^String key))))))
+    {:collected (tally doomed)
+     :kept      (into {} (for [[why es] (dissoc decided :collect)] [why (tally es)]))
+     :compacted (when (and (seq doomed) (not dry-run?))
+                  (select-keys (store/compact! store {:min-garbage-ratio 0.05}) [:packs :freed]))}))

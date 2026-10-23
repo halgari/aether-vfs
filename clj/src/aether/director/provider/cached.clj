@@ -9,7 +9,10 @@
   rounded up to whole blocks) from the source and stores it; concurrent
   misses on one unit wait for one fetch. The cache_files row (last access,
   size) is what eviction (aether.director.storage/enforce-cache-budget!)
-  goes by."
+  goes by; the cache_origins row (what the key was hashed from) says which
+  source the file can be fetched from again, for the collection
+  (aether.director.storage/gc-cache!). It's written with the cache file,
+  and, for one made before origins were recorded, when it's next opened."
   (:require [aether.director.path :as path]
             [aether.director.proto :as p]
             [aether.director.provider :as prov]
@@ -39,10 +42,22 @@
                            (when (store/file-len st txn (cat/cache-file-id ck))
                              (cat/put-cache-file! st txn ck {:access now :bytes size}))))))))
 
+(defn- record-origin!
+  "Records where cache file `ck` comes from when its row is missing: a cache
+  file made before origins were recorded is adopted at its next open."
+  [{:keys [storage]} ^bytes ck origin]
+  (let [st (:store storage)]
+    (when-not (store/read* st (fn [txn] (cat/get-cache-origin st txn ck)))
+      (store/write! st (fn [txn]
+                         (when (and (store/file-len st txn (cat/cache-file-id ck))
+                                    (not (cat/get-cache-origin st txn ck)))
+                           (cat/put-cache-origin! st txn ck origin)))))))
+
 (defn- fetch-unit!
   "Fetches blocks [b0, b1) of the file from the source handle and stores
-  them (creating the cache file at its first fetch). Returns the blocks."
-  [{:keys [storage]} src ^bytes ck ^bytes fid size b0 b1]
+  them (creating the cache file, and its origin row, at its first fetch).
+  Returns the blocks."
+  [{:keys [storage ^ConcurrentHashMap origins]} src ^bytes ck ^bytes fid size b0 b1]
   (let [size (long size) b0 (long b0) b1 (long b1)
         st    (:store storage)
         bs    (long (:block-size st))
@@ -52,7 +67,9 @@
         got   (long (prov/read-into src (MemorySegment/ofArray buf) 0 start n))]
     (when (not= got n) (throw (ex-info "the source returned a short read" {:status p/io-error})))
     (when-not (:len (store/stat st fid))
-      (store/set-len! st fid size {:also (fn [txn] (cat/put-cache-file! st txn ck {:access (minute) :bytes size}))}))
+      (store/set-len! st fid size {:also (fn [txn]
+                                           (cat/put-cache-file! st txn ck {:access (minute) :bytes size})
+                                           (when-let [o (.get origins (hex ck))] (cat/put-cache-origin! st txn ck o)))}))
     (store/write-blocks! st fid b0 buf)
     (vec (for [b (range b0 b1)]
            (let [off (* (- b b0) bs)] (Arrays/copyOfRange buf (int off) (int (min n (+ off bs)))))))))
@@ -118,7 +135,7 @@
                              (apply [_ _ n] (let [n (dec (long n))] (when (pos? n) n)))))))))
 
 (defrecord Cached [storage source ^String source-key ^long root ^long unit-blocks
-                   ^ConcurrentHashMap inflight ^ConcurrentHashMap touched]
+                   ^ConcurrentHashMap inflight ^ConcurrentHashMap touched ^ConcurrentHashMap origins]
   prov/Provider
   (stat [_ vp] (prov/stat source vp))
   (list-dir [_ vp] (prov/list-dir source vp))
@@ -132,10 +149,15 @@
           (let [^Stat s (prov/handle-stat h)]
             (if (.-dir? s)
               h
-              (let [ck  (cat/cache-key source-key root (path/fold vp) (.-size s) (.-mtime s))
-                    fid (cat/cache-file-id ck)]
+              (let [fvp (path/fold vp)
+                    ck  (cat/cache-key source-key root fvp (.-size s) (.-mtime s))
+                    fid (cat/cache-file-id ck)
+                    origin {:source source-key :root root :vpath fvp :size (.-size s) :mtime (.-mtime s)}
+                    first-open? (nil? (.putIfAbsent origins (hex ck) origin))]
                 (.merge ^ConcurrentHashMap (:opens storage) (hex ck) 1 +)
-                (when (:len (store/stat (:store storage) fid)) (touch! this ck (.-size s)))
+                (when (:len (store/stat (:store storage) fid))
+                  (touch! this ck (.-size s))
+                  (when first-open? (record-origin! this ck origin)))
                 (CachedHandle. this h ck fid (.-size s) (.-mtime s) (AtomicBoolean.)))))))))
   (mkdir! [_ _] p/read-only)
   (delete! [_ _] p/read-only)
@@ -151,4 +173,4 @@
   (let [bs (long (:block-size (:store storage)))]
     (->Cached storage source source-key root
               (max 1 (quot (+ (min (long unit-bytes) (* 64 1024 1024)) (dec bs)) bs))
-              (ConcurrentHashMap.) (ConcurrentHashMap.))))
+              (ConcurrentHashMap.) (ConcurrentHashMap.) (ConcurrentHashMap.))))
