@@ -322,7 +322,7 @@
       (let [before (pack-bytes s)
             r      (storage/gc-cache! s {:keep? #(= "v2" (:source %)) :retrievable? (constantly true)})]
         (is (= 8 (:files (:collected r))))
-        (is (pos? (long (:freed (:compacted r)))))
+        (is (> (long (:freed (:compacted r))) (long (:copied (:compacted r)))) "more freed than copied")
         (is (< (pack-bytes s) (* 0.5 before)) "the packs the collected files filled are gone from disk")
         (is (Arrays/equals (noise 200 (* 8 bs)) (read-all new "g")) "what's kept reads back")
         (is (empty? (:problems (store/verify (:store s)))))))))

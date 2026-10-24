@@ -281,8 +281,10 @@
   for a host that has adopted the origins of everything it uses first
   (adopt-origins!), so they are files nothing uses, though whether they can
   be fetched again can't be checked). Returns {:collected {:files :bytes} :kept {reason {:files
-  :bytes}} :compacted {:packs :freed}}, reasons :open :unknown :in-use
-  :unretrievable; bytes are logical (before dedup and compression)."
+  :bytes}} :compacted {:packs :freed :copied}}, reasons :open :unknown :in-use
+  :unretrievable; bytes are logical (before dedup and compression), except
+  :compacted's: :freed the packs deleted, :copied the live bytes moved out of
+  them first (the disk given back is the difference)."
   [{:keys [store ram] :as s} {:keys [keep? retrievable? dry-run? unrecorded?]}]
   (let [entries (cache-entries s)
         decided (group-by #(verdict % keep? retrievable? unrecorded?) entries)
@@ -301,5 +303,7 @@
           (ram/invalidate! ram (cat/cache-file-id (.parseHex (HexFormat/of) ^String key))))))
     {:collected (tally doomed)
      :kept      (into {} (for [[why es] (dissoc decided :collect)] [why (tally es)]))
-     :compacted (when (and (seq doomed) (not dry-run?))
-                  (select-keys (store/compact! store {:min-garbage-ratio 0.05}) [:packs :freed]))}))
+     ;; even with nothing new to delete: a pack that was being written at
+     ;; the last collection may have filled since, its garbage with it
+     :compacted (when-not dry-run?
+                  (select-keys (store/compact! store {:min-garbage-ratio 0.05}) [:packs :freed :copied]))}))
