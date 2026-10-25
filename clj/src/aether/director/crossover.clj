@@ -174,6 +174,139 @@
     (Files/createSymbolicLink link target (make-array FileAttribute 0))
     (str link)))
 
+;; --- the bottle's user folders ------------------------------------------------------
+
+(defn isolate-user-folders!
+  "Replaces the links CrossOver makes from the bottle's user folders
+  (drive_c/users/<user>/Documents, Downloads, Music, Pictures, Videos) to the
+  Mac's own with folders inside the bottle. Wine goes through them as it
+  starts (the shell folders, Steam, the game), and through the links that is
+  the Mac's Documents, Downloads, Music, Pictures and Movies: folders macOS
+  guards, so each one asks the user to allow the app. The game's own folders
+  there (My Games) are the shim's roots, not these. Returns the paths whose
+  links were replaced."
+  [prefix]
+  (let [bottle (.toPath (.getCanonicalFile (io/file (str prefix))))]
+    (vec (for [^java.io.File user (or (.listFiles (io/file (str prefix) "drive_c" "users")) [])
+               :when (.isDirectory user)
+               ^java.io.File f (or (.listFiles user) [])
+               :let [p (.toPath f)]
+               :when (and (Files/isSymbolicLink p)
+                          ;; both canonical: /var is /private/var, say
+                          (not (.startsWith (.toPath (.getCanonicalFile (.toFile (.resolveSibling p (Files/readSymbolicLink p)))))
+                                            bottle)))]
+           (do (Files/delete p)
+               (Files/createDirectory p (make-array FileAttribute 0))
+               (str p))))))
+
+(defn prune-drives!
+  "Removes the bottle's drives but C: (the bottle) and Z: (/, which the
+  injector's own paths go through): Y:, CrossOver's link to the Mac's home
+  folder, and the drive Wine adds for every disk image or volume mounted.
+  Through them Wine (Steam's library scan, a file dialog) reaches the
+  Mac's guarded folders and volumes, each asking the user to allow the app.
+  Wine adds a volume's drive again when one is mounted, so this runs before
+  each launch. Returns the drives removed."
+  [prefix]
+  (vec (for [^java.io.File f (or (.listFiles (io/file (str prefix) "dosdevices")) [])
+             :let [n (str/lower-case (.getName f))]
+             :when (and (re-matches #"[a-y]::?" n) (not (str/starts-with? n "c:"))
+                        (Files/isSymbolicLink (.toPath f)))]
+         (do (Files/delete (.toPath f)) (.getName f)))))
+
+;; --- Steam in the bottle ------------------------------------------------------------
+;;
+;; A Steam game's DRM (SteamStub) asks the Steam client running in its prefix
+;; whether the account owns it. With none running, it starts one with
+;; steam://run/<app>, and that Steam, which has no copy of the game, offers to
+;; install it: the game never starts, and must not be installed that way. So
+;; a Steam game starts only once the bottle's own Steam is running and signed
+;; in, started here (silently, with no run link) when it isn't.
+
+(def steam-exe "C:\\Program Files (x86)\\Steam\\steam.exe")
+
+(def steam-sign-in-ms
+  "How long the bottle's Steam may take to start and sign in."
+  120000)
+
+(defn- steam-dir ^java.io.File [prefix]
+  (io/file (str prefix) "drive_c" "Program Files (x86)" "Steam"))
+
+(defn- wine-process
+  "A ProcessBuilder for `args` (a program and its arguments, Windows paths)
+  in the bottle at `prefix`, through the install's wine."
+  ^ProcessBuilder [install prefix args]
+  (let [pb (ProcessBuilder. ^List (into [(wine install)] (concat (bottle-args prefix) args)))]
+    (.put (.environment pb) "CX_ROOT" (str install))
+    pb))
+
+(defn steam-running?
+  "Whether the bottle's Steam client is running: the bottle's own process
+  list (tasklist: not another bottle's, nor the Mac's Steam) has steam.exe."
+  [install prefix]
+  (let [p (.start (doto (wine-process install prefix ["C:\\windows\\system32\\tasklist.exe"])
+                    (.redirectError ProcessBuilder$Redirect/DISCARD)))
+        out (slurp (.getInputStream p))]
+    (.waitFor p)
+    (boolean (re-find #"(?im)^steam\.exe\s" out))))
+
+(defn- log-tail
+  "The last 64 KB of Steam's connection log, or nil."
+  [prefix]
+  (let [f (io/file (steam-dir prefix) "logs" "connection_log.txt")]
+    (when (.isFile f)
+      (with-open [r (java.io.RandomAccessFile. f "r")]
+        (let [n (min (.length r) 65536) b (byte-array n)]
+          (.seek r (- (.length r) n))
+          (.readFully r b)
+          (String. b java.nio.charset.StandardCharsets/UTF_8))))))
+
+(def ^:private log-line #"(?m)^\[(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)\] \[([A-Za-z ]+),[^\n]*$")
+
+(defn- log-ms [ts]
+  (-> (java.time.LocalDateTime/parse ts (java.time.format.DateTimeFormatter/ofPattern "yyyy-MM-dd HH:mm:ss"))
+      (.atZone (java.time.ZoneId/systemDefault)) .toInstant .toEpochMilli))
+
+(defn signed-in?
+  "Whether Steam's connection log says it's signed in: its last state is
+  Logged On, as of `since` (ms) or later when given. The log's times are
+  the Mac's local time, to the second."
+  ([prefix] (signed-in? prefix nil))
+  ([prefix since]
+   (when-let [[_ ts state] (last (re-seq log-line (or (log-tail prefix) "")))]
+     (and (= "Logged On" state) (or (nil? since) (>= (log-ms ts) (long since)))))))
+
+(defn ensure-steam!
+  "Returns once the bottle's Steam is running and signed in, starting it
+  (steam.exe -silent: no run link, so no install offer) when it isn't, its
+  output to `log`. Throws ::error :no-steam when the bottle has no Steam,
+  :steam-not-signed-in when it doesn't sign in within steam-sign-in-ms:
+  either way the game isn't started."
+  [install prefix log]
+  (when-not (.isFile (io/file (steam-dir prefix) "steam.exe"))
+    (fail :no-steam (str "Steam isn't installed in the bottle " prefix ": a Steam game needs its "
+                         "Windows client running there, signed in to the account that owns the game")
+          {:prefix (str prefix)}))
+  (let [t0 (System/currentTimeMillis)
+        running (steam-running? install prefix)]
+    (if (and running (signed-in? prefix))
+      :running
+      (do (when-not running
+            (.start (doto (wine-process install prefix [steam-exe "-silent"])
+                      (.redirectErrorStream true)
+                      (.redirectOutput (ProcessBuilder$Redirect/appendTo (io/file (str log)))))))
+          ;; the log's seconds: a sign-in in the second it started counts
+          (loop []
+            (cond
+              (signed-in? prefix (- t0 1000)) :started
+              (> (- (System/currentTimeMillis) t0) (long steam-sign-in-ms))
+              (fail :steam-not-signed-in
+                    (str "Steam in the bottle didn't sign in within " (quot (long steam-sign-in-ms) 1000)
+                         " seconds, so the game wasn't started: without Steam it would ask Steam to install it. "
+                         "Open Steam in the bottle, sign in, and play again.")
+                    {:prefix (str prefix)})
+              :else (do (Thread/sleep 1000) (recur))))))))
+
 ;; --- the session and the launch -----------------------------------------------------
 
 (defmethod launch/session :platform/macos
@@ -186,7 +319,7 @@
   "Every process as {:pid :pgid :command}, from ps: Wine rewrites a Windows
   process's argv, which ps shows and ProcessHandle (macOS) doesn't."
   []
-  (let [p (.start (ProcessBuilder. ^"[Ljava.lang.String;" (into-array String ["ps" "-axo" "pid=,pgid=,command="])))
+  (let [p (.start (ProcessBuilder. ^"[Ljava.lang.String;" (into-array String ["ps" "-axww" "-o" "pid=,pgid=,command="])))
         out (slurp (.getInputStream p))]
     (.waitFor p)
     (for [line (str/split-lines out)
@@ -194,26 +327,35 @@
           :when pid]
       {:pid (parse-long pid) :pgid (parse-long pgid) :command command})))
 
+(def ^:private own-pgid
+  (delay (let [me (.pid (ProcessHandle/current))]
+           (some #(when (= me (:pid %)) (:pgid %)) (processes)))))
+
 (defn launch-group
   "The process group of the launch whose ready file is `ready`, or nil when
   none runs. Wine hands its processes to launchd, so the injector and the
   game are no descendants of ours; the injector leads a group of its own,
-  which the game joins, and its argv names this session's ready file."
-  [ready]
-  (some #(when (and (str/includes? (:command %) "vfs-injector.exe") (str/includes? (:command %) (str ready)))
+  which the game joins. It's the process whose command line is `injector`
+  (its own path, as the launch ran it) and names this session's ready file:
+  not wine's front end, whose command line names both too but which is in
+  our own group, and never our own group, whatever matches."
+  [injector ready]
+  (some #(when (and (str/starts-with? (:command %) (str injector))
+                    (str/includes? (:command %) (str ready))
+                    (not= (:pgid %) @own-pgid))
            (:pgid %))
         (processes)))
 
 (defn- group-alive? [pgid]
   (boolean (and pgid (some #(= pgid (:pgid %)) (processes)))))
 
-(defrecord CrossOverLaunch [^Process process ready group]
+(defrecord CrossOverLaunch [^Process process injector ready group]
   launch/Launch
   (await-exit [_]
     ;; the front end, then the injector's group: the front end needn't wait
     ;; for what the injector started
     (let [code   (.waitFor process)
-          _      (loop [] (when (group-alive? (or @group (reset! group (launch-group ready))))
+          _      (loop [] (when (group-alive? (or @group (reset! group (launch-group injector ready))))
                             (Thread/sleep 500)
                             (recur)))
           report (let [f (io/file (plaunch/injector-error-path ready))] (when (.isFile f) (slurp f)))]
@@ -221,11 +363,11 @@
         (binding [*out* *err*]
           (println "aether-vfs: vfs-injector did not run the target:" (plaunch/describe-injector-error report))))
       code))
-  (alive? [_] (or (.isAlive process) (group-alive? (or @group (reset! group (launch-group ready))))))
+  (alive? [_] (or (.isAlive process) (group-alive? (or @group (reset! group (launch-group injector ready))))))
   (stop! [_]
     ;; the wine front end and the injector's group (the game, and what it
     ;; started), never the bottle's wineserver or Steam: they run there too
-    (when-let [g (or @group (launch-group ready))]
+    (when-let [g (or @group (launch-group injector ready))]
       (.waitFor (.start (ProcessBuilder. ^"[Ljava.lang.String;" (into-array String ["kill" "-KILL" (str "-" g)])))))
     (run! #(.destroyForcibly ^ProcessHandle %) (.toList (.descendants process)))
     (.destroyForcibly process)
@@ -277,10 +419,17 @@
                              :arena-len (:arena-len server) :ring-host-path (:host-path server)}
                             (let [f (io/file (str (:host-path server)))] (when (.isFile f) (.length f))))
     (run! #(io/delete-file % true) (conj (plaunch/stale-reports (:ready session)) (:ready session)))
+    (isolate-user-folders! (:prefix host))
+    (prune-drives! (:prefix host))
+    ;; a Steam game (its app id in the env, as a host sets it) only with the
+    ;; bottle's Steam running and signed in: never one the game starts
+    (when (get (:env opts) "SteamAppId")
+      (ensure-steam! (:install host) (:prefix host) log))
     (link-session! (:prefix host) (:dir session))
     (let [pb (doto (ProcessBuilder. ^List argv)
                (.directory (io/file (str dir)))
                (.redirectErrorStream true)
                (.redirectOutput (ProcessBuilder$Redirect/appendTo (io/file (str log)))))]
       (launch/apply-env! (.environment pb) env)
-      (->CrossOverLaunch (.start pb) (:ready session) (atom nil)))))
+      ;; argv: wine --bottle <prefix> --no-convert <injector> …
+      (->CrossOverLaunch (.start pb) (nth argv 4) (:ready session) (atom nil)))))
