@@ -29,6 +29,7 @@
   is coherent across the two."
   (:require [aether.director.env :as henv]
             [aether.director.launch :as launch]
+            [aether.director.natives :as natives]
             [aether.director.proton.env :as penv]
             [aether.director.proton.launch :as plaunch]
             [aether.director.proton.layout :as layout]
@@ -380,11 +381,10 @@
   [{:keys [dir root state shim-config ready root-location roots server]}
    {:keys [natives exe launch-image args env remove-env cwd]}
    {:keys [install prefix]} host-env]
-  (doseq [n ["vfs-injector.exe" "vfs_shim_dll.dll"]]
-    (when-not (.isFile (io/file (str natives) n))
-      (throw (ex-info (str n " not found in " natives) {:file (str (io/file (str natives) n))}))))
   (penv/check-extra-env (into {} (remove (fn [[k]] (= "WINEDLLOVERRIDES" k))) env))
   (let [natives (.getAbsolutePath (io/file (str natives)))
+        ;; the injector and shim in the image's bitness; throws when they're missing
+        {:keys [injector shim]} (natives/for-image natives (or exe launch-image))
         target  (plaunch/wine-path dir (str (or exe launch-image)))
         ;; a host builds C: locations with its own path joins: Wine's separator only
         roots   (into {} (for [[id at] roots] [id (str/replace (str at) "/" "\\")]))
@@ -394,9 +394,9 @@
                              :env env :host-env host-env})
         ;; the injector's positional contract, as the Linux launch builds it
         [_ argv] (plaunch/command-line {:runtime install
-                                        :injector (layout/join natives "vfs-injector.exe")
+                                        :injector injector
                                         :target target
-                                        :shim-dll (layout/join natives "vfs_shim_dll.dll")
+                                        :shim-dll shim
                                         :config-file shim-config :ready-file ready :args args})]
     {:argv (into [(wine install)] (concat (bottle-args prefix) argv))
      :dir  root

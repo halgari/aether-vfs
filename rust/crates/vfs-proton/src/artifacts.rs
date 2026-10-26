@@ -15,6 +15,10 @@ pub const INJECTOR: &str = "vfs-injector.exe";
 pub const SHIM_DLL: &str = "vfs_shim_dll.dll";
 /// What a Proton launch itself needs: the injector and the shim.
 pub const LAUNCH: [&str; 2] = [INJECTOR, SHIM_DLL];
+/// The i686 injector and shim, for a 32-bit (WOW64) program (the director picks them by the
+/// image's bitness: aether.director.natives).
+pub const INJECTOR32: &str = "vfs-injector32.exe";
+pub const SHIM_DLL32: &str = "vfs_shim_dll32.dll";
 
 /// The Windows test programs the Proton end-to-end tests run.
 pub const FIXTURE_READ: &str = "vfs-fixture-read.exe";
@@ -23,10 +27,12 @@ pub const FIXTURE_NVAPI: &str = "vfs-fixture-nvapi.exe";
 pub const FIXTURE_REGISTRY: &str = "vfs-fixture-registry.exe";
 
 /// Every artefact `bin/build-windows` produces, in the script's order: the
-/// launch's two, then the fixtures.
-pub const WINDOWS_ARTIFACTS: [&str; 6] = [
+/// launch's two, their 32-bit builds, then the fixtures.
+pub const WINDOWS_ARTIFACTS: [&str; 8] = [
     INJECTOR,
     SHIM_DLL,
+    INJECTOR32,
+    SHIM_DLL32,
     FIXTURE_READ,
     FIXTURE_STEAM,
     FIXTURE_NVAPI,

@@ -865,9 +865,10 @@ whatever the step, ends in `refuse_child`:
   the injector and inherited), which `vfs-embed` reports in the launch notes
   (Proton) or the launch error (Windows).
 
-The failures: the child is a 32-bit image (`child-32bit`, checked first with
-`IsWow64Process2`; the 64-bit shim cannot load into it, so it fails at once and
-is named, not exempted), no `SELF_DLL` (the shim does not know its own DLL path,
+The failures: the child's bitness differs from the shim's (`child-32bit` for a
+32-bit child of a 64-bit process, `child-64bit` for a 64-bit child of a 32-bit
+one, checked first with `IsWow64Process2`; a shim loads into its own bitness
+only, so it fails at once and is named, not exempted), no `SELF_DLL` (the shim does not know its own DLL path,
 so it cannot inject), the child exiting early, `LoadLibrary` not starting or not
 finishing within the timeout, the child's shim reporting a bootstrap failure,
 and no ready signal once `LoadLibrary` has returned.

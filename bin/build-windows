@@ -64,8 +64,10 @@ command -v cargo > /dev/null || die "cargo not found (install Rust via rustup)"
 cargo xwin --version > /dev/null 2>&1 \
   || die "cargo-xwin not found (cargo install --locked cargo-xwin)"
 command -v rustup > /dev/null || die "rustup not found (needed for the Windows target)"
-rustup target list --installed 2> /dev/null | grep -qx 'x86_64-pc-windows-msvc' \
-  || die "rust target missing (rustup target add x86_64-pc-windows-msvc)"
+for t in x86_64-pc-windows-msvc i686-pc-windows-msvc; do
+  rustup target list --installed 2> /dev/null | grep -qx "$t" \
+    || die "rust target missing (rustup target add $t)"
+done
 for tool in clang lld-link; do
   command -v "$tool" > /dev/null || die "$tool not found (install clang, lld and llvm)"
 done
@@ -73,9 +75,14 @@ done
 cd "$(dirname "$0")/../rust"
 
 target=x86_64-pc-windows-msvc
+# the 32-bit injector and shim, for 32-bit (WOW64) programs: built for i686
+# and installed under these names (vfs_proton::artifacts, aether.director.natives)
+target32=i686-pc-windows-msvc
 ARTIFACTS=(
   vfs-injector.exe
   vfs_shim_dll.dll
+  vfs-injector32.exe
+  vfs_shim_dll32.dll
   vfs-fixture-read.exe
   vfs-fixture-steam.exe
   vfs-fixture-nvapi.exe
@@ -83,6 +90,8 @@ ARTIFACTS=(
 )
 
 export XWIN_ACCEPT_LICENSE=1
+# the CRT and SDK libraries of both architectures (the 32-bit injector and shim link x86)
+export XWIN_ARCH=x86,x86_64
 
 # `libudis86-sys` (reached through `retour`, i.e. the shim) calls `memset`
 # without including string.h and papers over it with the GCC-only flag
@@ -97,17 +106,28 @@ export XWIN_ACCEPT_LICENSE=1
 # name is deliberate: cargo-xwin sets the underscored
 # `CFLAGS_x86_64_pc_windows_msvc` itself, and cc-rs reads both.
 # Bash cannot export a hyphenated name, so it goes in through `env`.
-cross=(env "CFLAGS_x86_64-pc-windows-msvc=-Wno-error=implicit-function-declaration")
+cross=(env "CFLAGS_x86_64-pc-windows-msvc=-Wno-error=implicit-function-declaration"
+  "CFLAGS_i686-pc-windows-msvc=-Wno-error=implicit-function-declaration")
 # `${flags[@]+…}`: macOS's bash 3.2 calls an empty array unbound under `set -u`.
 "${cross[@]}" cargo xwin build ${flags[@]+"${flags[@]}"} --target "$target" \
   -p vfs-inject -p vfs-shim-dll -p vfs-fixture-read -p vfs-fixture-steam \
   -p vfs-fixture-nvapi -p vfs-fixture-registry
 
+"${cross[@]}" cargo xwin build ${flags[@]+"${flags[@]}"} --target "$target32" \
+  -p vfs-inject --bin vfs-injector
+"${cross[@]}" cargo xwin build ${flags[@]+"${flags[@]}"} --target "$target32" -p vfs-shim-dll
+
 src="target/$target/$profile"
+src32="target/$target32/$profile"
 dst="target/$profile"
 mkdir -p "$dst"
 for f in "${ARTIFACTS[@]}"; do
-  [[ -f "$src/$f" ]] || die "the build succeeded but did not produce $src/$f"
-  cp -f "$src/$f" "$dst/$f"
+  case "$f" in
+    vfs-injector32.exe) from="$src32/vfs-injector.exe" ;;
+    vfs_shim_dll32.dll) from="$src32/vfs_shim_dll.dll" ;;
+    *) from="$src/$f" ;;
+  esac
+  [[ -f "$from" ]] || die "the build succeeded but did not produce $from"
+  cp -f "$from" "$dst/$f"
   echo "  $dst/$f"
 done

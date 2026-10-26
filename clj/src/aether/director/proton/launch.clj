@@ -36,6 +36,7 @@
       ;; ETXTBSY (error=26). Its Launch's await-exit is finish over the wine
       ;; exit code and the injector-error report, then wineserver -w."
   (:require [aether.director.env :as henv]
+            [aether.director.natives :as natives]
             [aether.director.proton.env :as penv]
             [aether.director.proton.layout :as layout]
             [aether.director.proton.prefix :as prefix]
@@ -252,8 +253,10 @@
                                           :ready-timeout-secs ready-timeout-secs :steam steam :extra-env env}
                                          host)
                   image (assoc henv/launch-image image))
-        [program argv] (command-line {:runtime runtime :injector (layout/join natives "vfs-injector.exe")
-                                      :target target :shim-dll (layout/join natives "vfs_shim_dll.dll")
+        ;; the injector and shim in the image's bitness (a 32-bit game's are the i686 builds)
+        {:keys [injector shim]} (natives/for-image natives (or exe launch-image))
+        [program argv] (command-line {:runtime runtime :injector injector
+                                      :target target :shim-dll shim
                                       :config-file shim-config :ready-file ready :args args})]
     {:program      program
      :argv         argv

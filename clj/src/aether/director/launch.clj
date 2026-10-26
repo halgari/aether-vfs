@@ -31,6 +31,7 @@
                        the pure composition is proton.launch/plan, and every
                        effect not built yet throws {:aether/unimplemented …}"
   (:require [aether.director.env :as env]
+            [aether.director.natives :as natives]
             [aether.director.platform :as platform]
             [aether.director.proton.launch :as plaunch]
             [aether.director.proton.layout :as layout]
@@ -182,11 +183,9 @@
   :dir :env}, :env being launch-env's delta. `host-path` is this process's
   PATH. Throws for a native missing from `natives`."
   [session {:keys [natives exe args] :as opts} host-path]
-  (let [native (fn [n] (let [f (io/file natives n)]
-                         (when-not (.isFile f) (throw (ex-info (str n " not found in " natives) {:file f})))
-                         (canonical f)))]
-    {:argv (vec (concat [(native "vfs-injector.exe") (canonical exe)
-                         (native "vfs_shim_dll.dll")
+  (let [{:keys [injector shim]} (natives/for-image natives exe)]
+    {:argv (vec (concat [(canonical (io/file injector)) (canonical exe)
+                         (canonical (io/file shim))
                          (:shim-config session) (:ready session)]
                         (when (seq args) (cons "--" args))))
      :dir  (:root session)
