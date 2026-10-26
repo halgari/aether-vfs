@@ -29,14 +29,17 @@
 
 (defn for-image
   "{:injector :shim}: the natives in directory `natives` for the image at
-  `image` (64-bit when its bitness can't be told). Throws when they aren't
-  there, naming the one missing and why it's wanted."
+  `image` (64-bit when its bitness can't be told). Throws when a 32-bit
+  image's pair isn't there, naming the one missing and why it's wanted (an
+  install may carry only the x64 pair); a missing x64 pair is the spawn's
+  to report, as before there were two."
   [natives image]
   (let [bits (or (image-bits image) 64)
         files (update-vals (names bits) #(java.io.File. (str natives) ^String %))]
-    (doseq [[_ ^java.io.File f] files]
-      (when-not (.isFile f)
-        (throw (ex-info (str (.getName f) " not found in " natives
-                             (when (= 32 bits) (str ": " image " is a 32-bit program, which needs the 32-bit natives")))
-                        {:file (str f) :bits bits}))))
+    (when (= 32 bits)
+      (doseq [[_ ^java.io.File f] files]
+        (when-not (.isFile f)
+          (throw (ex-info (str (.getName f) " not found in " natives ": " image
+                               " is a 32-bit program, which needs the 32-bit natives")
+                          {:file (str f) :bits bits})))))
     (update-vals files str)))

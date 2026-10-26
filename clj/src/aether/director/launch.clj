@@ -184,6 +184,9 @@
   PATH. Throws for a native missing from `natives`."
   [session {:keys [natives exe args] :as opts} host-path]
   (let [{:keys [injector shim]} (natives/for-image natives exe)]
+    (doseq [f [injector shim]]
+      (when-not (.isFile (io/file f))
+        (throw (ex-info (str (.getName (io/file f)) " not found in " natives) {:file (io/file f)}))))
     {:argv (vec (concat [(canonical (io/file injector)) (canonical exe)
                          (canonical (io/file shim))
                          (:shim-config session) (:ready session)]
