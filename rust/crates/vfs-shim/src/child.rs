@@ -30,8 +30,11 @@ fn failed_event_name(pid: u32) -> Vec<u16> {
 /// killed and its `CreateProcess` call failing (see `hook::process`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ChildInjectError {
-    /// The child is a 32-bit (WOW64) image; the shim and payload are 64-bit.
+    /// The child is a 32-bit (WOW64) image, and this shim is 64-bit.
     Child32Bit,
+    /// The child is a 64-bit image, and this shim is the 32-bit one (in a WOW64 process): it can
+    /// load into its own bitness only.
+    Child64Bit,
     /// This shim's own DLL path is unknown, so there is nothing to inject.
     NoShimDll,
     /// The child exited before it reported ready.
@@ -52,6 +55,7 @@ impl ChildInjectError {
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Child32Bit => "child-32bit",
+            Self::Child64Bit => "child-64bit",
             Self::NoShimDll => "no-shim-dll",
             Self::ChildExited => "child-exited",
             Self::InjectDll => "inject-dll",
@@ -92,8 +96,11 @@ pub(crate) fn inject_child(
     caller_suspended: bool,
 ) -> Result<(), ChildInjectError> {
     let full_shim_dll = full_shim_dll.ok_or(ChildInjectError::NoShimDll)?;
-    if is_32bit(process) {
-        return Err(ChildInjectError::Child32Bit);
+    // this shim loads into a process of its own bitness only
+    match (is_32bit(process), cfg!(target_pointer_width = "32")) {
+        (true, false) => return Err(ChildInjectError::Child32Bit),
+        (false, true) => return Err(ChildInjectError::Child64Bit),
+        _ => {}
     }
     // SAFETY: `process`/`thread` come from our own `CreateProcessInternalW`
     // hook, which forced CREATE_SUSPENDED, so the child has not run and we hold

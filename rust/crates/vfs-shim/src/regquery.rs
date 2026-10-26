@@ -1046,12 +1046,7 @@ pub(crate) unsafe fn query_multiple_value_key(
     // Seeded from the caller's array: the layout fills only the entries it copies.
     let mut seeds: Vec<ValueEntry> = (0..n)
         .map(|i| {
-            let p = slot(i);
-            ValueEntry {
-                data_length: core::ptr::read_unaligned(p.add(8) as *const u32),
-                data_offset: core::ptr::read_unaligned(p.add(12) as *const u32),
-                ty: core::ptr::read_unaligned(p.add(16) as *const u32),
-            }
+            ValueEntry::load(core::slice::from_raw_parts(slot(i), KEY_VALUE_ENTRY_SIZE))
         })
         .collect();
     let blen = core::ptr::read_unaligned(buffer_len);

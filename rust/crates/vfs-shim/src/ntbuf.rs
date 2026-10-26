@@ -226,17 +226,20 @@ impl OwnedOa {
 /// Write `IO_STATUS_BLOCK { Status, Information }` at `iosb`; a NULL `iosb` is a no-op.
 ///
 /// The fields are written unaligned: the hooks take the block as an opaque `*mut c_void`
-/// and a caller's block is not ours to assume aligned.
+/// and a caller's block is not ours to assume aligned. `Status` shares a pointer-sized union,
+/// so `Information` follows at the pointer's size: 8 on x64 (a 16-byte block), 4 in a 32-bit
+/// process (8 bytes). Writing it at 8 there ran 4 bytes past the caller's block, which on its
+/// stack clobbered a saved register (xEdit's `FindFirstFileW` caller).
 ///
 /// # Safety
-/// `iosb` is NULL or points to 16 writable bytes (an `IO_STATUS_BLOCK`).
+/// `iosb` is NULL or points to an `IO_STATUS_BLOCK`: 2 pointers' worth of writable bytes.
 pub(crate) unsafe fn iosb_set(iosb: *mut c_void, status: NTSTATUS, info: usize) {
     if iosb.is_null() {
         return;
     }
     let p = iosb as *mut u8;
     core::ptr::write_unaligned(p as *mut u32, status as u32);
-    core::ptr::write_unaligned(p.add(8) as *mut usize, info);
+    core::ptr::write_unaligned(p.add(core::mem::size_of::<usize>()) as *mut usize, info);
 }
 
 /// The `ByteOffset` argument of `NtReadFile`/`NtWriteFile`: `Some` for an explicit offset,
@@ -459,13 +462,13 @@ mod tests {
 
     #[test]
     fn iosb_set_writes_status_and_information() {
+        let ptr = core::mem::size_of::<usize>();
         let mut block = [0xAAu8; 24];
         unsafe { iosb_set(block.as_mut_ptr().cast(), -1073741823, 0x1234) };
         assert_eq!(&block[0..4], &(-1073741823i32).to_ne_bytes());
-        assert_eq!(&block[8..16], &0x1234usize.to_ne_bytes());
-        // Bytes outside the block are untouched.
-        assert_eq!(&block[4..8], &[0xAA; 4]);
-        assert_eq!(&block[16..], &[0xAA; 8]);
-        unsafe { iosb_set(core::ptr::null_mut(), 0, 0) };
+        assert_eq!(&block[ptr..2 * ptr], &0x1234usize.to_ne_bytes());
+        // Status's union padding, and every byte past the block, are untouched.
+        assert!(block[4..ptr].iter().all(|&b| b == 0xAA));
+        assert!(block[2 * ptr..].iter().all(|&b| b == 0xAA), "nothing past the block");
     }
 }

@@ -3,10 +3,13 @@
 //! `IO_STATUS_BLOCK` write); everything that is arithmetic on bytes lives here.
 #![forbid(unsafe_code)]
 
-// `objname` writes a native-width pointer and `rename` reads a `usize` from 8 bytes; both
-// assume the 64-bit NT layouts. Fail the build rather than misread on a 32-bit target.
-#[cfg(not(target_pointer_width = "64"))]
-compile_error!("vfs-ntlayout encodes the 64-bit NT layouts and needs a 64-bit target");
+// `objname` and `rename` are the layouts with a pointer in them: each takes the pointer width
+// (`*_for(…, ptr)`), the plain names using the target's, so both widths are tested on any host.
+#[cfg(not(any(target_pointer_width = "64", target_pointer_width = "32")))]
+compile_error!("vfs-ntlayout encodes the 32- and 64-bit NT layouts only");
+
+/// The target's pointer width in bytes: 8, or 4 in a 32-bit (WOW64) process.
+pub const PTR: usize = core::mem::size_of::<usize>();
 
 mod dirinfo;
 mod disposition;

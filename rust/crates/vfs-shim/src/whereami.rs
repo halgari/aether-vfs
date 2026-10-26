@@ -133,7 +133,8 @@ unsafe fn rename_string(at: usize, map: &dyn Fn(&str) -> Option<String>) {
     // SAFETY: as this function's contract.
     unsafe {
         let len = *(at as *const u16) as usize / 2;
-        let buf = *((at + 8) as *const *const u16);
+        // Buffer follows the two u16 lengths at the pointer's alignment: 8 on x64, 4 on x86
+        let buf = *((at + core::mem::size_of::<usize>()) as *const *const u16);
         if buf.is_null() || len == 0 {
             return;
         }
@@ -148,7 +149,7 @@ unsafe fn rename_string(at: usize, map: &dyn Fn(&str) -> Option<String>) {
         }
         units.push(0);
         let leaked: &'static mut [u16] = Box::leak(units.into_boxed_slice());
-        *((at + 8) as *mut *const u16) = leaked.as_ptr();
+        *((at + core::mem::size_of::<usize>()) as *mut *const u16) = leaked.as_ptr();
         *((at + 2) as *mut u16) = (bytes + 2) as u16;
         *(at as *mut u16) = bytes as u16;
     }

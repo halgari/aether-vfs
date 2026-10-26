@@ -1,6 +1,6 @@
 //! Synthetic handles that store director FUSE file handles.
 
-use crate::handle_tags::SYNTH_FILE_TAG;
+use crate::handle_tags::{is_file_tagged, SYNTH_FILE_SLOT_MASK, SYNTH_FILE_TAG};
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
@@ -39,8 +39,7 @@ static TABLE: Mutex<BTreeMap<usize, FuseOpen>> = Mutex::new(BTreeMap::new());
 static NEXT: Mutex<usize> = Mutex::new(1);
 
 pub(crate) fn is_fuse_synth(handle: isize) -> bool {
-    let h = handle as usize;
-    h & SYNTH_FILE_TAG != 0
+    is_file_tagged(handle as usize)
 }
 
 pub(crate) fn open_fuse(fh: u64, size: u64, is_dir: bool) -> Option<isize> {
@@ -73,7 +72,7 @@ pub(crate) fn open_fuse_at_ex(
     let mut next = NEXT.lock().ok()?;
     let slot = *next;
     *next = next.wrapping_add(1);
-    let handle = (slot & !SYNTH_FILE_TAG) | SYNTH_FILE_TAG;
+    let handle = (slot & SYNTH_FILE_SLOT_MASK) | SYNTH_FILE_TAG;
     let mut g = TABLE.lock().ok()?;
     g.insert(
         handle,

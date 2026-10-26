@@ -8,10 +8,12 @@ use std::os::windows::ffi::OsStrExt;
 use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
-use windows_sys::Win32::System::Diagnostics::Debug::{
-    GetThreadContext, SetThreadContext, WriteProcessMemory, CONTEXT,
-};
+use windows_sys::Win32::System::Diagnostics::Debug::WriteProcessMemory;
+// the primary stack's expansion (x86-64 only)
+#[cfg(not(target_arch = "x86"))]
+use windows_sys::Win32::System::Diagnostics::Debug::{GetThreadContext, SetThreadContext, CONTEXT};
 
+#[cfg(not(target_arch = "x86"))]
 const CONTEXT_FULL: u32 = 0x0010_000B;
 use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
 use windows_sys::Win32::System::Memory::{VirtualAllocEx, MEM_COMMIT, MEM_RESERVE, PAGE_READWRITE};
@@ -68,6 +70,19 @@ fn wide(s: &str) -> Vec<u16> {
 /// 1. reads the live TEB StackBase + current RSP,
 /// 2. copies `[RSP, StackBase)` onto the high end of a new reservation,
 /// 3. adjusts RSP by the same delta, then updates TEB stack fields.
+///
+/// x86-64 only (the x64 TEB offsets and `Rsp`): a 32-bit target keeps its stock
+/// stack, as any target does when this fails, which the caller logs.
+#[cfg(target_arch = "x86")]
+pub unsafe fn expand_primary_stack(
+    _process: HANDLE,
+    _primary: HANDLE,
+    _stack_reserve: usize,
+) -> Result<(), InjectError> {
+    Err(InjectError::ThreadContext)
+}
+
+#[cfg(not(target_arch = "x86"))]
 pub unsafe fn expand_primary_stack(
     process: HANDLE,
     primary: HANDLE,

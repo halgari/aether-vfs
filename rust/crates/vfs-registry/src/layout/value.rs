@@ -145,15 +145,35 @@ pub fn write_multiple_values(
     }
 }
 
-/// sizeof(KEY_VALUE_ENTRY) on x64: ValueName@0 (pointer) DataLength@8 DataOffset@12 Type@16.
-pub const KEY_VALUE_ENTRY_SIZE: usize = 24;
+/// A pointer's size in the process the layouts are for: the shim's own (8, or 4 in a 32-bit
+/// WOW64 process).
+const PTR: usize = core::mem::size_of::<usize>();
+
+/// sizeof(KEY_VALUE_ENTRY): ValueName (a pointer) at 0, then DataLength, DataOffset and Type,
+/// padded to the pointer's alignment: 24 bytes on x64 (the fields at 8, 12, 16), 16 in a 32-bit
+/// process (at 4, 8, 12).
+pub const KEY_VALUE_ENTRY_SIZE: usize = if PTR == 8 { 24 } else { 16 };
 
 impl ValueEntry {
-    /// Write this entry into a caller's x64 KEY_VALUE_ENTRY slot, leaving ValueName unchanged.
+    /// Write this entry into a caller's KEY_VALUE_ENTRY slot, leaving ValueName unchanged.
     pub fn store(&self, slot: &mut [u8]) {
         let mut o = Out(slot);
-        o.u32(8, self.data_length);
-        o.u32(12, self.data_offset);
-        o.u32(16, self.ty);
+        o.u32(PTR, self.data_length);
+        o.u32(PTR + 4, self.data_offset);
+        o.u32(PTR + 8, self.ty);
+    }
+
+    /// The entry a caller's KEY_VALUE_ENTRY slot holds (its ValueName aside); a slot shorter
+    /// than [`KEY_VALUE_ENTRY_SIZE`] reads as zeros where it ends.
+    pub fn load(slot: &[u8]) -> ValueEntry {
+        let rd = |at: usize| {
+            slot.get(at..at + 4)
+                .map_or(0, |b| u32::from_le_bytes(b.try_into().unwrap_or([0; 4])))
+        };
+        ValueEntry {
+            data_length: rd(PTR),
+            data_offset: rd(PTR + 4),
+            ty: rd(PTR + 8),
+        }
     }
 }

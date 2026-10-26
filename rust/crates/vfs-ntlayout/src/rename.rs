@@ -9,17 +9,27 @@ pub struct RenameTarget {
     pub name: String,
 }
 
-/// Parse a `FILE_RENAME_INFORMATION` buffer: `ReplaceIfExists` and padding at 0, `RootDirectory`
-/// at 8, `FileNameLength` (bytes) at 16, `FileName` at 20. `None` for a buffer too short for the
-/// header or for the name it declares.
+/// Parse a `FILE_RENAME_INFORMATION` buffer: `ReplaceIfExists` padded to a pointer at 0,
+/// `RootDirectory` (a handle) after it, then `FileNameLength` (bytes) and `FileName`: at 8, 16
+/// and 20 in a 64-bit process, 4, 8 and 12 in a 32-bit one. `None` for a buffer too short for
+/// the header or for the name it declares.
 pub fn parse_rename_info(b: &[u8]) -> Option<RenameTarget> {
-    if b.len() < 20 {
+    parse_rename_info_for(b, crate::PTR)
+}
+
+/// [`parse_rename_info`] for pointers of `ptr` bytes (8 or 4).
+pub fn parse_rename_info_for(b: &[u8], ptr: usize) -> Option<RenameTarget> {
+    let len_at = 2 * ptr;
+    let name_at = len_at + 4;
+    if b.len() < name_at {
         return None;
     }
-    let root_dir = usize::from_le_bytes(b[8..16].try_into().ok()?);
-    let namelen = u32::from_le_bytes(b[16..20].try_into().ok()?) as usize;
-    let end = 20usize.checked_add(namelen)?;
-    let raw = b.get(20..end)?;
+    let mut handle = [0u8; 8];
+    handle[..ptr].copy_from_slice(b.get(ptr..len_at)?);
+    let root_dir = u64::from_le_bytes(handle) as usize;
+    let namelen = u32::from_le_bytes(b[len_at..name_at].try_into().ok()?) as usize;
+    let end = name_at.checked_add(namelen)?;
+    let raw = b.get(name_at..end)?;
     let units: Vec<u16> = raw
         .as_chunks::<2>()
         .0
@@ -59,6 +69,22 @@ mod tests {
     fn a_relative_target_carries_its_root_directory() {
         let t = parse_rename_info(&rename_info(0x4321, "new.esp")).unwrap();
         assert_eq!((t.root_dir, t.name.as_str()), (0x4321, "new.esp"));
+    }
+
+    /// The same structure as a 32-bit (WOW64) process lays it out: the handle at 4, the
+    /// length at 8, the name at 12.
+    #[test]
+    fn a_32_bit_layout_is_read_at_its_own_offsets() {
+        let units: Vec<u16> = "new.esp".encode_utf16().collect();
+        let mut b = vec![0u8; 12 + units.len() * 2];
+        b[4..8].copy_from_slice(&0x4321u32.to_le_bytes());
+        b[8..12].copy_from_slice(&((units.len() * 2) as u32).to_le_bytes());
+        for (i, u) in units.iter().enumerate() {
+            b[12 + i * 2..14 + i * 2].copy_from_slice(&u.to_le_bytes());
+        }
+        let t = parse_rename_info_for(&b, 4).unwrap();
+        assert_eq!((t.root_dir, t.name.as_str()), (0x4321, "new.esp"));
+        assert_eq!(parse_rename_info_for(&[0u8; 11], 4), None);
     }
 
     #[test]

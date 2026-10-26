@@ -627,8 +627,6 @@ dependencies = [
 [[package]]
 name = "retour"
 version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a9af44d40e2400b44d491bfaf8eae111b09f23ac4de6e92728e79d93e699c527"
 dependencies = [
  "cfg-if",
  "generic-array",

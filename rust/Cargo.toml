@@ -126,3 +126,8 @@ panic = "unwind"
 # Line tables only: Wine crash reports and core dumps symbolise, with no change
 # to the generated code.
 debug = "line-tables-only"
+
+[patch.crates-io]
+# retour 0.3.1 (the latest release) with its "win64" hooks limited to x86-64,
+# so the shim builds for i686: see vendor/retour/src/macros.rs.
+retour = { path = "vendor/retour" }

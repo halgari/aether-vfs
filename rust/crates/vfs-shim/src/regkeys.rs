@@ -1700,7 +1700,7 @@ pub(crate) unsafe fn serves_target(real: &Real, oa: *const ObjectAttributes) -> 
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::handle_tags::{SYNTH_FILE_TAG, SYNTH_SECTION_TAG};
+    use crate::handle_tags::SYNTH_SECTION_TAG;
 
     unsafe extern "system" fn name_query_fails(
         _: HANDLE,
@@ -1807,9 +1807,8 @@ pub(crate) mod tests {
             0,
             "would read as a synthetic section"
         );
-        assert_eq!(
-            h as usize & SYNTH_FILE_TAG,
-            0,
+        assert!(
+            !crate::handle_tags::is_file_tagged(h as usize),
             "would read as a synthetic file"
         );
         assert!(!is_synthetic(-1), "a pseudo-handle is not a key handle");

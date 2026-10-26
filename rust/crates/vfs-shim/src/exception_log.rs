@@ -27,8 +27,11 @@ use windows_sys::Win32::Storage::FileSystem::{
     FILE_SHARE_WRITE, OPEN_ALWAYS,
 };
 use windows_sys::Win32::System::Diagnostics::Debug::{
-    AddVectoredExceptionHandler, RtlLookupFunctionEntry, RtlVirtualUnwind, CONTEXT,
-    EXCEPTION_POINTERS, UNW_FLAG_NHANDLER,
+    AddVectoredExceptionHandler, CONTEXT, EXCEPTION_POINTERS,
+};
+#[cfg(target_arch = "x86_64")]
+use windows_sys::Win32::System::Diagnostics::Debug::{
+    RtlLookupFunctionEntry, RtlVirtualUnwind, UNW_FLAG_NHANDLER,
 };
 use windows_sys::Win32::System::LibraryLoader::{
     GetModuleFileNameW, GetModuleHandleExW, GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
@@ -178,15 +181,39 @@ unsafe fn record(info: *mut EXCEPTION_POINTERS) {
         let _ = write!(out, " ({what} 0x{:x})", rec.ExceptionInformation[1]);
     }
     let _ = out.write_str("\n");
-    // The faulting stack, unwound from the exception's context.
-    let mut ctx: CONTEXT = *(*info).ContextRecord;
+    write_stack(&mut out, *(*info).ContextRecord);
+    let mut written = 0u32;
+    // The shim's own write: never through its hooks.
+    let _io = crate::hook::ShimIoGuard::enter();
+    WriteFile(
+        h as *mut c_void,
+        out.bytes.as_ptr(),
+        out.len as u32,
+        &mut written,
+        core::ptr::null_mut(),
+    );
+}
+
+/// A 32-bit process: x86 has no unwind tables to walk, and guessing frames from
+/// EBP inside an exception handler could fault again, so the faulting
+/// instruction alone.
+#[cfg(target_arch = "x86")]
+unsafe fn write_stack(out: &mut Buf, ctx: CONTEXT) {
+    let _ = out.write_str("    ");
+    describe(out, u64::from(ctx.Eip));
+    let _ = out.write_str("\n    (the stack isn't unwound in a 32-bit process)\n");
+}
+
+/// The faulting stack, unwound from the exception's context with the x64 unwind tables.
+#[cfg(target_arch = "x86_64")]
+unsafe fn write_stack(out: &mut Buf, mut ctx: CONTEXT) {
     for _ in 0..MAX_FRAMES {
         let pc = ctx.Rip;
         if pc == 0 {
             break;
         }
         let _ = out.write_str("    ");
-        describe(&mut out, pc);
+        describe(out, pc);
         let _ = out.write_str("\n");
         let mut image_base = 0u64;
         let entry = RtlLookupFunctionEntry(pc, &mut image_base, core::ptr::null_mut());
@@ -212,14 +239,4 @@ unsafe fn record(info: *mut EXCEPTION_POINTERS) {
             );
         }
     }
-    let mut written = 0u32;
-    // The shim's own write: never through its hooks.
-    let _io = crate::hook::ShimIoGuard::enter();
-    WriteFile(
-        h as *mut c_void,
-        out.bytes.as_ptr(),
-        out.len as u32,
-        &mut written,
-        core::ptr::null_mut(),
-    );
 }
