@@ -172,6 +172,7 @@
             "STEAM_COMPAT_CLIENT_INSTALL_PATH" "/home/me/.local/share/Steam"
             "WINEDLLOVERRIDES" "mscoree=d;mshtml=d;steam.exe=b"
             "WINEDEBUG" "+loaddll"
+            "WINEARCH" "wow64"
             "VFS_LAUNCH_IMAGE" "C:\\vfs-session\\stage\\SkyrimSE.exe"}
            (dissoc e "LD_LIBRARY_PATH" "WINEDLLPATH" "ORIG_LD_LIBRARY_PATH")))
     (is (str/starts-with? (e "LD_LIBRARY_PATH") "/data/aev/runtimes/GE-Proton11-6-x86_64/files/lib/"))

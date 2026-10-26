@@ -50,6 +50,16 @@
 
 (def default-winedebug "WINEDEBUG unless the host sets its own (env.rs:15)." "-all")
 
+(def wine-arch
+  "WINEARCH every launch carries: Wine's WoW64 mode, which runs a 32-bit
+  program's code on the runtime's 64-bit Unix side. Without it a 32-bit
+  program (Oblivion, xEdit) runs on 32-bit Wine over the host's own i386
+  libraries, which Steam's runtime container would replace and a direct
+  launch can't: they may be missing (a Flatpak has none) or broken (Oblivion
+  draws no menu over Mesa's i386 Vulkan driver), where WoW64 needs none.
+  64-bit programs run the same either way."
+  "wow64")
+
 (def proton-graphics-overrides
   "What Proton itself sets to run a game on DXVK and vkd3d-proton, for a host
   launching in a Proton-made prefix that wants the same: a direct `wine` run
@@ -141,7 +151,7 @@
     stock UMU-Proton; runtime-lib-env, with extra-env's LD_LIBRARY_PATH and
     WINEDLLPATH after the runtime's dirs and in front of the host's;
     WINEDLLOVERRIDES (base-dll-overrides [+ steam.exe=b], merged per DLL with
-    extra-env's) and WINEDEBUG.
+    extra-env's), WINEDEBUG, and WINEARCH (wine-arch).
   - The shim's VFS_RING_PATH (C: form), VFS_RING_BYTES, VFS_RING_PAYLOAD_CAP,
     VFS_ARENA_OFFSET, VFS_ARENA_LEN, VFS_VIRTUAL_DIR, VFS_VIRTUAL_ROOTS (when
     there are roots) and VFS_REGISTRY=1 (with a registry). Deliberately never
@@ -174,6 +184,7 @@
                       "PROTONPATH"           rt
                       "WINEDLLOVERRIDES"     overrides
                       "WINEDEBUG"            default-winedebug
+                      "WINEARCH"             wine-arch
                       henv/ring-path         (str ring-path)
                       henv/ring-bytes        (str ring-bytes)
                       henv/ring-payload-cap  (str payload-cap)

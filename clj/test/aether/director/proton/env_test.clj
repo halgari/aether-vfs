@@ -108,6 +108,7 @@
     (is (= "/ge/probe-prefix" (e "WINEPREFIX")))
     (is (= "mscoree=d;mshtml=d" (e "WINEDLLOVERRIDES")))
     (is (= "-all" (e "WINEDEBUG")))
+    (is (= "wow64" (e "WINEARCH")) "32-bit programs run in WoW64 mode, on no host i386 libraries")
     (is (not (contains? e "VFS_INJECT_CWD")))
     (is (not (contains? e "VFS_READY_TIMEOUT_SECS")))))
 

@@ -85,36 +85,31 @@ pub(crate) unsafe fn rename_image() {
     // SAFETY: as this function's contract; every pointer is checked for null
     // and read from structures the loader keeps for the process's lifetime.
     unsafe {
-        let teb: usize;
-        core::arch::asm!("mov {}, gs:[0x30]", out(reg) teb, options(nostack, preserves_flags));
-        if teb == 0 {
-            return;
-        }
-        let peb = *((teb + 0x60) as *const usize);
+        use crate::peb::{ENTRY_FULL_DLL_NAME, LDR_IN_LOAD_ORDER, PEB_LDR, PP_IMAGE_PATH_NAME};
+        let peb = crate::peb::peb();
         if peb == 0 {
             return;
         }
-        // ProcessParameters.ImagePathName (x64: params + 0x60).
-        let params = *((peb + 0x20) as *const usize);
+        // ProcessParameters.ImagePathName.
+        let params = crate::peb::process_parameters();
         if params != 0 {
-            rename_string(params + 0x60, &map);
+            rename_string(params + PP_IMAGE_PATH_NAME, &map);
         }
-        // The executable's loader entry: first in InLoadOrderModuleList
-        // (PEB.Ldr @ 0x18, PEB_LDR_DATA.InLoadOrderModuleList @ 0x10);
-        // LDR_DATA_TABLE_ENTRY.FullDllName @ 0x48.
+        // The executable's loader entry: first in PEB.Ldr's InLoadOrderModuleList;
+        // LDR_DATA_TABLE_ENTRY.FullDllName.
         // Every loader entry mapped from a backing directory, not only the executable's: the
         // static imports staged beside it (a plugin preloader among them) are loaded from the
         // backing directory too, and one that builds paths from its own module name would
         // otherwise load what SKSE loads by the location under a second spelling — a second
         // copy of the same DLL. The list is walked from its head; `map` leaves every other
         // entry (system DLLs, the shim) as it is.
-        let ldr = *((peb + 0x18) as *const usize);
+        let ldr = *((peb + PEB_LDR) as *const usize);
         if ldr != 0 {
-            let head = ldr + 0x10;
+            let head = ldr + LDR_IN_LOAD_ORDER;
             let mut entry = *(head as *const usize);
             let mut seen = 0;
             while entry != 0 && entry != head && seen < 4096 {
-                rename_string(entry + 0x48, &map);
+                rename_string(entry + ENTRY_FULL_DLL_NAME, &map);
                 entry = *(entry as *const usize);
                 seen += 1;
             }

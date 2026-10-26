@@ -14,6 +14,11 @@ pub const BASE_DLL_OVERRIDES: &str = "mscoree=d;mshtml=d";
 /// `WINEDEBUG` unless the host sets its own.
 pub const DEFAULT_WINEDEBUG: &str = "-all";
 
+/// `WINEARCH` every launch carries: Wine's WoW64 mode, so a 32-bit program runs on the
+/// runtime's 64-bit Unix side instead of 32-bit Wine over the host's own i386 libraries,
+/// which may be missing or broken (Oblivion draws no menu over Mesa's i386 Vulkan driver).
+pub const WINE_ARCH: &str = "wow64";
+
 /// The environment for a launch: Wine's own three, plus exactly the `VFS_*`
 /// names the shim's `try_init_from_env` consults in file-backed mode.
 ///
@@ -93,6 +98,7 @@ pub fn launch_env(l: &WineLaunch) -> BTreeMap<String, String> {
     }
     env.insert("WINEDLLOVERRIDES".to_string(), base_overrides.clone());
     env.insert("WINEDEBUG".to_string(), DEFAULT_WINEDEBUG.to_string());
+    env.insert("WINEARCH".to_string(), WINE_ARCH.to_string());
 
     env.insert(vfs_env::RING_PATH.to_string(), path_string(&l.ring_path));
     env.insert(vfs_env::RING_BYTES.to_string(), l.ring_bytes.to_string());
@@ -421,6 +427,7 @@ mod tests {
             Some("mscoree=d;mshtml=d"),
         );
         assert_eq!(env.get("WINEDEBUG").map(String::as_str), Some("-all"));
+        assert_eq!(env.get("WINEARCH").map(String::as_str), Some("wow64"));
         assert!(!env.contains_key(vfs_env::INJECT_CWD));
         assert!(!env.contains_key(vfs_env::READY_TIMEOUT_SECS));
     }

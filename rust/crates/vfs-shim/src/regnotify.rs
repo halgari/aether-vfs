@@ -317,34 +317,31 @@ unsafe fn duplicate(real: &Real, h: isize, access: u32, options: u32) -> Result<
 /// could never end if the notifier has to be started: a new thread cannot run until the lock is
 /// released.
 fn holds_loader_lock() -> bool {
-    #[cfg(target_arch = "x86_64")]
-    {
-        type Locked = unsafe extern "system" fn(*mut c_void) -> u32;
-        static F: OnceLock<Option<Locked>> = OnceLock::new();
-        let f = F.get_or_init(|| {
-            use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
-            // SAFETY: an ntdll export cast to its documented signature.
-            unsafe {
-                let ntdll = GetModuleHandleA(c"ntdll.dll".as_ptr().cast());
-                GetProcAddress(ntdll, c"RtlIsCriticalSectionLockedByThread".as_ptr().cast()).map(
-                    |p| core::mem::transmute::<unsafe extern "system" fn() -> isize, Locked>(p),
-                )
-            }
-        });
-        let Some(f) = f else {
-            return false;
-        };
-        // SAFETY: x64 `gs:[0x60]` is the PEB, whose `LoaderLock` (offset 0x110) is the loader's
-        // critical section; both are valid for the life of the process.
+    type Locked = unsafe extern "system" fn(*mut c_void) -> u32;
+    static F: OnceLock<Option<Locked>> = OnceLock::new();
+    let f = F.get_or_init(|| {
+        use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
+        // SAFETY: an ntdll export cast to its documented signature.
         unsafe {
-            let peb: *const u8;
-            core::arch::asm!("mov {}, gs:[0x60]", out(reg) peb, options(nostack, readonly));
-            let lock = *(peb.add(0x110) as *const *mut c_void);
-            !lock.is_null() && f(lock) != 0
+            let ntdll = GetModuleHandleA(c"ntdll.dll".as_ptr().cast());
+            GetProcAddress(ntdll, c"RtlIsCriticalSectionLockedByThread".as_ptr().cast()).map(
+                |p| core::mem::transmute::<unsafe extern "system" fn() -> isize, Locked>(p),
+            )
         }
+    });
+    let Some(f) = f else {
+        return false;
+    };
+    let peb = crate::peb::peb();
+    if peb == 0 {
+        return false;
     }
-    #[cfg(not(target_arch = "x86_64"))]
-    false
+    // SAFETY: the PEB's `LoaderLock` is the loader's critical section; both are valid for the
+    // life of the process.
+    unsafe {
+        let lock = *((peb + crate::peb::PEB_LOADER_LOCK) as *const *mut c_void);
+        !lock.is_null() && f(lock) != 0
+    }
 }
 
 /// A synchronous notification: block until the waiter completes, and answer its status.

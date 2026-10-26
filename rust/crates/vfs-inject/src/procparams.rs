@@ -16,6 +16,10 @@
 //! from it while it maps the static imports, which happens before any hook
 //! exists and so must find real files. The shim renames it once the loader
 //! is done (see the shim's bootstrap).
+//!
+//! The target has the injector's own bitness (the 32-bit injector starts
+//! 32-bit programs), so its structures are laid out at this build's pointer
+//! width.
 
 use core::ffi::c_void;
 use std::mem::size_of;
@@ -25,12 +29,18 @@ use windows_sys::Win32::System::Diagnostics::Debug::{ReadProcessMemory, WritePro
 use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
 use windows_sys::Win32::System::Memory::{VirtualQueryEx, MEMORY_BASIC_INFORMATION};
 
-/// `PEB.ProcessParameters` (x64).
-const PEB_PROCESS_PARAMETERS: usize = 0x20;
-/// `RTL_USER_PROCESS_PARAMETERS` fields (x64).
+/// `PEB.ProcessParameters`: after four bytes and three pointers.
+const PEB_PROCESS_PARAMETERS: usize = 4 * size_of::<usize>();
+/// `RTL_USER_PROCESS_PARAMETERS` fields.
 const PP_FLAGS: usize = 0x08;
+#[cfg(target_arch = "x86_64")]
 const PP_CURDIR_DOS_PATH: usize = 0x38;
+#[cfg(target_arch = "x86")]
+const PP_CURDIR_DOS_PATH: usize = 0x24;
+#[cfg(target_arch = "x86_64")]
 const PP_COMMAND_LINE: usize = 0x70;
+#[cfg(target_arch = "x86")]
+const PP_COMMAND_LINE: usize = 0x40;
 /// `RTL_USER_PROC_PARAMS_NORMALIZED`: the string buffers hold addresses, not
 /// offsets from the block.
 const PARAMS_NORMALIZED: u32 = 1;
@@ -39,14 +49,13 @@ const PARAMS_NORMALIZED: u32 = 1;
 /// against `MaximumLength`.
 const CURDIR_BUFFER_BYTES: usize = 260 * 2;
 
-/// `UNICODE_STRING` (x64).
+/// `UNICODE_STRING`.
 #[repr(C)]
 #[derive(Default)]
 struct RemoteUnicodeString {
     length: u16,
     maximum_length: u16,
-    _pad: u32,
-    buffer: u64,
+    buffer: usize,
 }
 
 /// `PROCESS_BASIC_INFORMATION`.
@@ -54,13 +63,11 @@ struct RemoteUnicodeString {
 #[derive(Default)]
 struct BasicInformation {
     exit_status: i32,
-    _pad: u32,
-    peb_base_address: u64,
-    affinity_mask: u64,
+    peb_base_address: usize,
+    affinity_mask: usize,
     base_priority: i32,
-    _pad2: u32,
-    unique_process_id: u64,
-    inherited_from_unique_process_id: u64,
+    unique_process_id: usize,
+    inherited_from_unique_process_id: usize,
 }
 
 type NtQueryInformationProcessFn =
@@ -139,18 +146,18 @@ pub(crate) unsafe fn peb_base(process: HANDLE) -> Result<u64, String> {
     if st < 0 || info.peb_base_address == 0 {
         return Err(format!("NtQueryInformationProcess: {st:#x}"));
     }
-    Ok(info.peb_base_address)
+    Ok(info.peb_base_address as u64)
 }
 
 /// The address of `process`'s `RTL_USER_PROCESS_PARAMETERS`.
 #[allow(unsafe_code)]
 unsafe fn process_parameters(process: HANDLE) -> Result<usize, String> {
     let peb = peb_base(process)? as usize;
-    let params: u64 = read(process, peb + PEB_PROCESS_PARAMETERS)?;
+    let params: usize = read(process, peb + PEB_PROCESS_PARAMETERS)?;
     if params == 0 {
         return Err("the target has no process parameters yet".into());
     }
-    Ok(params as usize)
+    Ok(params)
 }
 
 /// Make the `UNICODE_STRING` at `at` (a field of the parameter block at
@@ -177,7 +184,7 @@ unsafe fn put_string(
     text.push(0);
     let old: RemoteUnicodeString = read(process, at)?;
     if old.buffer != 0 && old.maximum_length as usize >= capacity {
-        write_bytes(process, old.buffer as usize, text.as_ptr().cast(), need)?;
+        write_bytes(process, old.buffer, text.as_ptr().cast(), need)?;
         let len = (units.len() * 2) as u16;
         return write_bytes(process, at, (&len as *const u16).cast(), 2);
     }
@@ -206,10 +213,9 @@ unsafe fn put_string(
     let s = RemoteUnicodeString {
         length: (units.len() * 2) as u16,
         maximum_length: capacity as u16,
-        _pad: 0,
-        buffer: place as u64,
+        buffer: place,
     };
-    // Only the first 16 bytes: a `CURDIR`'s handle follows the string.
+    // Only the string itself: a `CURDIR`'s handle follows it.
     write_bytes(
         process,
         at,

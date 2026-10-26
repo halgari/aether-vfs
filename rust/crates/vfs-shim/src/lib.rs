@@ -19,6 +19,8 @@ mod lazy_section;
 pub mod loadlog;
 mod ntbuf;
 mod ntdef;
+#[allow(unsafe_code)]
+mod peb;
 mod read_cache;
 /// The registry hooks' client for the director's registry overlay.
 pub mod regclient;
